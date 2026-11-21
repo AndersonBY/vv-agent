@@ -39,7 +39,13 @@ from vv_agent.session.children import ChildSession, child_delivery, child_handle
 from vv_agent.session.context import project_context
 from vv_agent.session.events import SessionRunEventStore
 from vv_agent.session.kernel import drive
-from vv_agent.session.projection import hydrate_record_payload, hydrate_records, hydration_for_session_store, project_records
+from vv_agent.session.projection import (
+    fold_hydrated_records,
+    hydrate_record_payload,
+    hydrate_records,
+    hydration_for_session_store,
+    project_records,
+)
 from vv_agent.session.providers import Accepted, Unknown
 from vv_agent.session.records import (
     APP_SERVER_ATTRIBUTES,
@@ -58,7 +64,7 @@ from vv_agent.session.records import (
     SessionSpec,
     make_record,
 )
-from vv_agent.session.reducer import TransitionError, fold
+from vv_agent.session.reducer import Fold, TransitionError, fold
 from vv_agent.session.result import project_result
 from vv_agent.session.runtime import Runtime, static_session_requirements, static_worker_supports
 from vv_agent.session.sqlite import SQLiteStore
@@ -767,6 +773,42 @@ class Fixtures:
         self.kernel.control("controls", "archive", "archive", runtime=rt)
         self.kernel.control("seed", "close", "close", runtime=self.runtimes["seed"])
 
+    def approval_answer_optionals(self):
+        sid = "approval_optional"
+        self.admit(
+            sid,
+            [LLMResponse("", [ToolCall("approval-call", "approved", {})]), LLMResponse("done")],
+            agent=Agent("fixture", "Be precise.", tools=[approved]),
+            config=RunConfig(hooks=[Hooks()], approval_provider=PendingApproval(), approval_timeout_seconds=1),
+        )
+        self.run(sid)
+        wait = self.kernel.waits(sid, self.runtimes[sid])[0][2]
+        state, _, _ = self.kernel.store.read_state(sid)
+        # Exercise nullable policy audit keys through the legal inbox wire.
+        self.push(
+            sid,
+            InboxItem(
+                "answer",
+                "approval_answer",
+                {
+                    "operation_id": wait["operation_id"],
+                    "attempt": wait["attempt"],
+                    "request_id": wait["request_id"],
+                    "request_digest": wait["request_digest"],
+                    "scope": wait["scope"],
+                    "decision": "allow_session",
+                    "policy_digest": None,
+                    "rule_id": None,
+                    "expires_ms": None,
+                },
+                wait["turn_id"],
+                state.turns[wait["turn_id"]].start._payload["generation"],
+            ),
+        )
+        self.run(sid)
+        assert self.state(sid).applied_inputs["answer"].payload["disposition"] == "applied"
+        assert self.state(sid).active_turn_id is None
+
     def produce(self):
         self.yieldable_wait()
         self.yieldable_provider_recovery()
@@ -855,7 +897,6 @@ class Fixtures:
                 self.kernel.approve(sid, self.runtimes[sid], wait["request_id"], decision, "answer")
             self.run(sid)
             assert self.state(sid).active_turn_id is None
-
         for sid, unknown in (("accepted", False), ("unknown", True)):
             provider = Provider(unknown=unknown)
             self.admit(
@@ -1795,6 +1836,7 @@ class Fixtures:
         request(39, "initialize", {"clientInfo": {"name": "observer-again"}})
         request(None, "initialized")
         assert request(40, "thread/resume", {"threadId": sid, "subscribe": True})["result"]["thread"]["status"] == "approval_wait"
+        server.run_adapter.join()
         drain()
         self.clock = deadline
         server.run_adapter.recover("observer", sid)
@@ -2183,7 +2225,7 @@ def valid_vectors(streams, inbox):
     return vectors
 
 
-def coverage(vectors, semantics):
+def coverage(vectors, semantics, logical_records):
     records = [v["wire"] for v in vectors if v["type"] == "record"]
     incoming = [v["wire"] for v in vectors if v["type"] == "inbox"]
     kinds = Counter(r["kind"] for r in records)
@@ -2194,10 +2236,33 @@ def coverage(vectors, semantics):
     assert set(inbox_kinds) == set(INPUT_PAYLOADS), set(INPUT_PAYLOADS) - set(inbox_kinds)
     assert set(stages) == set(BOUNDARY_DATA), set(BOUNDARY_DATA) - set(stages)
     assert set(handles) == {"provider", "approval", "user", "child"}
+    raw_by_key = {(r["session_id"], r["record_id"]): r for r in records}
+    logical_by_key = {(r["session_id"], r["record_id"]): r for r in logical_records}
+    assert len(raw_by_key) == len(records)
+    assert len(logical_by_key) == len(logical_records)
+    assert set(logical_by_key) == set(raw_by_key), "hydrated records must cover raw vectors"
+
+    content_backed_payload_fields = {
+        ("input_applied", "model_binding"),
+        ("op_parked", "delegation"),
+        ("op_parked", "interaction_result"),
+        ("op_completed", "usage_counts"),
+    }
+
+    def has_logical_optional(record, field):
+        payload = record["payload"]
+        if record["kind"] == "op_completed" and field == "usage_counts":
+            return field in payload or isinstance(payload.get("usage"), dict)
+        return field in payload
+
     optional = {}
     for kind, schema in PAYLOADS.items():
         for field in set(schema["properties"]) - set(schema["required"]):
-            optional[kind + "." + field] = sum(field in r["payload"] for r in records if r["kind"] == kind)
+            use_logical = (kind, field) in content_backed_payload_fields
+            source = logical_by_key.values() if use_logical else records
+            optional[kind + "." + field] = sum(
+                has_logical_optional(r, field) if use_logical else field in r["payload"] for r in source if r["kind"] == kind
+            )
     for kind, schema in INPUT_PAYLOADS.items():
         for field in set(schema["properties"]) - set(schema["required"]):
             optional["inbox." + kind + "." + field] = sum(field in r["payload"] for r in incoming if r["kind"] == kind)
@@ -2205,17 +2270,21 @@ def coverage(vectors, semantics):
         for field in set(schema["properties"]) - set(schema["required"]):
             optional["boundary." + stage + "." + field] = sum(
                 field in r["payload"]["data"]
-                for r in records
+                for r in logical_by_key.values()
                 if r["kind"] == "boundary_recorded" and r["payload"]["stage"] == stage
             )
     optional["handle.child.siblings"] = sum("siblings" in r["payload"]["handle"] for r in records if r["kind"] == "op_parked")
     for key in TASK_SESSION_METADATA["properties"]:
         optional["task.metadata.vv_session." + key] = sum(
             key in r["payload"]["definition"]["task"].get("metadata", {}).get("vv_session", {})
-            for r in records
+            for r in logical_by_key.values()
             if r["kind"] == "turn_started"
         )
-    metadata = [r["payload"]["request"].get("metadata", {}).get("vv_session", {}) for r in records if r["kind"] == "op_planned"]
+    metadata = [
+        r["payload"]["request"].get("metadata", {}).get("vv_session", {})
+        for r in logical_by_key.values()
+        if r["kind"] == "op_planned"
+    ]
     metadata += [case["metadata"]["vv_session"] for case in semantics if case["case"] == "dispatch_request"]
     for key in REQUEST_SESSION_METADATA["properties"]:
         optional["request.metadata.vv_session." + key] = sum(key in m for m in metadata)
@@ -2409,6 +2478,12 @@ def write_json(output, name, value):
     (output / name).write_text(json.dumps(value, ensure_ascii=True, sort_keys=True, indent=2) + "\n")
 
 
+def _hydrated_prefix_projection(stored, hydration):
+    hydrated_prefix = hydrate_records(stored, hydration)
+    state = fold_hydrated_records(hydrated_prefix, stored, Fold, hydration)
+    return state, [message.to_dict() for message in project_context(hydrated_prefix, state)]
+
+
 def generate(output: Path):
     output.mkdir(parents=True, exist_ok=True)
     with ExitStack() as stack:
@@ -2429,6 +2504,7 @@ def generate(output: Path):
             fixtures = Fixtures()
             try:
                 fixtures.produce()
+                fixtures.approval_answer_optionals()
                 app = fixtures.app_server()
                 # Direct store assertions quiesce the shared worker. Run them
                 # after app-server capture because LocalWorker is single-use.
@@ -2444,7 +2520,22 @@ def generate(output: Path):
                 )
                 streams = fixtures.collect()
                 vectors = valid_vectors(streams, fixtures.inbox)
-                inventory = coverage(vectors, fixtures.semantics)
+                logical_records = []
+                for sid, stored in streams:
+                    shallow_nested_record_ids = {
+                        r.record.record_id
+                        for r in stored
+                        if r.record.kind in {"op_planned", "op_prepared", "op_completed", "boundary_recorded"}
+                    }
+                    logical_records.extend(
+                        r.record.to_dict()
+                        for r in hydrate_records(
+                            stored,
+                            hydration_for_session_store(fixtures.kernel.store, sid),
+                            shallow_nested_record_ids=shallow_nested_record_ids,
+                        )
+                    )
+                inventory = coverage(vectors, fixtures.semantics, logical_records)
                 invalid = invalid_vectors(vectors) + fold_negatives(vectors) + fixtures.invalid
                 write_json(output, "session_record.schema.json", wire_schema(RECORD_SCHEMA, PAYLOADS, record=True))
                 write_json(output, "session_inbox.schema.json", wire_schema(INPUT_SCHEMA, INPUT_PAYLOADS))
@@ -2501,8 +2592,7 @@ def generate(output: Path):
                                 next_record.kind in {"context_compacted", "boundary_recorded"}
                                 and next_record.payload["source_digest"] is not None
                             ):
-                                hydrated_prefix = hydrate_records(stored[:through], hydration)
-                                context = [m.to_dict() for m in project_context(hydrated_prefix, state)]
+                                _, context = _hydrated_prefix_projection(stored[:through], hydration)
                                 assert sha256(independent_bytes([context])[0]).hexdigest() == next_record.payload["source_digest"]
                         projections[-1]["prefix_states"].append(
                             {
@@ -2526,7 +2616,14 @@ def generate(output: Path):
                 assert spec is not None and spec.loader is not None
                 curation = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(curation)
-                values, curated_coverage = curation.curate(output, streams, fixtures.semantics, independent_bytes, facts)
+                values, curated_coverage = curation.curate(
+                    output,
+                    streams,
+                    fixtures.semantics,
+                    independent_bytes,
+                    facts,
+                    logical_records,
+                )
                 replacements.validate_replacements({name: values[name] for name in replacements.REPLACE}, independent_bytes)
                 spec = importlib.util.spec_from_file_location(
                     "_session_kernel_checks", Path(__file__).with_name("_session_kernel_checks.py")

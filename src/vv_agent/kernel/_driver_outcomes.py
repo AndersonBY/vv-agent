@@ -11,6 +11,7 @@ from vv_agent.kernel._boundary_hydration import hydrate_input, hydrate_record
 from vv_agent.kernel._budget import BudgetObservation, CoreBudgetEvaluator
 from vv_agent.kernel._budget_values import BudgetExhaustion, BudgetUsageSnapshot, RunBudgetLimits
 from vv_agent.kernel._canonical_json import canonical_json_bytes
+from vv_agent.kernel._content import ContentRef
 from vv_agent.kernel._content_publication import make_record_before_publication
 from vv_agent.kernel._driver import CoreDriver
 from vv_agent.kernel._driver_planning import PlanningRequest
@@ -78,7 +79,6 @@ MODEL_REJECTION_BACKOFF_SECONDS = 2
 
 
 def compaction_intent(self: CoreDriver, plan: Record, result: dict[str, Any]) -> dict[str, Any]:
-    plan = self.hydrate_plan(plan)
     if plan._payload["op_kind"] == "model" or result.get("metadata", {}).get("request_compaction") is not True:
         return result
     source = self.state.operations[plan._payload["dependencies"][0]]
@@ -272,7 +272,7 @@ def completed_steps(
         if yielded_by is not None:
             payload["yielded_by"] = yielded_by
         result = self.record("op_completed", payload, plan)
-        records = [result, *(yield from completion_effects_steps(self, stored_plan, outcome, context))]
+        records = [result, *(yield from completion_effects_steps(self, plan, outcome, context))]
         rejection = outcome.result.get("rejection", {})
         order = plan._payload["request"].get("metadata", {}).get("vv_session", {}).get("endpoint_order", [])
         if (
@@ -309,11 +309,12 @@ def completion_effects_steps(
     self: CoreDriver, plan: Record, outcome: Definitive, context: str
 ) -> Generator[OutcomeRequest, Any, list[Record]]:
     try:
-        plan = self.hydrate_plan(plan)
         assert plan.operation_id is not None and plan.attempt is not None and plan.turn_id is not None
         records = []
         op = self.state.operations[plan.operation_id]
         turn = self.state.turns[plan.turn_id]
+        if context != "normal":
+            return records
         if op.kind == "model" and context == "normal":
             if not op.attempts[plan.attempt].started:
                 return records
@@ -354,19 +355,33 @@ def completion_effects_steps(
                         return records
             if plan._payload["purpose"] != "primary":
                 return records
+            calls = outcome.result.get("tool_calls", [])
+            missing = [
+                (i, call)
+                for i, call in enumerate(calls)
+                if f"{plan.operation_id}/attempt/{plan.attempt}/tool/{i}" not in self.state.operations
+            ]
+            if not missing:
+                return records
+            try:
+                ContentRef.from_dict(plan._payload["request"])
+            except (TypeError, ValueError):
+                pass
+            else:
+                plan = self.hydrate_plan(plan)
+                assert plan.operation_id is not None and plan.attempt is not None
             definition = self.hydrated_definition(turn.start)
-            for i, call in enumerate(outcome.result.get("tool_calls", [])):
+            for i, call in missing:
                 oid = f"{plan.operation_id}/attempt/{plan.attempt}/tool/{i}"
-                if oid not in self.state.operations:
-                    planned = yield from plan_steps(
-                        self,
-                        oid,
-                        call,
-                        "interaction" if call["name"] == "ask_user" else "tool",
-                        dependencies=[plan.operation_id],
-                        capability=definition.capabilities.get(call["name"], {}),
-                    )
-                    records.append(planned)
+                planned = yield from plan_steps(
+                    self,
+                    oid,
+                    call,
+                    "interaction" if call["name"] == "ask_user" else "tool",
+                    dependencies=[plan.operation_id],
+                    capability=definition.capabilities.get(call["name"], {}),
+                )
+                records.append(planned)
         elif op.kind != "model" and context == "normal":
             evaluator = yield from live_budget_steps(self)
             if evaluator is not None:

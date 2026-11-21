@@ -918,7 +918,8 @@ def test_approval_reason_keeps_original_group_after_ptl(store, database, decisio
     rt.config = replace(rt.config, no_tool_policy="continue", max_cycles=3)
     rt.memory_manager = MemoryManager(compact_threshold=100000, keep_recent_messages=1)
     drive(store, "s", runtime=rt)
-    park = records_of(store, "op_parked")[-1]
+    _, raw_records, _ = store.read_state("s")
+    park = next(row.record for row in reversed(raw_records) if row.record.kind == "op_parked")
     state, _, _ = read_fixture_state(store, "s")
     attempt = state.operations[park.operation_id].attempts[park.attempt]
     assert attempt.wait is not None

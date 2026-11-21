@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import replace
 from typing import Any
@@ -41,6 +42,8 @@ from vv_agent.events import (
 from vv_agent.interaction import HostInteractionRequest
 from vv_agent.kernel._boundary_hydration import (
     SessionHydration,
+    _lookup_input_owner,
+    _retain_record_payload,
     hydrate_session_input,
     hydrate_session_input_payload,
     hydrate_session_record_payload,
@@ -90,12 +93,77 @@ hydrate_stored_record = hydrate_session_stored_record
 hydrate_records = hydrate_session_records
 
 
+def _hydrate_projection_stored_record(
+    stored: StoredRecord,
+    hydration: SessionHydration | None,
+) -> StoredRecord:
+    """Hydrate the fields read by event and span projection.
+
+    ``op_planned.request`` and ``op_prepared.request`` are containers whose
+    nested messages are unrelated to event and span projection. Decode those
+    containers without following their message links. All other records retain
+    the existing full hydration contract.
+    """
+
+    record = stored.record
+    retained_body = record.encode()
+    payload = hydrate_session_record_payload(
+        stored,
+        hydration,
+        hydrate_nested=record.kind not in {"op_planned", "op_prepared"},
+    )
+    hydrated = replace(record, payload=payload)
+    _retain_record_payload(hydrated, retained_body, payload)
+    return replace(stored, record=hydrated)
+
+
+@contextmanager
+def projection_records_frame(
+    records: Iterable[StoredRecord],
+    hydration: SessionHydration | None,
+    *,
+    hydrate_kinds: frozenset[str] | None = None,
+) -> Iterator[tuple[StoredRecord, ...]]:
+    """Hydrate one projection batch inside one disposable frame.
+
+    ``hydrate_kinds`` narrows the owners read by specialized projections while
+    preserving the input order and every record needed by event projection.
+    """
+
+    sources = tuple(records)
+    if not sources:
+        yield ()
+        return
+    selected = tuple(stored for stored in sources if hydrate_kinds is None or stored.record.kind in hydrate_kinds)
+    if not selected:
+        yield sources
+        return
+    opener = getattr(getattr(hydration, "reader", None), "_read_frame", None)
+    if not callable(opener):
+        hydrated = {stored.seq: _hydrate_projection_stored_record(stored, hydration) for stored in selected}
+        yield tuple(hydrated.get(stored.seq, stored) for stored in sources)
+        return
+    with opener(
+        record_seqs=(stored.seq for stored in selected),
+        input_ids=(input_id for stored in selected if (input_id := _lookup_input_owner(stored.record)) is not None),
+        validate_each_read=False,
+    ) as reader:
+        framed = replace(hydration, reader=reader, _validated_json_refs=set())
+        hydrated = {stored.seq: _hydrate_projection_stored_record(stored, framed) for stored in selected}
+        yield tuple(hydrated.get(stored.seq, stored) for stored in sources)
+
+
 def project_records(
     records: Iterable[StoredRecord],
     *,
     hydration: SessionHydration | None = None,
 ) -> list[RunEvent]:
     """Pass a prefix including plans; callers filter emitted metadata.session_seq by cursor."""
+    with projection_records_frame(records, hydration) as hydrated_records:
+        return _project_hydrated_records(hydrated_records)
+
+
+def _project_hydrated_records(records: Iterable[StoredRecord]) -> list[RunEvent]:
     plans, events, turns = {}, [], {}
     delegations: dict[tuple[str, int], dict] = {}
     interactions: dict[tuple[str, int], HostInteractionRequest] = {}
@@ -103,7 +171,10 @@ def project_records(
     for stored in records:
         r = stored.record
         key = (r.session_id, stored.seq, r.record_id)
-        p = hydrate_record_payload(stored, hydration)
+        # projection_records_frame has already hydrated every selected record
+        # in one disposable frame.  Re-running the full hydrator without that
+        # frame would reject retained ContentRefs and undo the batch boundary.
+        p = copy_json(r._payload)
         identity_digest = digest([r.session_id, r.record_id])
         common: dict[str, Any] = {
             "run_id": r.turn_id or r.session_id,

@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import json
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
@@ -30,7 +31,7 @@ from ._content_publication import (
     declared_content_ref,
     input_content_slots,
 )
-from ._content_reader import DurableContentReader
+from ._content_reader import DurableContentReader, owner_scope
 from ._execution_values import AgentTask
 from ._hydration import (
     ContentReader,
@@ -132,6 +133,7 @@ class SessionHydration:
         expected_reference_digest: str | None = None,
         record_kind: str | None = None,
         record_payload: dict[str, Any] | None = None,
+        hydrate_nested: bool = True,
     ) -> tuple[Any, Any]:
         hydrator = SessionHydrator(
             self.reader,
@@ -144,7 +146,7 @@ class SessionHydration:
             selected = HydrationSlot(slot)
         except ValueError:
             selected = None
-        nested = _nested_content_slots(record_kind, slot, record_payload)
+        nested = _nested_content_slots(record_kind, slot, record_payload) if hydrate_nested else ()
         if nested:
             value = self._read_exact_json(
                 hydrator,
@@ -268,24 +270,125 @@ class HydratedFoldResult:
 class _ScopedContentFrameReader:
     """Reuse one snapshot while preserving the original safe path on a frame miss."""
 
-    def __init__(self, reader: DurableContentReader, fallback: ContentReader, runtime: Any | None) -> None:
+    def __init__(
+        self,
+        reader: DurableContentReader,
+        fallback: ContentReader,
+        runtime: Any | None,
+        driver: CoreDriver,
+        *,
+        record_seqs: Iterable[int] = (),
+        input_ids: Iterable[str] = (),
+    ) -> None:
         self.reader = reader
         self.fallback = fallback
         self.runtime = runtime
+        self.driver = driver
+        self._values: dict[tuple[str, str, str, str, ContentRef], bytes] = {}
+        self._fingerprints: dict[tuple[str, str, str, str, ContentRef], str] = {}
+        self._record_seqs = frozenset(record_seqs)
+        self._input_ids = frozenset(input_ids)
+
+    def covers(self, *, record_seqs: Iterable[int], input_ids: Iterable[str]) -> bool:
+        return self._record_seqs.issuperset(record_seqs) and self._input_ids.issuperset(input_ids)
+
+    @property
+    def fingerprints(self) -> dict[tuple[str, str, str, str, ContentRef], str]:
+        return dict(self._fingerprints)
 
     @property
     def binding(self) -> tuple[str, str]:
         return self.reader.binding
 
     def read(self, tenant_id: str, session_id: str, owner: str, slot: str, ref: ContentRef) -> bytes:
+        key = (tenant_id, session_id, owner, slot, ref)
+        cached = self._values.get(key)
+        if cached is not None:
+            return cached
+        from_fallback = False
         try:
-            return self.reader.read(tenant_id, session_id, owner, slot, ref)
+            value = self.reader.read(tenant_id, session_id, owner, slot, ref)
         except MissingContentLink:
-            return self.fallback.read(tenant_id, session_id, owner, slot, ref)
+            value = self.fallback.read(tenant_id, session_id, owner, slot, ref)
+            from_fallback = True
         except KeyUnavailable:
             if self.runtime is not None:
                 self.runtime._key_unavailable = True
             raise
+        if from_fallback:
+            return value
+        self._values[key] = value
+        self._fingerprints[key] = self._fingerprint(tenant_id, session_id, owner, slot, ref)
+        return value
+
+    def fingerprint(
+        self,
+        tenant_id: str,
+        session_id: str,
+        owner: str,
+        slot: str,
+        ref: ContentRef,
+    ) -> str:
+        self.assert_link(tenant_id, session_id, owner, slot, ref)
+        return self._fingerprint(tenant_id, session_id, owner, slot, ref)
+
+    def _fingerprint(self, tenant_id: str, session_id: str, owner: str, slot: str, ref: ContentRef) -> str:
+        store = getattr(self.reader, "_store", None)
+        frame = getattr(store, "_frame", store)
+        parsed = getattr(frame, "_parsed_content", {}).get(ref.content_id)
+        row = getattr(frame, "_content", {}).get(ref.content_id)
+        if parsed is None and row is None:
+            fallback = self.fallback
+            if isinstance(fallback, _ScopedContentFrameReader):
+                return fallback.fingerprint(tenant_id, session_id, owner, slot, ref)
+            raise IntegrityFailure("content frame fingerprint is unavailable")
+
+        values: Iterable[Any]
+        if parsed is not None:
+            values = parsed[1:]
+        else:
+            assert row is not None
+            values = row[5:]
+        digest = hashlib.sha256()
+        for value in values:
+            if value is None:
+                digest.update(b"N")
+            elif isinstance(value, bytes):
+                digest.update(b"B" + len(value).to_bytes(8, "big") + value)
+            else:
+                encoded = str(value).encode("utf-8")
+                digest.update(b"V" + len(encoded).to_bytes(8, "big") + encoded)
+        return digest.hexdigest()
+
+    def assert_link(
+        self,
+        tenant_id: str,
+        session_id: str,
+        owner: str,
+        slot: str,
+        ref: ContentRef,
+    ) -> ContentRef:
+        """Validate one owner/slot link without retaining a second plaintext copy."""
+
+        owner_kind, owner_value = owner_scope(owner)
+        try:
+            return self.reader._store.assert_link(
+                tenant_id,
+                session_id,
+                ref,
+                slot,
+                **{owner_kind: owner_value},
+            )
+        except (ContentUnavailable, ContentBindingMismatch) as exc:
+            raise MissingContentLink(f"content owner link is unavailable: {owner}/{slot}") from exc
+        except BackendKeyUnavailable as exc:
+            if self.runtime is not None:
+                self.runtime._key_unavailable = True
+            raise KeyUnavailable("session content key is unavailable") from exc
+        except BackendContentIntegrityError as exc:
+            raise IntegrityFailure("content failed integrity validation") from exc
+        except ContentStoreError as exc:
+            raise HydrationError("content link validation failed") from exc
 
     @contextmanager
     def _read_frame(
@@ -295,7 +398,17 @@ class _ScopedContentFrameReader:
         input_ids: Iterable[str] = (),
         validate_each_read: bool = True,
     ) -> Iterator[_ScopedContentFrameReader]:
-        yield self
+        record_seq_values = tuple(record_seqs)
+        input_id_values = tuple(input_ids)
+        if self.covers(record_seqs=record_seq_values, input_ids=input_id_values):
+            yield self
+            return
+        with _session_content_frame(
+            self.driver,
+            record_seqs=record_seq_values,
+            input_ids=input_id_values,
+        ) as hydration:
+            yield hydration.reader
 
 
 @contextmanager
@@ -308,25 +421,46 @@ def _session_content_frame(
     """Temporarily bind one logical batch to a disposable content frame."""
 
     reader, tenant_id = driver._content_reader_binding()
-    fallback_reader = getattr(reader, "fallback", reader)
-    tracked_reader = getattr(fallback_reader, "reader", None)
-    tracking_runtime = getattr(fallback_reader, "runtime", None) if isinstance(tracked_reader, DurableContentReader) else None
-    durable_reader = tracked_reader if isinstance(tracked_reader, DurableContentReader) else fallback_reader
+    record_seq_values = tuple(record_seqs)
+    input_id_values = tuple(input_ids)
+    if isinstance(reader, _ScopedContentFrameReader) and reader.covers(
+        record_seqs=record_seq_values,
+        input_ids=input_id_values,
+    ):
+        yield SessionHydration(reader, tenant_id=tenant_id, session_id=driver.sid)
+        return
+    fallback_reader = reader if isinstance(reader, _ScopedContentFrameReader) else getattr(reader, "fallback", reader)
+    root_reader = fallback_reader
+    while isinstance(root_reader, _ScopedContentFrameReader):
+        root_reader = root_reader.fallback
+    tracked_reader = getattr(root_reader, "reader", None)
+    tracking_runtime = getattr(root_reader, "runtime", None) if isinstance(tracked_reader, DurableContentReader) else None
+    durable_reader = tracked_reader if isinstance(tracked_reader, DurableContentReader) else root_reader
     if not isinstance(durable_reader, DurableContentReader):
         yield SessionHydration(reader, tenant_id=tenant_id, session_id=driver.sid)
         return
 
     with durable_reader._read_frame(
-        record_seqs=record_seqs,
-        input_ids=input_ids,
+        record_seqs=record_seq_values,
+        input_ids=input_id_values,
         validate_each_read=False,
     ) as frame_reader:
         previous_reader, previous_hydrators = driver.content_reader, driver._hydrators
-        driver_reader = _ScopedContentFrameReader(frame_reader, fallback_reader, tracking_runtime)
+        driver_reader = _ScopedContentFrameReader(
+            frame_reader,
+            fallback_reader,
+            tracking_runtime,
+            driver,
+            record_seqs=record_seq_values,
+            input_ids=input_id_values,
+        )
         driver.content_reader, driver._hydrators = driver_reader, {}
         try:
             yield SessionHydration(driver_reader, tenant_id=tenant_id, session_id=driver.sid)
         finally:
+            fingerprints = getattr(driver, "_logical_frame_fingerprints", None)
+            if isinstance(fingerprints, dict):
+                fingerprints.update(driver_reader.fingerprints)
             driver.content_reader, driver._hydrators = previous_reader, previous_hydrators
 
 
@@ -363,6 +497,62 @@ def hydrate_session_input_payload(
             raise MissingContentLink(f"{owner}/{content_slot.slot} requires a content hydration reader")
         _path_set(payload, content_slot.path, hydration.read(owner, content_slot.slot, ref))
     return payload
+
+
+def validate_logical_content_frame(
+    records: Iterable[StoredRecord],
+    hydration: SessionHydration,
+    *,
+    deep_record_ids: Iterable[str],
+    expected_fingerprints: Mapping[tuple[str, str, str, str, ContentRef], str] | None = None,
+) -> frozenset[str]:
+    """Validate every raw owner link and deeply reopen only active logical content."""
+
+    sources = tuple(records)
+    reader = hydration.reader
+    assert_link = getattr(reader, "assert_link", None)
+    if not callable(assert_link):
+        raise MissingContentLink("logical content frame does not support link-only validation")
+
+    def checked_ref(owner: str, slot: str, value: Any) -> None:
+        if value is _MISSING or value is None:
+            return
+        try:
+            ref = declared_content_ref(value)
+        except ValueError as exc:
+            raise TypedSchemaFailure(f"{owner}/{slot} contains a malformed ContentRef") from exc
+        if ref is None:
+            raise TypedSchemaFailure(f"{owner}/{slot} requires a ContentRef")
+        assert_link(hydration.tenant_id, hydration.session_id, owner, slot, ref)
+
+    for stored in sources:
+        record = stored.record
+        owner = f"record:{stored.seq}"
+        for _path, slot, value in _payload_slots(record.kind, record._payload):
+            checked_ref(owner, slot, value)
+        if record.kind != "input_applied":
+            continue
+        item = InboxItem(**record._payload["input"])
+        input_owner = f"input:{item.input_id}"
+        for content_slot in input_content_slots(item.kind):
+            try:
+                value = _path_get(item.payload, content_slot.path)
+            except (KeyError, IndexError):
+                continue
+            checked_ref(input_owner, content_slot.slot, value)
+
+    fingerprint = getattr(reader, "fingerprint", None)
+    if not callable(fingerprint):
+        raise MissingContentLink("logical content frame does not support content fingerprint validation")
+    for (tenant_id, session_id, owner, slot, ref), expected in (expected_fingerprints or {}).items():
+        actual = fingerprint(tenant_id, session_id, owner, slot, ref)
+        if not hmac.compare_digest(actual, expected):
+            raise IntegrityFailure("content frame changed since logical hydration")
+
+    selected_ids = frozenset(deep_record_ids)
+    selected = tuple(stored for stored in sources if stored.record.record_id in selected_ids)
+    hydrate_session_records(selected, hydration)
+    return selected_ids
 
 
 def hydrate_session_input(
@@ -414,6 +604,7 @@ def hydrate_session_record_payload(
     *,
     include_input: bool = True,
     include_actor_attributes: bool = False,
+    hydrate_nested: bool = True,
     _decoded_values: dict[tuple[str | int, ...], Any] | None = None,
 ) -> dict[str, Any]:
     """Hydrate every declared content slot while preserving the committed envelope."""
@@ -447,6 +638,7 @@ def hydrate_session_record_payload(
             expected_reference_digest=payload.get(expected) if expected is not None else None,
             record_kind=record.kind,
             record_payload=source,
+            hydrate_nested=hydrate_nested,
         )
         if _decoded_values is not None:
             _decoded_values[path] = hydrated_value
@@ -496,6 +688,7 @@ def hydrate_session_stored_record(
     *,
     include_input: bool = True,
     include_actor_attributes: bool = False,
+    hydrate_nested: bool = True,
 ) -> StoredRecord:
     retained_body = stored.record.encode()
     decoded_values: dict[tuple[str | int, ...], Any] = {}
@@ -504,6 +697,7 @@ def hydrate_session_stored_record(
         hydration,
         include_input=include_input,
         include_actor_attributes=include_actor_attributes,
+        hydrate_nested=hydrate_nested,
         _decoded_values=decoded_values,
     )
     record = replace(stored.record, payload=payload)
@@ -523,12 +717,14 @@ def hydrate_session_records(
     *,
     include_input: bool = True,
     include_actor_attributes: bool = False,
+    shallow_nested_record_ids: Iterable[str] = (),
 ) -> tuple[StoredRecord, ...]:
     return _hydrate_session_records_batch(
         tuple(records),
         hydration,
         include_input=include_input,
         include_actor_attributes=include_actor_attributes,
+        shallow_nested_record_ids=shallow_nested_record_ids,
     )
 
 
@@ -538,9 +734,11 @@ def _hydrate_session_records_batch(
     *,
     include_input: bool,
     include_actor_attributes: bool,
+    shallow_nested_record_ids: Iterable[str] = (),
 ) -> tuple[StoredRecord, ...]:
     if not sources:
         return ()
+    shallow_ids = frozenset(shallow_nested_record_ids)
     if hydration is None or not callable(getattr(hydration.reader, "_read_frame", None)):
         return tuple(
             hydrate_session_stored_record(
@@ -548,6 +746,7 @@ def _hydrate_session_records_batch(
                 hydration,
                 include_input=include_input,
                 include_actor_attributes=include_actor_attributes,
+                hydrate_nested=stored.record.record_id not in shallow_ids,
             )
             for stored in sources
         )
@@ -565,6 +764,7 @@ def _hydrate_session_records_batch(
                 framed,
                 include_input=include_input,
                 include_actor_attributes=include_actor_attributes,
+                hydrate_nested=stored.record.record_id not in shallow_ids,
             )
             for stored in sources
         )
@@ -604,6 +804,7 @@ def hydrate_and_fold_records(
     hydration: SessionHydration | None,
     *,
     hydrated_records: Iterable[StoredRecord] | None = None,
+    deep_record_ids: Iterable[str] | None = None,
     base_fold: Fold | None = None,
     record_bodies: Iterable[bytes] | None = None,
     include_input: bool = True,
@@ -614,6 +815,16 @@ def hydrate_and_fold_records(
     sources = tuple(source_records)
     source_by_identity = {(row.record.record_id, row.seq): row for row in sources}
     hydrated_by_identity: dict[tuple[str, int], StoredRecord] = {}
+    deep_ids = None if deep_record_ids is None else frozenset(deep_record_ids)
+    shallow_nested_record_ids = (
+        set()
+        if deep_ids is None
+        else {
+            stored.record.record_id
+            for stored in sources
+            if stored.record.kind == "op_planned" and stored.record.record_id not in deep_ids
+        }
+    )
 
     def add_hydrated(row: StoredRecord) -> None:
         identity = (row.record.record_id, row.seq)
@@ -632,6 +843,7 @@ def hydrate_and_fold_records(
             hydration,
             include_input=include_input,
             include_actor_attributes=False,
+            shallow_nested_record_ids=shallow_nested_record_ids,
         ):
             add_hydrated(row)
     else:
@@ -644,6 +856,7 @@ def hydrate_and_fold_records(
                 hydration,
                 include_input=include_input,
                 include_actor_attributes=False,
+                shallow_nested_record_ids=shallow_nested_record_ids,
             ):
                 add_hydrated(row)
     hydrated = tuple(hydrated_by_identity[(source.record.record_id, source.seq)] for source in sources)

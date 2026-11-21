@@ -6,7 +6,7 @@ import logging
 from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from copy import copy, deepcopy
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -14,16 +14,20 @@ from vv_agent.budget import BudgetEvaluator, BudgetExhaustion
 from vv_agent.constants import SUB_TASK_STATUS_TOOL_NAME
 from vv_agent.kernel import _driver_outcomes
 from vv_agent.kernel._boundary_hydration import (
+    _MISSING,
     HydratedFoldResult,
     SessionHydration,
     _lookup_input_owner,
+    _payload_slots,
     _session_content_frame,
+    declared_content_ref,
     hydrate_and_fold_records,
+    validate_logical_content_frame,
 )
 from vv_agent.kernel._budget import BudgetObservation, HostCostObservation, _BudgetStopIteration
 from vv_agent.kernel._budget_values import BudgetUnavailableReason
 from vv_agent.kernel._cancellation import Cancellation
-from vv_agent.kernel._content import ContentRef, KeyUnavailable, SessionHead
+from vv_agent.kernel._content import SESSION_ATTRIBUTES, ContentRef, KeyUnavailable, SessionHead
 from vv_agent.kernel._driver import CoreDriver
 from vv_agent.kernel._driver_planning import ProviderAvailable, _PlanningStopIteration
 from vv_agent.kernel._execution_values import SubTaskOutcome
@@ -67,6 +71,34 @@ def read_state(store: SessionStore, sid: str) -> tuple[ExecutionState, tuple[Sto
 
 logger = logging.getLogger(__name__)
 _NOT_VERIFIED = object()
+_REUSED_LOGICAL_CONTENT_SLOTS = frozenset(
+    {
+        "budget_admission",
+        "evidence",
+        "request",
+        "result",
+        "tool",
+        "usage",
+    }
+)
+
+
+def _record_has_retained_content(record: Record) -> bool:
+    return any(
+        value is not _MISSING and value is not None and declared_content_ref(value) is not None
+        for _path, _slot, value in _payload_slots(record.kind, record._payload)
+    )
+
+
+def _record_needs_logical_hydration(record: Record) -> bool:
+    return record.kind not in {"turn_ended", "usage_observed"} and _record_has_retained_content(record)
+
+
+@dataclass(frozen=True, slots=True)
+class _LogicalPrefix(HydratedFoldResult):
+    retry_record_ids: frozenset[str]
+    retry_source_record_ids: frozenset[str]
+    deep_record_ids: frozenset[str]
 
 
 def _is_content_ref(value: Any) -> bool:
@@ -125,6 +157,12 @@ class _Driver(CoreDriver):
         self._logical_hydrated_records: tuple[StoredRecord, ...] = ()
         self._logical_projected_state: ExecutionState | None = None
         self._logical_retry_record_ids: set[str] = set()
+        self._logical_retry_source_record_ids: set[str] = set()
+        self._logical_deep_record_ids: set[str] = set()
+        self._logical_prefix: _LogicalPrefix | None = None
+        self._logical_frame_verified_record_ids: set[str] = set()
+        self._logical_frame_fingerprints: dict[tuple[str, str, str, str, ContentRef], str] = {}
+        self._logical_prefix_fingerprints: dict[tuple[str, str, str, str, ContentRef], str] = {}
 
         def observe_cost() -> dict[str, Any] | None:
             cost = None
@@ -249,10 +287,40 @@ class _Driver(CoreDriver):
         return self._logical_view().state
 
     def _invalidate_logical_view(self) -> None:
+        self._discard_active_logical_view()
+        self._logical_prefix = None
+        self._logical_prefix_fingerprints.clear()
+
+    def _discard_active_logical_view(self) -> None:
         self._active_logical_fold = None
         self._logical_hydrated_records = ()
         self._logical_projected_state = None
         self._logical_retry_record_ids.clear()
+        self._logical_retry_source_record_ids.clear()
+        self._logical_deep_record_ids.clear()
+        self._logical_frame_verified_record_ids.clear()
+        self._logical_frame_fingerprints.clear()
+
+    def _park_logical_view(self) -> None:
+        reader = self.content_reader
+        fingerprints = getattr(reader, "fingerprints", None)
+        if isinstance(fingerprints, dict):
+            self._logical_frame_fingerprints.update(fingerprints)
+        if (
+            self._active_logical_fold is not None
+            and self._logical_projected_state is not None
+            and len(self._active_logical_fold.history) == len(self.records)
+        ):
+            self._logical_prefix = _LogicalPrefix(
+                self._active_logical_fold,
+                self._logical_projected_state,
+                self._logical_hydrated_records,
+                frozenset(self._logical_retry_record_ids),
+                frozenset(self._logical_retry_source_record_ids),
+                frozenset(self._logical_deep_record_ids),
+            )
+            self._logical_prefix_fingerprints = dict(self._logical_frame_fingerprints)
+        self._discard_active_logical_view()
 
     def _logical_view(self) -> HydratedFoldResult:
         if self._active_logical_fold is not None and len(self._active_logical_fold.history) == len(self.records):
@@ -265,19 +333,26 @@ class _Driver(CoreDriver):
                 record_seqs=(stored.seq for stored in self.records),
                 input_ids=input_ids,
             ) as hydration:
-                hydrated_records = hydrate_records(self.records, hydration)
-                retry_payloads = self._logical_retry_plan_payloads(hydration, hydrated_records=hydrated_records)
+                deep_record_ids, retry_source_ids = self._logical_plan_hydration_ids(
+                    self.records,
+                    hydration,
+                    base_fold=None,
+                )
+                retry_payloads = self._logical_retry_plan_payloads(hydration)
                 self._logical_retry_record_ids = set(retry_payloads)
+                self._logical_retry_source_record_ids = set(retry_source_ids)
+                self._logical_deep_record_ids = set(deep_record_ids)
                 with logical_operation_payloads(retry_payloads):
                     result = hydrate_and_fold_records(
                         self.records,
                         _fold_factory_for(self.store),
                         hydration,
-                        hydrated_records=hydrated_records,
+                        deep_record_ids=deep_record_ids,
                     )
             self._active_logical_fold = result.fold
             self._logical_hydrated_records = result.hydrated_records
             self._logical_projected_state = self._logical_state_from_fold(result.fold)
+            self._logical_frame_verified_record_ids = {row.record.record_id for row in result.hydrated_records}
             result = HydratedFoldResult(result.fold, self._logical_projected_state, result.hydrated_records)
         return result
 
@@ -285,17 +360,25 @@ class _Driver(CoreDriver):
         """Advance the retained logical prefix by only the newly committed records."""
 
         assert self._active_logical_fold is not None
-        input_ids = (input_id for stored in records if (input_id := _lookup_input_owner(stored.record)) is not None)
+        retry_sources = self._logical_retry_source_records(records, self._active_logical_fold)
+        frame_sources = tuple({stored.record.record_id: stored for stored in (*records, *retry_sources)}.values())
+        input_ids = (input_id for stored in frame_sources if (input_id := _lookup_input_owner(stored.record)) is not None)
         with _session_content_frame(
             self,
-            record_seqs=(stored.seq for stored in records),
+            record_seqs=(stored.seq for stored in frame_sources),
             input_ids=input_ids,
         ) as hydration:
-            hydrated_records = hydrate_records(records, hydration)
+            deep_record_ids, retry_source_ids = self._logical_plan_hydration_ids(
+                records,
+                hydration,
+                base_fold=self._active_logical_fold,
+            )
+            external_retry_source_ids = {stored.record.record_id for stored in retry_sources}
+            deep_record_ids.update(external_retry_source_ids)
+            retry_source_ids.update(external_retry_source_ids)
             retry_payloads = self._logical_retry_plan_payloads_for(
                 hydration,
                 records,
-                hydrated_records=hydrated_records,
                 base_fold=self._active_logical_fold,
             )
             previous_state = self._active_logical_fold.state
@@ -304,15 +387,190 @@ class _Driver(CoreDriver):
                     records,
                     _fold_factory_for(self.store),
                     hydration,
-                    hydrated_records=hydrated_records,
+                    hydrated_records=tuple(stored for stored in records if not _record_needs_logical_hydration(stored.record)),
+                    deep_record_ids=deep_record_ids,
                     base_fold=self._active_logical_fold,
                     record_bodies=tuple(stored.record.encode() for stored in records),
                 )
         self._logical_retry_record_ids.update(retry_payloads)
+        self._logical_retry_source_record_ids.update(retry_source_ids)
+        self._logical_deep_record_ids.update(deep_record_ids)
         self._logical_hydrated_records += result.hydrated_records
+        self._logical_frame_verified_record_ids.update(row.record.record_id for row in result.hydrated_records)
         if self._logical_projected_state is not None:
             self._logical_projected_state = self._advance_logical_state(previous_state, result.fold.state)
         return result.fold
+
+    def _active_logical_record_ids(self, state: ExecutionState) -> set[str]:
+        record_ids = set(self._logical_retry_record_ids) | set(self._logical_retry_source_record_ids)
+        active_turn_id = state.active_turn_id
+        if active_turn_id is None:
+            return record_ids
+        turn = state.turns[active_turn_id]
+        record_ids.add(turn.start.record_id)
+        if turn.wait is not None:
+            record_ids.add(turn.wait.record_id)
+        record_ids.update(record.record_id for record in state.applied_inputs.values() if record.turn_id == active_turn_id)
+        if state.model_selection is not None and state.model_selection.turn_id == active_turn_id:
+            record_ids.add(state.model_selection.record_id)
+
+        active_attempts: set[tuple[str, int]] = set()
+        for operation_id, operation in state.operations.items():
+            if not operation.attempts:
+                continue
+            number = max(operation.attempts)
+            attempt = operation.attempts[number]
+            if attempt.state not in {"completed", "failed", "superseded"}:
+                active_attempts.add((operation_id, number))
+        if active_attempts:
+            record_ids.update(
+                stored.record.record_id
+                for stored in self.records
+                if stored.record.operation_id is not None
+                and stored.record.attempt is not None
+                and (stored.record.operation_id, stored.record.attempt) in active_attempts
+            )
+
+        for stored in reversed(self.records):
+            record = stored.record
+            if record.turn_id == active_turn_id and record.kind in {"boundary_recorded", "context_compacted"}:
+                record_ids.add(record.record_id)
+                break
+        return record_ids
+
+    def _logical_retry_source_records(
+        self,
+        records: Sequence[StoredRecord],
+        base_fold: CoreFold,
+    ) -> tuple[StoredRecord, ...]:
+        """Return prior attempt owners that a retry in this batch compares against."""
+
+        plans = {
+            (stored.record.operation_id, stored.record.attempt): stored
+            for stored in records
+            if stored.record.kind == "op_planned" and stored.record.operation_id is not None and stored.record.attempt is not None
+        }
+        sources: dict[str, StoredRecord] = {}
+        for stored in plans.values():
+            record = stored.record
+            if record.attempt is None or record.attempt <= 1:
+                continue
+            previous = plans.get((record.operation_id, record.attempt - 1))
+            if previous is None:
+                operation = base_fold.state.operations.get(record.operation_id or "")
+                previous_attempt = operation.attempts.get(record.attempt - 1) if operation is not None else None
+                if previous_attempt is not None:
+                    previous = self._stored_by_id.get(previous_attempt.plan.record_id)
+            if previous is not None:
+                sources[previous.record.record_id] = previous
+        return tuple(sources.values())
+
+    def _logical_plan_hydration_ids(
+        self,
+        records: Sequence[StoredRecord],
+        hydration: SessionHydration,
+        *,
+        base_fold: CoreFold | None,
+    ) -> tuple[set[str], set[str]]:
+        """Select completed plans whose nested message objects the fold never reads."""
+
+        plans = tuple(stored for stored in records if stored.record.kind == "op_planned")
+        if not plans:
+            return set(), set()
+
+        by_operation: dict[str, list[StoredRecord]] = {}
+        completed: set[tuple[str, int]] = set()
+        provider_plans: set[tuple[str, int]] = set()
+        for stored in records:
+            record = stored.record
+            if record.kind == "op_completed" and record.operation_id is not None and record.attempt is not None:
+                completed.add((record.operation_id, record.attempt))
+            elif record.kind == "input_applied":
+                item = record._payload["input"]
+                if item.get("kind") not in {"provider_evidence", "provider_result"}:
+                    continue
+                payload = item.get("payload")
+                if type(payload) is dict and isinstance(payload.get("operation_id"), str):
+                    attempt = payload.get("attempt")
+                    if type(attempt) is int:
+                        provider_plans.add((payload["operation_id"], attempt))
+
+        for stored in plans:
+            record = stored.record
+            if record.operation_id is not None:
+                by_operation.setdefault(record.operation_id, []).append(stored)
+
+        retry_sources: set[str] = set()
+        for operation_plans in by_operation.values():
+            highest_attempt = max(stored.record.attempt or 0 for stored in operation_plans)
+            for stored in operation_plans:
+                if (stored.record.attempt or 0) < highest_attempt:
+                    retry_sources.add(stored.record.record_id)
+
+        protection_enabled = base_fold.state._protection is not None if base_fold is not None else False
+        if base_fold is None:
+            created = next((stored for stored in records if stored.record.kind == "session_created"), None)
+            if created is not None:
+                attributes = created.record._payload["attributes"]
+                if _is_content_ref(attributes):
+                    attributes = hydration.read(f"record:{created.seq}", SESSION_ATTRIBUTES, ContentRef.from_dict(attributes))
+                if type(attributes) is dict:
+                    seed = attributes.get("seed")
+                    protection_enabled = type(seed) is dict and seed.get("unseen_input_protection") is True
+
+        deep: set[str] = set()
+        for stored in plans:
+            record = stored.record
+            key = (record.operation_id, record.attempt)
+            requires_deep = (
+                record.operation_id is None
+                or record.attempt is None
+                or record._payload["op_kind"] == "interaction"
+                or record.attempt > 1
+                or key not in completed
+                or key in provider_plans
+                or stored.record.record_id in retry_sources
+                or record._payload["purpose"] in {"compaction", "session_memory", "output_repair"}
+                or (protection_enabled and record._payload["op_kind"] == "model" and record._payload["purpose"] == "primary")
+            )
+            if requires_deep:
+                deep.add(record.record_id)
+
+        return deep, retry_sources
+
+    def _resume_logical_prefix(self, hydration: SessionHydration) -> HydratedFoldResult | None:
+        prefix = self._logical_prefix
+        if prefix is None or len(prefix.fold.history) != len(self.records):
+            return None
+        if any(
+            folded.record.record_id != stored.record.record_id
+            for folded, stored in zip(prefix.fold.history, self.records, strict=True)
+        ):
+            return None
+
+        reused_fingerprints = {
+            key: fingerprint
+            for key, fingerprint in self._logical_prefix_fingerprints.items()
+            if key[3] in _REUSED_LOGICAL_CONTENT_SLOTS
+        }
+        active_record_ids = self._active_logical_record_ids(prefix.fold.state)
+        active_record_ids.update(prefix.retry_record_ids)
+        active_record_ids.update(prefix.retry_source_record_ids)
+        verified_ids = validate_logical_content_frame(
+            self.records,
+            hydration,
+            deep_record_ids=active_record_ids,
+            expected_fingerprints=reused_fingerprints,
+        )
+        self._logical_retry_record_ids = set(prefix.retry_record_ids)
+        self._logical_retry_source_record_ids = set(prefix.retry_source_record_ids)
+        self._logical_deep_record_ids = set(prefix.deep_record_ids)
+        self._active_logical_fold = prefix.fold
+        self._logical_hydrated_records = prefix.hydrated_records
+        self._logical_projected_state = prefix.state
+        self._logical_frame_verified_record_ids = set(verified_ids)
+        self._logical_frame_fingerprints = reused_fingerprints
+        return prefix
 
     def _logical_state_from_fold(self, fold: CoreFold) -> ExecutionState:
         """Project the SDK-facing operation view from one captured logical fold."""
@@ -390,7 +648,10 @@ class _Driver(CoreDriver):
         if not has_retry:
             return {}
         if hydrated_records is None:
-            hydrated_records = hydrate_records(records, hydration)
+            hydrated_records = hydrate_records(
+                (stored for stored in records if stored.record.kind == "op_planned"),
+                hydration,
+            )
         hydrated_by_identity = {(stored.record.record_id, stored.seq): stored for stored in hydrated_records}
 
         def hydrated(stored: StoredRecord) -> Record:
@@ -403,8 +664,6 @@ class _Driver(CoreDriver):
             previous_stored: StoredRecord | None,
             previous_record: Record | None,
         ) -> Record | None:
-            if previous_record is not None and not _is_content_ref(previous_record._payload["request"]):
-                return previous_record
             if previous_stored is None and previous_record is not None:
                 previous_stored = self._stored_by_id.get(previous_record.record_id)
             return hydrated(previous_stored) if previous_stored is not None else previous_record
@@ -473,16 +732,17 @@ class _Driver(CoreDriver):
                     for stored in self.records
                     if stored.record.kind == "input_applied"
                 ),
-            ):
-                result = self._logical_view()
+            ) as hydration:
+                result = self._resume_logical_prefix(hydration)
+                if result is None:
+                    result = self._logical_view()
                 self.state = result.state
-                self._active_logical_fold = result.fold
                 self._logical_scope_depth += 1
                 try:
                     yield self.state
                 finally:
                     self._logical_scope_depth -= 1
-                    self._invalidate_logical_view()
+                    self._park_logical_view()
                     self.state = self.fold.state
             return
         self._logical_scope_depth += 1
@@ -551,9 +811,9 @@ class _Driver(CoreDriver):
             raise RecordError("record belongs to another session")
         return self._stored_by_id.get(record.record_id)
 
-    def _verified_completed_result(self, record: Record, slot: str) -> Any:
+    def _verified_completed_field(self, record: Record, slot: str) -> Any:
         if (
-            slot != "result"
+            slot not in {"result", "evidence", "usage"}
             or record.kind != "op_completed"
             or self._logical_scope_depth == 0
             or self._logical_dirty
@@ -569,7 +829,9 @@ class _Driver(CoreDriver):
         stored = self._stored_by_id.get(record.record_id)
         if stored is None or stored.record.kind != "op_completed" or record.encode() != stored.record.encode():
             return _NOT_VERIFIED
-        return copy_json(record._payload["result"])
+        if not self._logical_record_is_frame_verified(stored, (slot,)):
+            return _NOT_VERIFIED
+        return copy_json(record._payload[slot])
 
     def hydrate_record_field(self, record: Record, slot: str, ref: Any) -> Any:
         # A prepared overlay keeps the plan envelope, so resolve refs against the record that declared them.
@@ -585,7 +847,7 @@ class _Driver(CoreDriver):
                 supplied_ref = ref.to_dict() if isinstance(ref, ContentRef) else ref
                 if prepared_ref == supplied_ref:
                     return super().hydrate_record_field(prepared, slot, prepared_ref)
-        verified = self._verified_completed_result(record, slot)
+        verified = self._verified_completed_field(record, slot)
         if verified is not _NOT_VERIFIED:
             return verified
         stored = self._optional_stored_record(record)
@@ -595,6 +857,9 @@ class _Driver(CoreDriver):
         return super().hydrate_record_field(raw, slot, self._content_field(raw, slot))
 
     def hydrate_plan(self, record: Record) -> Record:
+        cached = self._cached_logical_plan(record)
+        if cached is not None:
+            return cached
         hydrated = super().hydrate_plan(self.stored_record(record).record)
         if not _is_content_ref(hydrated._payload["request"]):
             return hydrated
@@ -617,6 +882,48 @@ class _Driver(CoreDriver):
                 payload[slot] = copy_json(previous_plan._payload[slot])
             return replace(hydrated, payload=payload)
         return hydrated
+
+    def _cached_logical_plan(self, record: Record) -> Record | None:
+        if (
+            self._logical_scope_depth == 0
+            or self._logical_dirty
+            or self._active_logical_fold is None
+            or record.operation_id is None
+            or record.attempt is None
+        ):
+            return None
+        operation = self._active_logical_fold.state.operations.get(record.operation_id)
+        attempt = operation.attempts.get(record.attempt) if operation is not None else None
+        if attempt is None:
+            return None
+        plan = attempt.execution_plan
+        if plan.record_id != record.record_id or _is_content_ref(plan._payload["request"]):
+            return None
+        if plan.record_id not in self._logical_deep_record_ids:
+            return None
+        stored = self._stored_by_id.get(record.record_id)
+        if stored is None or not self._logical_record_is_frame_verified(
+            stored,
+            ("request", "tool", "budget_admission"),
+        ):
+            return None
+        return plan
+
+    def _logical_record_is_frame_verified(self, stored: StoredRecord, slots: Sequence[str]) -> bool:
+        if stored.record.record_id in self._logical_frame_verified_record_ids:
+            return True
+        _reader, tenant_id = self._content_reader_binding()
+        owner = f"record:{stored.seq}"
+        for slot in slots:
+            try:
+                ref = self.record_content_ref(stored.record, slot)
+            except RecordError:
+                return False
+            if ref is None:
+                continue
+            if (tenant_id, self.sid, owner, slot, ref) not in self._logical_frame_fingerprints:
+                return False
+        return True
 
     def hydrate_parked_wait(self, operation_id: str, attempt: int, wait: dict[str, Any]) -> dict[str, Any]:
         if self.state is self.fold.state:

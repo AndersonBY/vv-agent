@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+from dataclasses import replace
 
 from vv_agent.session.records import (
     APP_SERVER_ATTRIBUTES,
@@ -54,6 +55,12 @@ EVENT_FILES = {
     "event_store_replay.jsonl",
     "budget_events.jsonl",
     "configured_sub_agent_events.jsonl",
+}
+CONTENT_BACKED_OPTIONAL_FIELDS = {
+    ("input_applied", "model_binding"),
+    ("op_parked", "delegation"),
+    ("op_parked", "interaction_result"),
+    ("op_completed", "usage_counts"),
 }
 
 
@@ -123,15 +130,27 @@ def record_keys(wire, inbox=False):
         if "child_admission" in p.get("attributes", {}):
             definitions.append(p["attributes"]["child_admission"]["definition"])
         for definition in definitions:
+            task = definition.get("task") if isinstance(definition, dict) else None
+            if not isinstance(task, dict):
+                continue
+            metadata = task.get("metadata", {})
+            vv_session = metadata.get("vv_session", {}) if isinstance(metadata, dict) else {}
             keys.update(
                 typed_keys(
-                    TASK_SESSION_METADATA, definition["task"].get("metadata", {}).get("vv_session", {}), path + ".task.vv_session"
+                    TASK_SESSION_METADATA,
+                    vv_session if isinstance(vv_session, dict) else {},
+                    path + ".task.vv_session",
                 )
             )
-        if "request" in p:
+        request = p.get("request")
+        if isinstance(request, dict):
+            metadata = request.get("metadata", {})
+            vv_session = metadata.get("vv_session", {}) if isinstance(metadata, dict) else {}
             keys.update(
                 typed_keys(
-                    REQUEST_SESSION_METADATA, p["request"].get("metadata", {}).get("vv_session", {}), path + ".request.vv_session"
+                    REQUEST_SESSION_METADATA,
+                    vv_session if isinstance(vv_session, dict) else {},
+                    path + ".request.vv_session",
                 )
             )
     return keys
@@ -252,9 +271,13 @@ def entry_keys(name, item):
     return shape_keys(item, item["type"] if name in EVENT_FILES else "")
 
 
-def select(name, items, *, required=()):
+def select(name, items, *, required=(), extra_key_sets=None):
     """Greedy set cover; equal gains choose fewer bytes, then original producer order."""
-    key_sets = [entry_keys(name, item) for item in items]
+    if extra_key_sets is None:
+        extra_key_sets = [set() for _ in items]
+    if len(extra_key_sets) != len(items):
+        raise ValueError("extra coverage key sets must align with items")
+    key_sets = [entry_keys(name, item) | set(extra) for item, extra in zip(items, extra_key_sets, strict=True)]
     before = set().union(*key_sets)
     remaining = set(before)
     selected = set(required)
@@ -273,9 +296,51 @@ def select(name, items, *, required=()):
         if index not in required and set().union(*(key_sets[i] for i in selected - {index})) == before:
             selected.remove(index)
     result = [item for i, item in enumerate(items) if i in selected]
-    after = set().union(*(entry_keys(name, item) for item in result))
+    after = set().union(*(key_sets[i] for i in selected))
     assert before == after, (name, before - after)
     return result
+
+
+def logical_optional_keys(wire):
+    """Optional coverage keys that raw ContentRefs cannot expose directly."""
+    kind, payload = wire["kind"], wire["payload"]
+    keys = set()
+    for field in set(PAYLOADS[kind]["properties"]) - set(PAYLOADS[kind]["required"]):
+        present = field in payload
+        if kind == "op_completed" and field == "usage_counts":
+            present = present or isinstance(payload.get("usage"), dict)
+        if present and (kind, field) in CONTENT_BACKED_OPTIONAL_FIELDS:
+            keys.add("optional:" + kind + "." + field)
+
+    if kind == "turn_started":
+        definition = payload.get("definition")
+        task = definition.get("task") if isinstance(definition, dict) else None
+        metadata = task.get("metadata", {}) if isinstance(task, dict) else {}
+        vv_session = metadata.get("vv_session", {}) if isinstance(metadata, dict) else {}
+        if isinstance(vv_session, dict):
+            keys.update(
+                "optional:task.metadata.vv_session." + field
+                for field in TASK_SESSION_METADATA["properties"]
+                if field in vv_session
+            )
+    elif kind == "op_planned":
+        request = payload.get("request")
+        metadata = request.get("metadata", {}) if isinstance(request, dict) else {}
+        vv_session = metadata.get("vv_session", {}) if isinstance(metadata, dict) else {}
+        if isinstance(vv_session, dict):
+            keys.update(
+                "optional:request.metadata.vv_session." + field
+                for field in REQUEST_SESSION_METADATA["properties"]
+                if field in vv_session
+            )
+    elif kind == "boundary_recorded":
+        stage, data = payload["stage"], payload["data"]
+        keys.update(
+            "optional:boundary." + stage + "." + field
+            for field in set(BOUNDARY_DATA[stage]["properties"]) - set(BOUNDARY_DATA[stage]["required"])
+            if field in data
+        )
+    return keys
 
 
 def coverage_keys(name, value):
@@ -299,16 +364,23 @@ def coverage_keys(name, value):
     return shape_keys(value)
 
 
-def projection_sources(rows, events, spans, through):
+def projection_sources(rows, events, spans, through, logical_by_key):
     """Remove redundant planning context only when the real projections stay identical."""
-    from vv_agent.session.projection import project_records
-    from vv_agent.session.tracing import project_spans
+    from vv_agent.session.projection import _project_hydrated_records
+    from vv_agent.session.tracing import _project_hydrated_spans
+
+    def logical_row(row):
+        logical = logical_by_key[(row.record.session_id, row.record.record_id)]
+        record = replace(row.record, payload=logical["payload"])
+        record._retain(row.record.encode(), value=row.record.to_dict() | {"payload": logical["payload"]})
+        return replace(row, record=record)
 
     def reproduces(candidate):
         try:
-            actual_events = {event.event_id: event.to_dict() for event in project_records(candidate)} if events else {}
+            projected = [logical_row(row) for row in candidate]
+            actual_events = {event.event_id: event.to_dict() for event in _project_hydrated_records(projected)} if events else {}
             actual_spans = (
-                {(seq, method, span.span_id): span.to_dict() for seq, method, span in project_spans(tuple(candidate))}
+                {(seq, method, span.span_id): span.to_dict() for seq, method, span in _project_hydrated_spans(tuple(projected))}
                 if spans
                 else {}
             )
@@ -360,7 +432,7 @@ def curate_app_server(app):
     }
 
 
-def curate(output, streams, semantics, independent, facts):
+def curate(output, streams, semantics, independent, facts, logical_records):
     """Validate the full producer run first, then retain only covered representatives."""
     from collections import Counter
 
@@ -374,7 +446,18 @@ def curate(output, streams, semantics, independent, facts):
     values = {path.name: load(path) for path in sorted(output.iterdir())}
     before = {name: coverage_keys(name, value) for name, value in values.items()}
     all_vectors = values["session_codec_vectors.json"]["vectors"]
+    logical_by_key = {(record["session_id"], record["record_id"]): record for record in logical_records}
+    raw_record_keys = {
+        (vector["session_id"], vector["wire"]["record_id"]) for vector in all_vectors if vector["type"] == "record"
+    }
+    assert set(logical_by_key) == raw_record_keys, "logical records must cover raw vectors"
     receipts = {case["receipt_id"] for case in values["session_recovery.json"]["cases"] if "receipt_id" in case}
+    logical_key_sets = [
+        logical_optional_keys(logical_by_key[(vector["session_id"], vector["wire"]["record_id"])])
+        if vector["type"] == "record"
+        else set()
+        for vector in all_vectors
+    ]
     vectors = select(
         "session_codec_vectors.json",
         all_vectors,
@@ -388,7 +471,14 @@ def curate(output, streams, semantics, independent, facts):
                 and vector["wire"]["kind"] == "approval_answer"
             )
         ),
+        extra_key_sets=logical_key_sets,
     )
+    selected_logical_keys = {
+        (vector["session_id"], vector["wire"]["record_id"]) for vector in vectors if vector["type"] == "record"
+    }
+    curated_logical_records = [
+        record for record in logical_records if (record["session_id"], record["record_id"]) in selected_logical_keys
+    ]
     values["session_codec_vectors.json"]["vectors"] = vectors
     for kind, name in (("record", "session_records.jsonl"), ("inbox", "session_inbox.jsonl")):
         values[name] = [v["wire"] for v in vectors if v["type"] == kind]
@@ -453,7 +543,7 @@ def curate(output, streams, semantics, independent, facts):
                 "writer_epoch": row.writer_epoch,
                 "created_ms": row.created_ms,
             }
-            for row in projection_sources(rows, item["events"], item["spans"], through)
+            for row in projection_sources(rows, item["events"], item["spans"], through, logical_by_key)
         ]
         selected.append(item)
     for item, raw in zip(
@@ -471,7 +561,7 @@ def curate(output, streams, semantics, independent, facts):
     inventory = values["session_codec_vectors.json"]["coverage"]
     from session_kernel_fixtures import coverage
 
-    values["session_codec_vectors.json"]["coverage"] = coverage(vectors, semantics)
+    values["session_codec_vectors.json"]["coverage"] = coverage(vectors, semantics, curated_logical_records)
     for group in inventory:
         assert set(inventory[group]) == set(values["session_codec_vectors.json"]["coverage"][group]), group
     report = {}

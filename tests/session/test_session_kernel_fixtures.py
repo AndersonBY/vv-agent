@@ -6,8 +6,10 @@ import re
 import runpy
 import subprocess
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
+from contextlib import contextmanager
 from copy import deepcopy
+from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
 from threading import Event
@@ -24,16 +26,20 @@ from vv_agent.approval import ApprovalBroker
 from vv_agent.events import ApprovalRequestedEvent, event_from_dict
 from vv_agent.kernel import _driver_inputs as inputs
 from vv_agent.kernel import _sql as sql_module
-from vv_agent.kernel._content import ContentRef
+from vv_agent.kernel._content import ContentIntegrityError, ContentLinkConflict, ContentRef, ContentUnavailable
 from vv_agent.kernel._content_publication import make_record_before_publication
 from vv_agent.kernel._content_reader import DurableContentReader
+from vv_agent.kernel._content_runtime import SessionContentWriter
 from vv_agent.kernel._content_sql import _ContentReadFrame
 from vv_agent.kernel._driver import CoreDriver
-from vv_agent.kernel._hydration import KeyUnavailable, MissingContentLink
+from vv_agent.kernel._hydration import IntegrityFailure, KeyUnavailable, MissingContentLink
 from vv_agent.kernel._sql import LedgerIntegrityError, SQLStore
+from vv_agent.kernel._sqlite import _SQLiteContentBackend
 from vv_agent.model import ScriptedModelProvider
 from vv_agent.session import _recovery_phase
+from vv_agent.session import kernel as kernel_module
 from vv_agent.session._driver_scope import _Scope
+from vv_agent.session.app_server import _KernelRunAdapter
 from vv_agent.session.content_store import LocalKeyProvider
 from vv_agent.session.kernel import _Driver
 from vv_agent.session.projection import hydrate_records, hydration_for_session_store, project_records
@@ -47,6 +53,8 @@ from vv_agent.session.surfaces import (
     _read_snapshot,
     _tenant_bound_sql_store,
 )
+from vv_agent.session.tracing import project_spans
+from vv_agent.session.worker import LocalWorker
 from vv_agent.tools.function import function_tool
 from vv_agent.types import AgentResult, LLMResponse, ToolCall
 
@@ -126,14 +134,41 @@ def test_generated_fixtures_match_vendored_snapshot(generated_fixtures):
     assert not differences, differences
 
 
-def test_app_server_timeout_uses_public_resume_and_retains_durable_decision():
+def test_app_server_timeout_uses_public_resume_and_retains_durable_decision(monkeypatch: pytest.MonkeyPatch):
+    approval_calls = 0
+    replay_blocked = Event()
+    join_started = Event()
+    approval_arguments = _KernelRunAdapter._approval_arguments
+    worker_join = LocalWorker.join
+
+    def hold_replayed_approval(adapter, sid, store, state, records, event, wait):
+        nonlocal approval_calls
+        arguments = approval_arguments(adapter, sid, store, state, records, event, wait)
+        if wait["turn_id"] == "thread_3/turn/turn_2":
+            approval_calls += 1
+            if approval_calls == 2:
+                replay_blocked.set()
+                assert join_started.wait(timeout=5), "request(40) did not reach its synchronization join"
+        return arguments
+
+    def synchronize_join(worker, timeout=None):
+        if replay_blocked.is_set():
+            join_started.set()
+        return worker_join(worker, timeout)
+
+    monkeypatch.setattr(_KernelRunAdapter, "_approval_arguments", hold_replayed_approval)
+    monkeypatch.setattr(LocalWorker, "join", synchronize_join)
     fixtures = AUTHOR["Fixtures"]()
     try:
         app = fixtures.app_server()
         resumes = []
         resolved_rows = []
-        for entry in app["transcripts"]:
+        subscription_position = None
+        resolved_position = None
+        for position, entry in enumerate(app["transcripts"]):
             request = entry.get("request", {})
+            if request.get("id") == 40 and request.get("method") == "thread/resume":
+                subscription_position = position
             if request.get("method") == "thread/resume" and request.get("params", {}).get("threadId") == "thread_3":
                 resumes.append((request["params"].get("subscribe"), entry["responses"][0]))
             if any(
@@ -143,7 +178,15 @@ def test_app_server_timeout_uses_public_resume_and_retains_durable_decision():
                 for notification in entry.get("notifications", [])
             ):
                 resolved_rows.append(entry)
+                resolved_position = position
 
+        assert approval_calls >= 2
+        assert replay_blocked.is_set()
+        assert subscription_position is not None
+        assert resolved_position is not None
+        subscription_drain = app["transcripts"][subscription_position + 1]
+        assert any(notification.get("method") == "approval/request" for notification in subscription_drain["notifications"])
+        assert subscription_position < resolved_position
         assert [(subscribe, "error" not in response) for subscribe, response in resumes] == [
             (False, True),
             (True, True),
@@ -173,6 +216,70 @@ def test_app_server_timeout_uses_public_resume_and_retains_durable_decision():
             and row.record.payload["input"]["payload"].get("decision") == "timeout"
         ]
         assert len(timeout_answers) == 1
+    finally:
+        fixtures.kernel.close()
+
+
+def test_approval_answer_optionals_follow_app_server_and_keep_hydrated_prefix_coverage():
+    fixtures = AUTHOR["Fixtures"]()
+    try:
+        fixtures.produce()
+        fixtures.approval_answer_optionals()
+        item = fixtures.inbox[("approval_optional", "answer")]
+        assert {key: item.payload[key] for key in ("policy_digest", "rule_id", "expires_ms")} == {
+            "policy_digest": None,
+            "rule_id": None,
+            "expires_ms": None,
+        }
+
+        app = fixtures.app_server()
+        resolved = next(
+            entry
+            for entry in app["transcripts"]
+            if any(
+                notification.get("method") == "approval/resolved"
+                and notification.get("params", {}).get("threadId") == "thread_3"
+                and notification.get("params", {}).get("turnId") == "thread_3/turn/turn_2"
+                for notification in entry.get("notifications", [])
+            )
+        )
+        assert not any(notification.get("method") == "approval/request" for notification in resolved["notifications"])
+
+        vectors = AUTHOR["valid_vectors"](fixtures.collect(), fixtures.inbox)
+        approval_answers = [
+            vector["wire"]["payload"]
+            for vector in vectors
+            if vector["type"] == "inbox" and vector["wire"]["kind"] == "approval_answer"
+        ]
+        for field in ("policy_digest", "rule_id", "expires_ms"):
+            assert sum(field in payload for payload in approval_answers) == 1
+
+        stored = fixtures.kernel.store.read_state("approval_optional")[1]
+        hydration = hydration_for_session_store(fixtures.kernel.store, "approval_optional")
+        projected_prefixes = 0
+        raw_state_failed = False
+        for through in range(1, len(stored) + 1):
+            logical = [row.record for row in stored[:through]]
+            raw_state = fold(
+                logical,
+                consumed_inputs=[InboxItem(**row.payload["input"]) for row in logical if row.kind == "input_applied"],
+            )
+            if through == len(stored):
+                break
+            next_record = stored[through].record
+            if next_record.kind not in {"context_compacted", "boundary_recorded"} or next_record.payload["source_digest"] is None:
+                continue
+            hydrated_prefix = hydrate_records(stored[:through], hydration)
+            try:
+                AUTHOR["project_context"](hydrated_prefix, raw_state)
+            except RecordError as error:
+                assert str(error) == "S1 content hydration is unavailable in the producer/codec phase"
+                raw_state_failed = True
+            _, context = AUTHOR["_hydrated_prefix_projection"](stored[:through], hydration)
+            assert sha256(AUTHOR["independent_bytes"]([context])[0]).hexdigest() == next_record.payload["source_digest"]
+            projected_prefixes += 1
+        assert projected_prefixes
+        assert raw_state_failed
     finally:
         fixtures.kernel.close()
 
@@ -1629,31 +1736,215 @@ def _start_logical_driver(
     return driver, lease
 
 
-def _logical_tool_plan(driver: _Driver, request: dict[str, Any], attempt: int) -> Record:
+def _logical_tool_plan(
+    driver: _Driver,
+    request: dict[str, Any],
+    attempt: int,
+    *,
+    op_kind: str = "tool",
+    dependencies: list[str] | None = None,
+    operation_id: str | None = None,
+) -> Record:
     turn_id = driver.state.active_turn_id
     assert turn_id is not None
+    operation_id = operation_id or (f"{turn_id}/model/primary/{attempt}" if op_kind == "model" else "retry-operation")
     return make_record_before_publication(
         "op_planned",
         session_id=driver.sid,
         turn_id=turn_id,
-        operation_id="retry-operation",
+        operation_id=operation_id,
         attempt=attempt,
         payload={
-            "op_kind": "tool",
-            "purpose": None,
+            "op_kind": op_kind,
+            "purpose": "primary" if op_kind == "model" else None,
             "request": request,
             "request_digest": digest(request),
             "context_version": "v1",
-            "dependencies": [],
+            "dependencies": dependencies or [],
             "tool": None,
-            "idempotency_key": "retry-call",
+            "idempotency_key": "retry-call" if op_kind == "tool" else operation_id,
             "budget_admission": {},
             "not_before_ms": None,
-            "provider_binding": None,
+            "provider_binding": "model" if op_kind == "model" else None,
             "consumed_unknowns": [],
             "policy_decision": None,
         },
     )
+
+
+@pytest.fixture
+def projection_frame_bundle(tmp_path: Path):
+    session_id = "projection-frame-bundle"
+    provider = LocalKeyProvider(b"k" * 32)
+    try:
+        with SQLiteStore.standalone(str(tmp_path / "projection-frame-bundle.sqlite")) as store:
+            store.install_schema()
+            store.configure_input_admission(allow_unsigned=True)
+            sessions = SessionDriver(store=store, content_key_provider=provider)
+            driver, lease = _start_logical_driver(sessions, store, session_id)
+            try:
+                other = _Driver(
+                    sessions.store,
+                    session_id,
+                    driver.runtime,
+                    _Scope(lease, driver.runtime, now_ms=sessions.store._now()),
+                )
+                request = {
+                    "id": "projection-call",
+                    "name": "projection_tool",
+                    "model": "scripted",
+                    "arguments": {"path": "notes.txt"},
+                    "messages": [{"role": "user", "content": f"historical message {index}"} for index in range(8)],
+                    "metadata": {"vv_session": {"cycle_index": 1}},
+                }
+                model_plan = _logical_tool_plan(other, request, attempt=1, op_kind="model")
+                assert model_plan.operation_id is not None
+                prepared_request = request | {
+                    "id": "prepared-projection-call",
+                    "messages": [{"role": "user", "content": f"prepared message {index}"} for index in range(8)],
+                }
+                tool_plan = _logical_tool_plan(
+                    other,
+                    prepared_request,
+                    attempt=1,
+                    dependencies=[model_plan.operation_id],
+                )
+                prepared = make_record_before_publication(
+                    "op_prepared",
+                    session_id=other.sid,
+                    turn_id=tool_plan.turn_id,
+                    operation_id=tool_plan.operation_id,
+                    attempt=tool_plan.attempt,
+                    payload={
+                        "request": prepared_request,
+                        "request_digest": digest(prepared_request),
+                        "op_kind": "tool",
+                        "tool": {},
+                        "provider_binding": tool_plan._payload["provider_binding"],
+                        "idempotency_key": tool_plan._payload["idempotency_key"],
+                        "hook_result": None,
+                        "shared_state": {},
+                        "policy_decision": None,
+                    },
+                )
+                other.commit([model_plan, tool_plan, prepared])
+                yield provider, sessions, store, session_id, tuple(store.read_state(session_id)[1])
+            finally:
+                assert sessions.store.release(lease)
+    finally:
+        provider.close()
+
+
+def _canonical_event_bytes(events) -> list[bytes]:
+    return [json.dumps(event.to_dict(), ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode() for event in events]
+
+
+def test_projection_shallow_hydration_matches_full_event_bytes(projection_frame_bundle):
+    _provider, _sessions, store, session_id, records = projection_frame_bundle
+    hydration = hydration_for_session_store(store, session_id)
+    expected = project_records(hydrate_records(records, hydration))
+    projected = project_records(records, hydration=hydration)
+
+    assert _canonical_event_bytes(projected) == _canonical_event_bytes(expected)
+    planned = next(stored for stored in records if stored.record.kind == "op_planned")
+    assert ContentRef.from_dict(planned.record._payload["request"])
+
+
+def test_projection_key_destroy_between_pages_fails_closed(projection_frame_bundle):
+    provider, _sessions, store, session_id, records = projection_frame_bundle
+    hydration = hydration_for_session_store(store, session_id)
+    started = next(stored for stored in records if stored.record.kind == "turn_started")
+    planned = next(stored for stored in records if stored.record.kind == "op_planned")
+    request_ref = ContentRef.from_dict(planned.record._payload["request"])
+
+    assert project_records((started,), hydration=hydration)
+    assert provider.destroy(store.tenant_id, request_ref.key_id).accepted
+    with pytest.raises(KeyUnavailable):
+        project_records((planned,), hydration=hydration)
+
+
+def test_projection_link_tamper_after_page_fails_closed(projection_frame_bundle):
+    _provider, _sessions, store, session_id, records = projection_frame_bundle
+    hydration = hydration_for_session_store(store, session_id)
+    planned = next(stored for stored in records if stored.record.kind == "op_planned")
+    started = next(stored for stored in records if stored.record.kind == "turn_started")
+    other_ref = ContentRef.from_dict(started.record._payload["definition"])
+
+    page = (started, planned)
+    assert project_records(page, hydration=hydration)
+    with store.atomic():
+        store._rows(
+            "UPDATE sk_content_link SET content_id=? WHERE tenant_id=? AND session_id=? AND record_seq=? AND slot='request'",
+            (other_ref.content_id, store.tenant_id, session_id, planned.seq),
+        )
+    with pytest.raises(MissingContentLink):
+        project_records(page, hydration=hydration)
+
+
+def test_unframed_event_and_span_batches_use_one_disposable_read_frame(projection_frame_bundle):
+    provider, _sessions, store, session_id, records = projection_frame_bundle
+    hydration = hydration_for_session_store(store, session_id)
+    planned = next(stored for stored in records if stored.record.kind == "op_planned")
+    owner = f"record:{planned.seq}"
+    reads: list[tuple[str, str]] = []
+    original_read = DurableContentReader.read
+
+    def counted_read(self, tenant_id, read_session_id, read_owner, slot, ref):
+        reads.append((read_owner, slot))
+        return original_read(self, tenant_id, read_session_id, read_owner, slot, ref)
+
+    with (
+        patch.object(DurableContentReader, "read", counted_read),
+        patch.object(provider, "unwrap", wraps=provider.unwrap) as unwrap,
+    ):
+        events = project_records(records, hydration=hydration)
+    assert events
+    assert unwrap.call_count == 1
+    assert reads.count((owner, "request")) == 1
+    assert not any(read_owner == owner and slot == "messages" for read_owner, slot in reads)
+
+    reads.clear()
+    with (
+        patch.object(DurableContentReader, "read", counted_read),
+        patch.object(provider, "unwrap", wraps=provider.unwrap) as unwrap,
+    ):
+        spans = project_spans(records, hydration=hydration)
+    assert spans
+    assert unwrap.call_count == 1
+    assert reads.count((owner, "request")) == 1
+    assert not any(read_owner == owner and slot == "messages" for read_owner, slot in reads)
+
+
+def test_op_prepared_projection_does_not_hydrate_request_messages(projection_frame_bundle):
+    _provider, _sessions, store, session_id, records = projection_frame_bundle
+    hydration = hydration_for_session_store(store, session_id)
+    prepared = next(stored for stored in records if stored.record.kind == "op_prepared")
+    owner = f"record:{prepared.seq}"
+    request_ref = ContentRef.from_dict(prepared.record._payload["request"])
+    request_container = hydration.read(owner, "request", request_ref)
+    assert request_container["messages"]
+    assert all(ContentRef.from_dict(message) is not None for message in request_container["messages"])
+
+    expected_events = project_records(hydrate_records(records, hydration))
+    reads: list[tuple[str, str]] = []
+    original_read = DurableContentReader.read
+
+    def counted_read(self, tenant_id, read_session_id, read_owner, slot, ref):
+        reads.append((read_owner, slot))
+        return original_read(self, tenant_id, read_session_id, read_owner, slot, ref)
+
+    with patch.object(DurableContentReader, "read", counted_read):
+        events = project_records(records, hydration=hydration)
+    assert _canonical_event_bytes(events) == _canonical_event_bytes(expected_events)
+    assert reads.count((owner, "request")) == 1
+    assert not any(read_owner == owner and slot.startswith("request.messages") for read_owner, slot in reads)
+
+    reads.clear()
+    with patch.object(DurableContentReader, "read", counted_read):
+        spans = project_spans(records, hydration=hydration)
+    assert spans
+    assert reads.count((owner, "request")) == 1
+    assert not any(read_owner == owner and slot.startswith("request.messages") for read_owner, slot in reads)
 
 
 def test_active_logical_fold_refreshes_same_batch_retry_records_once(tmp_path: Path):
@@ -1672,7 +1963,12 @@ def test_active_logical_fold_refreshes_same_batch_retry_records_once(tmp_path: P
                 _Scope(lease, driver.runtime, now_ms=sessions.store._now()),
             )
 
-            request = {"id": "retry-call", "name": "retry_probe_tool", "arguments": {"text": "one"}}
+            request = {
+                "id": "retry-call",
+                "name": "retry_probe_tool",
+                "arguments": {"text": "one"},
+                "messages": [{"role": "user", "content": f"retry history {index}"} for index in range(3)],
+            }
             first = _logical_tool_plan(other, request, attempt=1)
             started = other.record(
                 "op_started",
@@ -1740,6 +2036,7 @@ def test_active_logical_fold_refreshes_same_batch_retry_records_once(tmp_path: P
                     if row.record.kind == "op_planned" and row.record.operation_id == "retry-operation"
                 ]
                 retry_owner = f"record:{stored_plans[1].seq}"
+                source_owner = f"record:{stored_plans[0].seq}"
                 reads: list[tuple[str, str]] = []
                 original_read = DurableContentReader.read
 
@@ -1751,6 +2048,8 @@ def test_active_logical_fold_refreshes_same_batch_retry_records_once(tmp_path: P
                     driver.refresh()
 
                 assert reads.count((retry_owner, "request")) == 1
+                assert sum(owner == retry_owner and slot.startswith("request.messages[") for owner, slot in reads) == 3
+                assert sum(owner == source_owner and slot.startswith("request.messages[") for owner, slot in reads) == 3
                 assert retry.record_id in driver._logical_retry_record_ids
                 retry_attempt = driver.state.operations["retry-operation"].attempts[2]
                 assert retry_attempt.plan._payload["request"] == request
@@ -1759,13 +2058,262 @@ def test_active_logical_fold_refreshes_same_batch_retry_records_once(tmp_path: P
                 )
                 assert ContentRef.from_dict(raw_retry._payload["request"])
 
+            assert driver._active_logical_fold is None
+            assert driver._logical_prefix is not None
+            prefix_fold = driver._logical_prefix.fold
+            record_bodies = tuple(stored.record.encode() for stored in driver.records)
+            fresh = _Driver(
+                sessions.store,
+                session_id,
+                driver.runtime,
+                _Scope(lease, driver.runtime, now_ms=sessions.store._now()),
+            )
+            cold_state = fresh._logical_view().state
+
+            def unexpected_full_fold(*_args, **_kwargs):
+                raise AssertionError("cached logical prefix must not fold the full history again")
+
+            with (
+                patch.object(kernel_module, "hydrate_and_fold_records", unexpected_full_fold),
+                driver._logical_state_scope(),
+            ):
+                assert driver._active_logical_fold is prefix_fold
+                retry_attempt = driver.state.operations["retry-operation"].attempts[2]
+                assert retry_attempt.plan._payload["request"] == request
+                assert driver.state == cold_state
+            assert tuple(stored.record.encode() for stored in driver.records) == record_bodies
+
             assert sessions.store.release(lease)
     finally:
         provider.close()
 
 
-@pytest.mark.parametrize("tamper", ["key_destroy", "link"])
-def test_logical_content_frame_fails_closed_on_key_destroy_and_link_tamper(tmp_path: Path, tamper: str):
+def test_logical_retry_source_rehydrates_when_retry_commits_in_next_batch(tmp_path: Path):
+    session_id = "logical-cross-batch-retry"
+    provider = LocalKeyProvider(b"k" * 32)
+    try:
+        with SQLiteStore.standalone(str(tmp_path / "logical-cross-batch-retry.sqlite")) as store:
+            store.install_schema()
+            store.configure_input_admission(allow_unsigned=True)
+            sessions = SessionDriver(store=store, content_key_provider=provider)
+            driver, lease = _start_logical_driver(sessions, store, session_id)
+            try:
+                request = {
+                    "id": "retry-call",
+                    "name": "retry_probe_tool",
+                    "arguments": {"text": "one"},
+                    "messages": [{"role": "user", "content": f"retry history {index}"} for index in range(3)],
+                }
+                first = _logical_tool_plan(driver, request, attempt=1)
+                started = driver.record(
+                    "op_started",
+                    {
+                        "dispatch_id": "retry-call/1",
+                        "authorization_version": "1",
+                        "epoch": lease.epoch,
+                        "mode": "sync",
+                    },
+                    first,
+                )
+                unknown = driver.record(
+                    "op_unknown",
+                    {
+                        "reason": {"kind": "worker_lost"},
+                        "dispatch_evidence": {"kind": "tool"},
+                        "observation": {"attempt": 1},
+                        "retry": "retry",
+                        "retry_at_ms": None,
+                        "duplicate_cost_risk": True,
+                        "measurement_missing": True,
+                    },
+                    first,
+                )
+                driver.commit([first, started, unknown])
+                with driver._logical_state_scope():
+                    pass
+
+                retry = _logical_tool_plan(driver, request, attempt=2)
+                reads: list[tuple[str, str]] = []
+                original_read = DurableContentReader.read
+
+                def counted_read(self, tenant_id, read_session_id, owner, slot, ref):
+                    reads.append((owner, slot))
+                    return original_read(self, tenant_id, read_session_id, owner, slot, ref)
+
+                with patch.object(DurableContentReader, "read", counted_read), driver._logical_state_scope():
+                    reads.clear()
+                    driver.commit([retry])
+                    assert driver._logical_retry_record_ids == {retry.record_id}
+                    assert driver._logical_retry_source_record_ids == {first.record_id}
+                    assert driver._logical_deep_record_ids == {first.record_id, retry.record_id}
+                    assert driver._cached_logical_plan(retry) is not None
+
+                with (
+                    patch.object(CoreDriver, "hydrate_plan", side_effect=AssertionError("retry plan cache miss")),
+                    driver._logical_state_scope(),
+                ):
+                    assert driver._logical_retry_record_ids == {retry.record_id}
+                    assert driver._logical_retry_source_record_ids == {first.record_id}
+                    assert driver._logical_deep_record_ids == {first.record_id, retry.record_id}
+                    assert driver.hydrate_plan(retry)._payload["request"] == request
+
+                stored_plans = [
+                    stored
+                    for stored in driver.records
+                    if stored.record.kind == "op_planned" and stored.record.operation_id == "retry-operation"
+                ]
+                source_owner = f"record:{stored_plans[0].seq}"
+                retry_owner = f"record:{stored_plans[1].seq}"
+                assert reads.count((source_owner, "request")) == 1
+                assert reads.count((retry_owner, "request")) == 1
+                assert sum(owner == source_owner and slot.startswith("request.messages[") for owner, slot in reads) == 3
+                assert sum(owner == retry_owner and slot.startswith("request.messages[") for owner, slot in reads) == 3
+            finally:
+                assert sessions.store.release(lease)
+    finally:
+        provider.close()
+
+
+@pytest.mark.parametrize("tamper", [None, "key_destroy", "link", "ciphertext"])
+def test_logical_fold_skips_completed_plan_messages_but_hydrates_active_plan(tmp_path: Path, tamper: str | None):
+    session_id = "logical-plan-shallow"
+    provider = LocalKeyProvider(b"k" * 32)
+    try:
+        with SQLiteStore.standalone(str(tmp_path / "logical-plan-shallow.sqlite")) as store:
+            store.install_schema()
+            store.configure_input_admission(allow_unsigned=True)
+            sessions = SessionDriver(store=store, content_key_provider=provider)
+            driver, lease = _start_logical_driver(sessions, store, session_id)
+            try:
+                completed_request = {
+                    "id": "completed-call",
+                    "name": "probe",
+                    "arguments": {"value": "completed"},
+                    "messages": [{"role": "user", "content": f"completed history {index}"} for index in range(6)],
+                    "metadata": {"vv_session": {"cycle_index": 1}},
+                }
+                completed_plan = _logical_tool_plan(
+                    driver,
+                    completed_request,
+                    attempt=1,
+                    operation_id="completed-operation",
+                )
+                driver.commit([completed_plan])
+                started = driver.record(
+                    "op_started",
+                    {
+                        "dispatch_id": "completed-call/1",
+                        "authorization_version": "1",
+                        "epoch": lease.epoch,
+                        "mode": "sync",
+                    },
+                    completed_plan,
+                )
+                driver.commit([started])
+                result = {
+                    "tool_call_id": "completed-call",
+                    "content": "ok",
+                    "status_code": "SUCCESS",
+                    "directive": "continue",
+                }
+                completed = driver.record(
+                    "op_completed",
+                    {
+                        "result": result,
+                        "result_digest": digest(result),
+                        "usage": {},
+                        "shared_state": None,
+                        "evidence": {"kind": "tool"},
+                        "execution_started": True,
+                        "context": "normal",
+                        "request_digest": driver.stored_record(completed_plan).record._payload["request_digest"],
+                        "provider_binding": None,
+                    },
+                    completed_plan,
+                )
+                driver.commit([completed])
+
+                active_request = {
+                    "id": "active-call",
+                    "name": "probe",
+                    "arguments": {"value": "active"},
+                    "messages": [{"role": "user", "content": f"active history {index}"} for index in range(3)],
+                    "metadata": {"vv_session": {"cycle_index": 2}},
+                }
+                active_plan = _logical_tool_plan(
+                    driver,
+                    active_request,
+                    attempt=1,
+                    operation_id="active-operation",
+                )
+                driver.commit([active_plan])
+
+                records = {stored.record.record_id: stored for stored in driver.records}
+                completed_owner = f"record:{records[completed_plan.record_id].seq}"
+                active_owner = f"record:{records[active_plan.record_id].seq}"
+                reads: list[tuple[str, str]] = []
+                original_read = DurableContentReader.read
+
+                def counted_read(self, tenant_id, read_session_id, owner, slot, ref):
+                    reads.append((owner, slot))
+                    return original_read(self, tenant_id, read_session_id, owner, slot, ref)
+
+                driver._invalidate_logical_view()
+                with patch.object(DurableContentReader, "read", counted_read):
+                    fold_state = driver._logical_view().state
+
+                completed_slots = [slot for owner, slot in reads if owner == completed_owner]
+                active_slots = [slot for owner, slot in reads if owner == active_owner]
+                assert "request" in completed_slots
+                assert not any(slot.startswith("request.messages[") for slot in completed_slots)
+                assert "request" in active_slots
+                assert sum(slot.startswith("request.messages[") for slot in active_slots) == 3
+                assert fold_state.operations["completed-operation"].state == "completed"
+                assert fold_state.operations["active-operation"].state == "planned"
+
+                if tamper is None:
+                    return
+                stored_completed = records[completed_plan.record_id]
+                ref = ContentRef.from_dict(stored_completed.record._payload["request"])
+                if tamper == "key_destroy":
+                    assert provider.destroy(store.tenant_id, ref.key_id).accepted
+                    expected = KeyUnavailable
+                elif tamper == "link":
+                    turn_started = next(stored for stored in driver.records if stored.record.kind == "turn_started")
+                    other_ref = ContentRef.from_dict(turn_started.record._payload["definition"])
+                    with store.atomic():
+                        store._rows(
+                            "UPDATE sk_content_link SET content_id=? "
+                            "WHERE tenant_id=? AND session_id=? AND record_seq=? AND slot='request'",
+                            (other_ref.content_id, store.tenant_id, session_id, stored_completed.seq),
+                        )
+                    expected = MissingContentLink
+                else:
+                    row = store._one(
+                        "SELECT ciphertext FROM sk_content WHERE tenant_id=? AND session_id=? AND content_id=?",
+                        (store.tenant_id, session_id, ref.content_id),
+                    )
+                    assert row is not None
+                    ciphertext = bytes(row[0])
+                    tampered = ciphertext[:-1] + bytes([ciphertext[-1] ^ 1])
+                    with store.atomic():
+                        store._rows(
+                            "UPDATE sk_content SET ciphertext=? WHERE tenant_id=? AND session_id=? AND content_id=?",
+                            (tampered, store.tenant_id, session_id, ref.content_id),
+                        )
+                    expected = IntegrityFailure
+
+                driver._invalidate_logical_view()
+                with pytest.raises(expected):
+                    driver._logical_view()
+            finally:
+                assert sessions.store.release(lease)
+    finally:
+        provider.close()
+
+
+@pytest.mark.parametrize("tamper", ["key_destroy", "link", "ciphertext"])
+def test_logical_content_frame_fails_closed_after_cached_prefix_frame(tmp_path: Path, tamper: str):
     session_id = f"logical-frame-{tamper}"
     provider = LocalKeyProvider(b"k" * 32)
     try:
@@ -1775,12 +2323,17 @@ def test_logical_content_frame_fails_closed_on_key_destroy_and_link_tamper(tmp_p
             sessions = SessionDriver(store=store, content_key_provider=provider)
             driver, lease = _start_logical_driver(sessions, store, session_id)
             try:
+                with driver._logical_state_scope():
+                    pass
+                assert driver._active_logical_fold is None
+                assert driver._logical_prefix is not None
+
                 started = next(row for row in driver.records if row.record.kind == "turn_started")
                 ref = ContentRef.from_dict(started.record._payload["definition"])
                 if tamper == "key_destroy":
                     assert provider.destroy(store.tenant_id, ref.key_id).accepted
                     expected = KeyUnavailable
-                else:
+                elif tamper == "link":
                     other_ref = ContentRef.from_dict(started.record._payload["budget"])
                     with store.atomic():
                         store._rows(
@@ -1789,10 +2342,108 @@ def test_logical_content_frame_fails_closed_on_key_destroy_and_link_tamper(tmp_p
                             (other_ref.content_id, store.tenant_id, session_id, started.seq, "definition"),
                         )
                     expected = MissingContentLink
+                else:
+                    row = store._one(
+                        "SELECT ciphertext FROM sk_content WHERE tenant_id=? AND session_id=? AND content_id=?",
+                        (store.tenant_id, session_id, ref.content_id),
+                    )
+                    assert row is not None
+                    ciphertext = bytes(row[0])
+                    tampered = ciphertext[:-1] + bytes([ciphertext[-1] ^ 1])
+                    with store.atomic():
+                        store._rows(
+                            "UPDATE sk_content SET ciphertext=? WHERE tenant_id=? AND session_id=? AND content_id=?",
+                            (tampered, store.tenant_id, session_id, ref.content_id),
+                        )
+                    expected = IntegrityFailure
 
-                driver._invalidate_logical_view()
-                with pytest.raises(expected):
-                    driver._logical_view()
+                with pytest.raises(expected), driver._logical_state_scope():
+                    pass
+            finally:
+                assert sessions.store.release(lease)
+    finally:
+        provider.close()
+
+
+def test_logical_prefix_resume_reuses_fold_through_one_fresh_frame(tmp_path: Path):
+    session_id = "logical-prefix-resume"
+    provider = LocalKeyProvider(b"k" * 32)
+    try:
+        with SQLiteStore.standalone(str(tmp_path / "logical-prefix-resume.sqlite")) as store:
+            store.install_schema()
+            store.configure_input_admission(allow_unsigned=True)
+            sessions = SessionDriver(store=store, content_key_provider=provider)
+            driver, lease = _start_logical_driver(sessions, store, session_id)
+            try:
+                with driver._logical_state_scope():
+                    first_fold = driver._active_logical_fold
+                    assert first_fold is not None
+                assert driver._active_logical_fold is None
+                assert driver._logical_prefix is not None
+
+                frame_calls = 0
+                original_frame = DurableContentReader._read_frame
+
+                @contextmanager
+                def counted_frame(self, *args, **kwargs):
+                    nonlocal frame_calls
+                    frame_calls += 1
+                    with original_frame(self, *args, **kwargs) as reader:
+                        yield reader
+
+                def unexpected_full_fold(*_args, **_kwargs):
+                    raise AssertionError("cached logical prefix must not fold the full history again")
+
+                with (
+                    patch.object(DurableContentReader, "_read_frame", counted_frame),
+                    patch.object(kernel_module, "hydrate_and_fold_records", unexpected_full_fold),
+                    driver._logical_state_scope(),
+                ):
+                    assert driver._active_logical_fold is first_fold
+                    assert driver.state.session_id == session_id
+                assert frame_calls == 1
+            finally:
+                assert sessions.store.release(lease)
+    finally:
+        provider.close()
+
+
+@pytest.mark.parametrize("cycles", [8, 32])
+def test_logical_prefix_scaling_folds_only_each_new_commit(tmp_path: Path, cycles: int):
+    session_id = f"logical-prefix-scaling-{cycles}"
+    provider = LocalKeyProvider(b"k" * 32)
+    try:
+        with SQLiteStore.standalone(str(tmp_path / f"{session_id}.sqlite")) as store:
+            store.install_schema()
+            store.configure_input_admission(allow_unsigned=True)
+            sessions = SessionDriver(store=store, content_key_provider=provider)
+            driver, lease = _start_logical_driver(sessions, store, session_id)
+            calls: list[tuple[int, bool]] = []
+            original_fold = kernel_module.hydrate_and_fold_records
+
+            def counted_fold(source_records, *args, **kwargs):
+                rows = tuple(source_records)
+                calls.append((len(rows), kwargs.get("base_fold") is not None))
+                return original_fold(rows, *args, **kwargs)
+
+            try:
+                with patch.object(kernel_module, "hydrate_and_fold_records", counted_fold):
+                    for index in range(cycles):
+                        with driver._logical_state_scope():
+                            boundary = driver.boundary_record(
+                                "before_memory",
+                                f"scaling-{index}",
+                                {"messages": [], "shared_state": {}},
+                                source_digest=digest([message.to_dict() for message in driver.transcript()]),
+                            )
+                            driver.commit([boundary])
+
+                assert len(calls) == cycles + 1
+                assert calls[0][1] is False
+                assert all(uses_base for _size, uses_base in calls[1:])
+                assert driver._active_logical_fold is None
+                assert driver._logical_prefix is not None
+                assert len(driver._logical_prefix.fold.history) == len(driver.records)
             finally:
                 assert sessions.store.release(lease)
     finally:
@@ -1838,5 +2489,278 @@ def test_logical_commit_preserves_fresh_state_ownership_after_replay_reload(
                 assert boundary.record_id in {record.record_id for record in driver.state.boundaries.values()}
 
             assert sessions.store.release(lease)
+    finally:
+        provider.close()
+
+
+@pytest.mark.parametrize("link_count", [8, 32])
+def test_content_write_batch_reuses_transaction_key_and_content_queries(tmp_path: Path, link_count: int) -> None:
+    session_id = f"content-write-batch-{link_count}"
+    provider = LocalKeyProvider(b"k" * 32)
+    counts: Counter[str] = Counter()
+    original_fetchone = _SQLiteContentBackend.fetchone
+    original_fetchall = _SQLiteContentBackend.fetchall
+    original_run = _SQLiteContentBackend.run
+
+    def counted_fetchone(self, query, params=()):
+        if "sk_content" in query or "sk_session_key" in query or "sk_record" in query:
+            counts["fetchone"] += 1
+        if "sk_session_key" in query:
+            counts["session_key_query"] += 1
+        return original_fetchone(self, query, params)
+
+    def counted_fetchall(self, query, params=()):
+        if "sk_content" in query or "sk_session_key" in query or "sk_record" in query:
+            counts["fetchall"] += 1
+        return original_fetchall(self, query, params)
+
+    def counted_run(self, query, params=()):
+        if "sk_content" in query or "sk_session_key" in query or "sk_record" in query:
+            counts["run"] += 1
+        return original_run(self, query, params)
+
+    try:
+        with SQLiteStore.standalone(str(tmp_path / f"{session_id}.sqlite")) as store:
+            store.install_schema()
+            store.configure_input_admission(allow_unsigned=True)
+            sessions = SessionDriver(store=store, content_key_provider=provider)
+            sessions.create(session_id, "/workspace", {})
+            head = store.read(session_id, limit=1).head_seq
+            initial_content_count = store._one(
+                "SELECT COUNT(*) FROM sk_content WHERE tenant_id=%s AND session_id=%s",
+                (store.tenant_id, session_id),
+            )[0]
+            initial_link_count = store._one(
+                "SELECT COUNT(*) FROM sk_content_link WHERE tenant_id=%s AND session_id=%s",
+                (store.tenant_id, session_id),
+            )[0]
+            lease = store.acquire(session_id, owner="content-write-batch", ttl_ms=60_000)
+            assert lease is not None
+            try:
+                with (
+                    patch.object(provider, "unwrap", wraps=provider.unwrap) as unwrap,
+                    patch.object(provider, "restore_data_key", wraps=provider.restore_data_key) as restore,
+                    patch.object(_SQLiteContentBackend, "fetchone", counted_fetchone),
+                    patch.object(_SQLiteContentBackend, "fetchall", counted_fetchall),
+                    patch.object(_SQLiteContentBackend, "run", counted_run),
+                    sessions.store.atomic() as tx,
+                ):
+                    writer = SessionContentWriter.bind(tx, tenant_id=store.tenant_id, session_id=session_id)
+                    refs = tuple(writer.put_bytes(b"same value") for _ in range(link_count))
+                    assert len(set(refs)) == 1
+                    records = tuple(
+                        make_record(
+                            "usage_observed",
+                            session_id=session_id,
+                            payload={
+                                "meter_id": f"content-write-batch/{index}",
+                                "observation": index + 1,
+                                "mode": "cumulative",
+                                "usage": ref.to_dict(),
+                                "source": ref.to_dict(),
+                            },
+                        )
+                        for index, ref in enumerate(refs)
+                    )
+                    receipt = tx.append(
+                        session_id,
+                        lease=lease,
+                        expected_seq=head,
+                        commit_id=f"content-write-batch-{link_count}",
+                        records=records,
+                    )
+                    before_link = counts.copy()
+                    writer.link_records(
+                        (seq, ref, "provider.result")
+                        for (_record_id, seq), ref in zip(receipt.record_sequences, refs, strict=True)
+                    )
+                    link_counts = counts - before_link
+                    memo = writer._write_memo
+
+                assert unwrap.call_count == 1
+                assert restore.call_count == 1
+                assert counts["session_key_query"] <= 2
+                assert link_counts["fetchone"] == 0
+                assert link_counts["fetchall"] <= 4
+                assert link_counts["run"] <= 2
+                assert not memo.session_keys and not memo.data_keys and not memo.content
+                assert (
+                    store._one(
+                        "SELECT COUNT(*) FROM sk_content WHERE tenant_id=%s AND session_id=%s",
+                        (store.tenant_id, session_id),
+                    )[0]
+                    == initial_content_count + 1
+                )
+                assert (
+                    store._one(
+                        "SELECT COUNT(*) FROM sk_content_link WHERE tenant_id=%s AND session_id=%s",
+                        (store.tenant_id, session_id),
+                    )[0]
+                    == initial_link_count + link_count
+                )
+            finally:
+                assert store.release(lease)
+    finally:
+        provider.close()
+
+
+@pytest.mark.parametrize("rollback", [False, True])
+def test_content_write_memo_clears_on_commit_and_rollback(tmp_path: Path, rollback: bool) -> None:
+    session_id = f"content-write-memo-{'rollback' if rollback else 'commit'}"
+    provider = LocalKeyProvider(b"k" * 32)
+    try:
+        with SQLiteStore.standalone(str(tmp_path / f"{session_id}.sqlite")) as store:
+            store.install_schema()
+            store.configure_input_admission(allow_unsigned=True)
+            sessions = SessionDriver(store=store, content_key_provider=provider)
+            sessions.create(session_id, "/workspace", {})
+            if rollback:
+                with pytest.raises(RuntimeError, match="rollback content write"), sessions.store.atomic() as tx:
+                    writer = SessionContentWriter.bind(tx, tenant_id=store.tenant_id, session_id=session_id)
+                    writer.put_bytes(b"transaction scoped")
+                    memo = writer._write_memo
+                    assert memo.session_keys and memo.data_keys and memo.content
+                    raise RuntimeError("rollback content write")
+            else:
+                with sessions.store.atomic() as tx:
+                    writer = SessionContentWriter.bind(tx, tenant_id=store.tenant_id, session_id=session_id)
+                    writer.put_bytes(b"transaction scoped")
+                    memo = writer._write_memo
+                    assert memo.session_keys and memo.data_keys and memo.content
+            assert not memo.session_keys and not memo.data_keys and not memo.content
+    finally:
+        provider.close()
+
+
+def test_content_link_batch_rejects_ref_tamper_before_mutation(tmp_path: Path) -> None:
+    session_id = "content-write-tamper"
+    provider = LocalKeyProvider(b"k" * 32)
+    try:
+        with SQLiteStore.standalone(str(tmp_path / f"{session_id}.sqlite")) as store:
+            store.install_schema()
+            store.configure_input_admission(allow_unsigned=True)
+            sessions = SessionDriver(store=store, content_key_provider=provider)
+            sessions.create(session_id, "/workspace", {})
+            head = store.read(session_id, limit=1).head_seq
+            initial_link_count = store._one(
+                "SELECT COUNT(*) FROM sk_content_link WHERE tenant_id=%s AND session_id=%s",
+                (store.tenant_id, session_id),
+            )[0]
+            lease = store.acquire(session_id, owner="content-write-tamper", ttl_ms=60_000)
+            assert lease is not None
+            try:
+                with sessions.store.atomic() as tx:
+                    writer = SessionContentWriter.bind(tx, tenant_id=store.tenant_id, session_id=session_id)
+                    ref = writer.put_bytes(b"authenticated content")
+                    record = make_record(
+                        "usage_observed",
+                        session_id=session_id,
+                        payload={
+                            "meter_id": "content-write-tamper",
+                            "observation": 1,
+                            "mode": "cumulative",
+                            "usage": ref.to_dict(),
+                            "source": ref.to_dict(),
+                        },
+                    )
+                    receipt = tx.append(
+                        session_id,
+                        lease=lease,
+                        expected_seq=head,
+                        commit_id="content-write-tamper",
+                        records=(record,),
+                    )
+                    seq = receipt.record_sequences[0][1]
+                    tampered = replace(ref, mac="0" * 64)
+                    with pytest.raises(ContentIntegrityError, match="metadata does not match"):
+                        writer.link_records(((seq, tampered, "provider.result"),))
+                    assert writer.get_bytes(ref) == b"authenticated content"
+            finally:
+                assert store.release(lease)
+            assert (
+                store._one(
+                    "SELECT COUNT(*) FROM sk_content_link WHERE tenant_id=%s AND session_id=%s",
+                    (store.tenant_id, session_id),
+                )[0]
+                == initial_link_count
+            )
+    finally:
+        provider.close()
+
+
+def test_content_link_batch_preserves_duplicate_conflict_and_pin_semantics(tmp_path: Path) -> None:
+    session_id = "content-write-link-semantics"
+    provider = LocalKeyProvider(b"k" * 32)
+    try:
+        with SQLiteStore.standalone(str(tmp_path / f"{session_id}.sqlite")) as store:
+            store.install_schema()
+            store.configure_input_admission(allow_unsigned=True)
+            sessions = SessionDriver(store=store, content_key_provider=provider)
+            sessions.create(session_id, "/workspace", {})
+            head = store.read(session_id, limit=1).head_seq
+            lease = store.acquire(session_id, owner="content-write-link-semantics", ttl_ms=60_000)
+            assert lease is not None
+            try:
+                with sessions.store.atomic() as tx:
+                    writer = SessionContentWriter.bind(tx, tenant_id=store.tenant_id, session_id=session_id)
+                    first = writer.put_bytes(b"first")
+                    conflicting = writer.put_bytes(b"conflicting")
+                    expired = writer.put_bytes(b"expired pin")
+                    record = make_record(
+                        "usage_observed",
+                        session_id=session_id,
+                        payload={
+                            "meter_id": "content-write-link-semantics",
+                            "observation": 1,
+                            "mode": "cumulative",
+                            "usage": first.to_dict(),
+                            "source": first.to_dict(),
+                        },
+                    )
+                    receipt = tx.append(
+                        session_id,
+                        lease=lease,
+                        expected_seq=head,
+                        commit_id="content-write-link-semantics",
+                        records=(record,),
+                    )
+                    seq = receipt.record_sequences[0][1]
+                    writer.link_records(((seq, first, "provider.result"), (seq, first, "provider.result")))
+                    with pytest.raises(ContentLinkConflict):
+                        writer.link_records(((seq, conflicting, "provider.result"),))
+                    store._rows(
+                        "UPDATE sk_content SET pin_until_ms=0 WHERE tenant_id=%s AND session_id=%s AND content_id=%s",
+                        (store.tenant_id, session_id, expired.content_id),
+                    )
+                    with pytest.raises(ContentUnavailable, match="staging pin is expired"):
+                        writer.link_records(((seq, expired, "provider.usage"),))
+                    links = writer.durable.read_links(store.tenant_id, session_id, record_seq=seq)
+                    assert [(link.slot, link.ref) for link in links] == [("provider.result", first)]
+                    assert store._one(
+                        "SELECT state,pin_until_ms FROM sk_content WHERE tenant_id=%s AND session_id=%s AND content_id=%s",
+                        (store.tenant_id, session_id, first.content_id),
+                    ) == ("live", None)
+            finally:
+                assert store.release(lease)
+    finally:
+        provider.close()
+
+
+def test_content_write_rejects_destroyed_session_key(tmp_path: Path) -> None:
+    session_id = "content-write-key-destroy"
+    provider = LocalKeyProvider(b"k" * 32)
+    try:
+        with SQLiteStore.standalone(str(tmp_path / f"{session_id}.sqlite")) as store:
+            store.install_schema()
+            store.configure_input_admission(allow_unsigned=True)
+            sessions = SessionDriver(store=store, content_key_provider=provider)
+            sessions.create(session_id, "/workspace", {})
+            with sessions.store.atomic() as tx:
+                writer = SessionContentWriter.bind(tx, tenant_id=store.tenant_id, session_id=session_id)
+                ref = writer.put_bytes(b"before key destruction")
+            assert provider.destroy(store.tenant_id, ref.key_id).accepted
+            with pytest.raises(KeyUnavailable), sessions.store.atomic() as tx:
+                writer = SessionContentWriter.bind(tx, tenant_id=store.tenant_id, session_id=session_id)
+                writer.put_bytes(b"after key destruction")
     finally:
         provider.close()

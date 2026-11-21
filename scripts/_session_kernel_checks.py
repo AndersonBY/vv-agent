@@ -100,6 +100,12 @@ def validate_outputs(values, base: Path, keep, replacements):
     )
     current.add("vv-agent-public-api-v15")
     current.add(baseline["memory_local.json"]["microcompact"]["schema_version"])
+    current.update(
+        {
+            RECORD_SCHEMA["properties"]["schema_version"]["const"],
+            INPUT_SCHEMA["properties"]["schema_version"]["const"],
+        }
+    )
     for schema in schemas.values():
         current.update(
             node["const"]
