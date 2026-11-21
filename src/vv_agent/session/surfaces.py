@@ -1122,7 +1122,7 @@ class SessionDriver:
             if point == "after_commit":
                 # A commit can append many records. Read the committed head so
                 # transient model deltas sort after the exact batch watermark.
-                watermark["seq"] = store.read(sid, limit=1).head_seq
+                watermark["seq"] = store.lease_status(sid)[0]
                 self._notify_session(sid)
             elif point in {"after_input", "after_drive"}:
                 self._notify_session(sid)
