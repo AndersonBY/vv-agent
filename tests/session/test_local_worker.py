@@ -32,7 +32,9 @@ def _wait_for(predicate, timeout=3.0):
 def _driver(tmp_path: Path) -> tuple[SessionDriver, Path]:
     database = tmp_path / "worker.sqlite3"
     provider = LocalKeyProvider(b"w" * 32, state_path=tmp_path / "keys.sqlite3")
-    return SessionDriver(str(database), content_key_provider=provider), database
+    driver = SessionDriver(str(database), content_key_provider=provider)
+    driver.store.configure_input_admission(allow_unsigned=True)
+    return driver, database
 
 
 def _start_session(driver: SessionDriver, session_id: str) -> None:
@@ -55,6 +57,7 @@ def _support(database: Path, drive: DriveCallback, opened: list[SQLiteStore] | N
     @contextmanager
     def open_store():
         with SQLiteStore.standalone(str(database)) as store:
+            store.configure_input_admission(allow_unsigned=True)
             if opened is not None:
                 opened.append(store)
             yield store
