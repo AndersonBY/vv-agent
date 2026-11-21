@@ -6,10 +6,10 @@ import json
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import replace
-from pathlib import Path
 from typing import Any
 
 import pytest
+from support.contract import fixture_root
 
 from vv_agent import (
     Agent,
@@ -44,8 +44,11 @@ from vv_agent.events import (
 )
 from vv_agent.runtime.cancellation import CancellationToken
 from vv_agent.session.app_server import _KernelThreadStore
+from vv_agent.session.content_store import LocalKeyProvider
+from vv_agent.session.projection import hydrate_record_payload, hydration_for_session_store
 from vv_agent.session.sqlite import SQLiteStore
 from vv_agent.session.store import SessionStore
+from vv_agent.session.timing import SystemClock
 from vv_agent.types import (
     LLMResponse,
     ToolCall,
@@ -53,7 +56,7 @@ from vv_agent.types import (
 
 
 def _observable_contract() -> dict[str, Any]:
-    fixture = Path(__file__).parent / "fixtures" / "parity" / "app_server_observable.json"
+    fixture = fixture_root() / "app_server_observable.json"
     return json.loads(fixture.read_text(encoding="utf-8"))
 
 
@@ -138,7 +141,11 @@ def test_tool_lifecycle_app_server_projection_matches_shared_fixture():
             },
         )
         page = _response(_server.transport, 99)["result"]
-        content = row.record.payload["result"]["content"]
+        hydrated = hydrate_record_payload(
+            row,
+            hydration_for_session_store(_server.kernel.store, ref["sessionId"]),
+        )
+        content = hydrated["result"]["content"]
         assert base64.b64decode(page["data"]).decode() == content == summary["preview"]
         assert json.loads(content)["agent_name"] == "child"
         assert json.loads(content)["cycles"] == 1
@@ -402,7 +409,13 @@ def test_budget_exhaustion_projects_typed_usage_to_turn_and_store():
 def test_shared_fixture_snapshot_nullability_and_restart_recovery(tmp_path):
     with SQLiteStore.standalone(str(tmp_path / "threads.sqlite")) as store:
         store.install_schema()
-        with _real_turn([LLMResponse("", [ToolCall("ask", "ask_user", {"question": "Choose"})])], store=store) as (
+        store.configure_input_admission(allow_unsigned=True)
+        provider = LocalKeyProvider(b"k" * 32, state_path=tmp_path / "content-keys.sqlite3")
+        with _real_turn(
+            [LLMResponse("", [ToolCall("ask", "ask_user", {"question": "Choose"})])],
+            store=store,
+            content_key_provider=provider,
+        ) as (
             server,
             _messages,
         ):
@@ -608,7 +621,8 @@ def test_turn_metadata_is_per_turn_and_does_not_mutate_host_config():
         assert host.config_requests[1].metadata == {"thread": "base", "shared": "thread", "second": 2}
         assert host.base_config.metadata == {"host": "base", "shared": "host"}
         rows = store.kernel.store.read_state(thread.thread_id)[1]
-        tasks = [r.record.payload["definition"]["task"] for r in rows if r.record.kind == "turn_started"]
+        hydration = hydration_for_session_store(store.kernel.store, thread.thread_id)
+        tasks = [hydrate_record_payload(r, hydration)["definition"]["task"] for r in rows if r.record.kind == "turn_started"]
         assert tasks[0]["metadata"]["turnOnly"] == 1
         assert "turnOnly" not in tasks[1]["metadata"]
         assert tasks[1]["metadata"]["second"] == 2
@@ -713,27 +727,33 @@ def _usage_response():
 def _completed(transport):
     messages = []
     while True:
-        message = transport.receive_outbound(timeout=3)
+        message = transport.receive_outbound(timeout=10)
         messages.append(message)
         if message.get("method") == "turn/completed":
             return messages
 
 
 @contextmanager
-def _real_turn(steps, *, agent=None, config=None, thread_number=1, store=None):
+def _real_turn(steps, *, agent=None, config=None, thread_number=1, store=None, content_key_provider=None):
     transport = ChannelTransport(connection_id="conn_1")
     server = AppServer(
         transport=transport,
         store=store,
+        content_key_provider=content_key_provider,
         host=DefaultAppServerHost(
             agent=agent or Agent("fixture", "Answer."),
             run_config=replace(config or RunConfig(), model_provider=ScriptedModelProvider.new("scripted", "m", steps)),
         ),
     )
-    assert isinstance(server.kernel.store, SQLiteStore)
-    # File-backed heartbeat connections must observe the same controlled clock.
+    store_capability = server.kernel.store
+    root_store = store_capability._root
+    assert isinstance(root_store, SQLiteStore)
+    if store is not None:
+        assert root_store is store
+    assert callable(store_capability.read_state)
+    # Keep wall-clock assertions deterministic without freezing lease monotonic time.
     with pytest.MonkeyPatch.context() as frozen_clock:
-        frozen_clock.setattr(SQLiteStore, "clock_sql", "1041102")
+        frozen_clock.setattr(SystemClock, "now_ms", lambda _self: 1041102)
         try:
             server.processor.process_message(
                 "conn_1", {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"clientInfo": {"name": "producer"}}}

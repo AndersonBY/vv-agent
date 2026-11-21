@@ -1366,7 +1366,23 @@ class SessionDriver:
             if next_seq <= cursor:
                 break
             for event in events:
-                self._deliver_observer_event(observer_config, event)
+                try:
+                    self._deliver_observer_event(observer_config, event)
+                except Exception as exc:
+                    retry_attempts, retry_base, retry_cap, retry_jitter = self._lease_retry_policy(None, None)
+                    self._errors[sid] = _SessionFailure(
+                        None,
+                        exc,
+                        1,
+                        store.read(sid, limit=1).head_seq,
+                        True,
+                        retry_attempts,
+                        retry_base,
+                        retry_cap,
+                        retry_jitter,
+                    )
+                    self._notify_session(sid)
+                    return
             cursor = next_seq
             self._observer_cursors[sid] = max(self._observer_cursors.get(sid, 0), cursor)
         processors = trace_processors(runtime.config)

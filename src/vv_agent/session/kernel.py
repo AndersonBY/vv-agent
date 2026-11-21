@@ -668,6 +668,14 @@ class _Driver(CoreDriver):
                 previous_stored = self._stored_by_id.get(previous_record.record_id)
             return hydrated(previous_stored) if previous_stored is not None else previous_record
 
+        # Whole-history folds must apply preparation before hydrating a retained retry.
+        prepared_by_attempt = {
+            (stored.record.operation_id, stored.record.attempt): hydrated(stored)
+            for stored in records
+            if stored.record.kind == "op_prepared"
+            and stored.record.operation_id is not None
+            and stored.record.attempt is not None
+        }
         payloads: dict[str, dict[str, Any]] = {}
         previous_by_operation: dict[str, tuple[StoredRecord | None, Record | None]] = {}
         for stored in records:
@@ -677,11 +685,14 @@ class _Driver(CoreDriver):
             operation_id = record.operation_id
             attempt = record.attempt or 0
             previous = previous_by_operation.get(operation_id)
+            previous_is_effective = False
             if previous is None and attempt > 1 and base_fold is not None:
                 operation = base_fold.state.operations.get(operation_id)
                 previous_attempt = operation.attempts.get(attempt - 1) if operation is not None else None
                 if previous_attempt is not None:
-                    previous = (None, previous_attempt.plan)
+                    previous = (None, previous_attempt.execution_plan)
+                    # The execution plan shares the raw plan id; rehydrating that id would discard preparation.
+                    previous_is_effective = previous_attempt.prepared is not None
             if previous is None:
                 if attempt == 1:
                     previous_by_operation[operation_id] = (stored, None)
@@ -692,10 +703,14 @@ class _Driver(CoreDriver):
                 previous_by_operation[operation_id] = (stored, current)
                 continue
             previous_stored, previous_record = previous
-            previous_record = logical_previous(previous_stored, previous_record)
+            if not previous_is_effective:
+                previous_record = logical_previous(previous_stored, previous_record)
             if previous_record is None:
                 previous_by_operation[operation_id] = (stored, current)
                 continue
+            prepared = prepared_by_attempt.get((operation_id, attempt - 1))
+            if prepared is not None:
+                previous_record = Attempt(plan=previous_record, prepared=prepared).execution_plan
             payload = copy_json(current._payload)
             for slot in ("request", "tool", "budget_admission"):
                 payload[slot] = copy_json(previous_record._payload[slot])

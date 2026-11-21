@@ -1062,11 +1062,24 @@ def test_w3_prepared_rewrite_not_started_retry_reuses_hook_result(tmp_path: Path
         assert retry.attempt == retry_plan.attempt == 2
         assert retry.payload["request_digest"] == retry_plan.payload["request_digest"] == prepared.payload["request_digest"]
         assert retry.payload["command_digest"] == retry_plan.payload["command_digest"] == prepared.payload["command_digest"]
+        assert (
+            retry.payload["request"]["arguments"]["command"]
+            == prepared.payload["request"]["arguments"]["command"]
+            == hook.command
+        )
         assert hook.calls == 1
         assert not any(
             row.record.kind == "op_prepared" and row.record.operation_id == prepared.operation_id and row.record.attempt == 2
             for row in rows
         )
+
+        record_count = len(rows)
+        runtime = sessions._build_runtime_for_claim(drive_store, SESSION_ID)
+        drive(drive_store, SESSION_ID, runtime=runtime)
+        replayed_rows, _ = _records(drive_store)
+        assert len(replayed_rows) == record_count
+        assert len(provider.probe.submitted_plans) == 2
+        assert hook.calls == 1
 
 
 def test_w3_not_started_after_cancel_is_rejected_before_retry(tmp_path: Path) -> None:
