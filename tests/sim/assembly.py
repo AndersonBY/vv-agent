@@ -306,6 +306,7 @@ class DeclarationCatalog:
 class HostConfig:
     budget_limits: RunBudgetLimits = field(default_factory=RunBudgetLimits)
     host_cost_meter: Any = None
+    cancellation_token: Cancellation | None = None
     approval_mode: str = "default"
     approval_required: bool = False
     approval_timeout_seconds: float = 300.0

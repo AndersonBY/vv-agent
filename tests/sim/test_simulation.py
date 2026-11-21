@@ -85,6 +85,27 @@ def test_simulation_smoke(monkeypatch):
         assert result["elapsed_seconds"] < count * 0.06, "W1 throughput acceptance remains unmet"
 
 
+def test_factory_not_ready_seed_zero_executes_real_core_on_sqlite(tmp_path, monkeypatch):
+    from vv_agent.kernel import _driver_recovery
+
+    observed_steps = []
+    actual_step = _driver_recovery.step
+
+    def observe_step(driver, *, one_turn):
+        observed_steps.append(driver.sid)
+        return (yield from actual_step(driver, one_turn=one_turn))
+
+    monkeypatch.setattr(_driver_recovery, "step", observe_step)
+
+    with SimWorld(tmp_path / "factory-not-ready-seed-0.sqlite", seed=0) as world:
+        result = run_scenario(world)
+        assert result["scenario"] == "factory_not_ready"
+        assert result["backend"] == "sqlite"
+        assert result["calls"]
+        assert observed_steps
+        assert all(runtime.config.cancellation_token is None for runtime in world.runtimes.values())
+
+
 @pytest.mark.parametrize("fault,invariant", [("external", "I1"), ("inbox", "I3")])
 def test_step_oracles_detect_changes_without_new_records(sim_database, fault, invariant):
     from .assembly import CallContext
