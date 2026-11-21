@@ -31,7 +31,7 @@ From the repository root:
 uv run python scripts/session_simulation.py --seeds 5 --workers 2
 uv run python scripts/session_simulation.py --seed 17 --seeds 1 --scenario accepted_lost
 uv run pytest tests/sim/test_simulation.py tests/sim/test_mutations.py -k sqlite
-TMPDIR=/dev/shm VV_AGENT_SIM_WORKERS=10 uv run --no-sync pytest tests/sim -k simulation_smoke -q -s
+TMPDIR=/dev/shm VV_AGENT_SIM_WORKERS=20 uv run --no-sync pytest tests/sim -k simulation_smoke -q -s
 uv run pytest tests/sim/test_import_boundary.py -q -s
 ```
 
@@ -39,7 +39,10 @@ The unqualified CLI and smoke gate run 1,000 seeds. The smoke gate asserts at
 least 1,000 seeds per minute. The fixed prototype snapshot passed this smoke
 requirement on the hardware documented below. Use
 explicit small counts for local development. `VV_AGENT_SIM_WORKERS` selects smoke workers;
-CLI uses `--workers`. The formal performance gate pins it to 10 spawn workers. `--workers 1` runs serially.
+CLI uses `--workers`. On Linux and WSL, SQLite uses a warmed `fork` pool when the parent
+has no live worker threads or SQLite connections. Other platforms, PostgreSQL, and unsafe
+parents use `spawn`. The formal performance gate uses 20 workers on the reference host.
+`--workers 1` runs serially.
 
 The smoke gate uses `TMPDIR=/dev/shm` so its real SQLite files and WAL live in
 tmpfs. The coordinator keeps at most `2 * workers` futures in flight, consumes
@@ -53,11 +56,12 @@ separate; do not export `TMPDIR` for the full suite. Full remote checks split in
 
 ```bash
 uv run pytest -k "not simulation_smoke"
-TMPDIR=/dev/shm VV_AGENT_SIM_WORKERS=10 timeout 60s uv run --no-sync pytest tests/sim -k simulation_smoke -q -s
+TMPDIR=/dev/shm VV_AGENT_SIM_WORKERS=20 timeout 60s uv run --no-sync pytest tests/sim -k simulation_smoke -q -s
 ```
 
-Independent seeds use standard-library processes with the `spawn` start method;
-each world stays single-threaded and owns its disposable real database file.
+Independent seeds use standard-library processes with a guarded, warmed `fork` start
+method on Linux and a `spawn` fallback elsewhere; each world stays single-threaded and
+owns its disposable real database file.
 No live SQL connections are inherited. At most twice the worker count of jobs
 and result traces are retained in the rolling window; aggregate memory does not grow with
 the seed count. The measured campaign includes identity calculation, process

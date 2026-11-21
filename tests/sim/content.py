@@ -68,6 +68,7 @@ class SimContentKeyProvider:
         self._entropy = SimContentEntropy(seed, b"key-provider")
         self._bindings: dict[str, tuple[str, str]] = {}
         self._destroyed: set[str] = set()
+        self.revision = 0
 
     @staticmethod
     def _data_key(seed: int, key_id: str) -> bytes:
@@ -126,6 +127,7 @@ class SimContentKeyProvider:
         if key_id in self._destroyed:
             return KeyDestroyOutcome(True, KeyDestroyStatus.ALREADY_DESTROYED, f"sim-destroy/{key_id}")
         self._destroyed.add(key_id)
+        self.revision += 1
         return KeyDestroyOutcome(True, KeyDestroyStatus.DESTROYED, f"sim-destroy/{key_id}")
 
 

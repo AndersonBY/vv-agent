@@ -11,7 +11,7 @@ from vv_agent.kernel._records import make_record
 from vv_agent.kernel._sql import LedgerIntegrityError, _extend_chain_digest
 
 from .scenarios import run_scenario
-from .world import InvariantViolation, SimLedgerSigner, SimWorld, sqlite_root
+from .world import InvariantViolation, SimLedgerSigner, SimWorld
 
 
 def test_ledger_signer_caches_exact_proofs_and_rejections(monkeypatch):
@@ -96,10 +96,10 @@ def test_i9_recomputes_real_sqlite_chain_and_checkpoints(tmp_path):
 
 
 def _warm_verified_cache(world, session_id="s"):
-    observer = sqlite_root(world.connection("observer"))
+    observer = world.connection("observer")
     head = observer._head(session_id)[0]
     observer._verified_records(session_id, head)
-    return observer, sqlite_root(world.connection("fault")), head
+    return observer, world.connection("fault"), head
 
 
 def test_i9_cache_rechecks_commit_digest(sim_database):

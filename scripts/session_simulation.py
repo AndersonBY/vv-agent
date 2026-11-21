@@ -1,4 +1,4 @@
-"""Run real-storage simulations; each spawned worker owns independent seeded worlds."""
+"""Run real-storage simulations; each worker owns an independent seeded world."""
 
 from __future__ import annotations
 

@@ -91,9 +91,10 @@ uv run pytest tests/sim/test_mutations.py -k sqlite -q
 
 The PR smoke gate runs 1,000 independent SQLite-file seeds within 60 seconds,
 including process startup, tokenizer initialization and process shutdown. Each
-world uses one thread; the selected implementation uses the original bounded
-batcher with spawned processes and at most `2 * workers` jobs per batch. The CI
-smoke step alone sets `TMPDIR=/dev/shm`.
+world uses one thread. On Linux and WSL, the selected implementation uses a
+warmed `fork` pool when the parent is single-threaded and has no open SQLite
+connection. It falls back to `spawn` elsewhere and keeps at most `2 * workers`
+jobs in flight. The CI smoke step alone sets `TMPDIR=/dev/shm`.
 These are real SQLite files on a RAM-backed filesystem, with WAL, FULL
 synchronous mode and every invariant check retained. This evidence covers SQL
 transactions and worker-process recovery; it does not prove durability through

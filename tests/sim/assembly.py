@@ -8,8 +8,10 @@ Agent, or ToolRegistry implementation.
 
 from __future__ import annotations
 
+import hashlib
+import sqlite3
 import threading
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from typing import Any, Protocol, cast
@@ -32,7 +34,19 @@ from vv_agent.kernel._budget_values import BudgetUnavailableReason, RunBudgetLim
 from vv_agent.kernel._call_context import approved_tool_call
 from vv_agent.kernel._cancellation import Cancellation, CancelledError
 from vv_agent.kernel._child_store import ordinary_result_for_children
-from vv_agent.kernel._content import ContentRef
+from vv_agent.kernel._content import (
+    ContentBindingMismatch,
+    ContentRef,
+    ContentStoreError,
+    ContentUnavailable,
+    WrappedDataKey,
+)
+from vv_agent.kernel._content import (
+    ContentIntegrityError as BackendContentIntegrityError,
+)
+from vv_agent.kernel._content import (
+    KeyUnavailable as BackendKeyUnavailable,
+)
 from vv_agent.kernel._content_publication import (
     declare_input_content,
     link_declared_input_content,
@@ -45,7 +59,14 @@ from vv_agent.kernel._drive import DriveBinding, drive_core
 from vv_agent.kernel._driver import CoreDriver
 from vv_agent.kernel._driver_requests import CommitRecords
 from vv_agent.kernel._execution_values import AgentTask, LLMResponse
-from vv_agent.kernel._hydration import DefinitionContent, _parse_definition
+from vv_agent.kernel._hydration import (
+    DefinitionContent,
+    HydrationError,
+    IntegrityFailure,
+    KeyUnavailable,
+    MissingContentLink,
+    _parse_definition,
+)
 from vv_agent.kernel._lease_scope import HeartbeatStopped, LeaseOwnership, apply_controls, cancel_if_lost
 from vv_agent.kernel._message_values import Message
 from vv_agent.kernel._model_settings import ModelSettings
@@ -56,12 +77,82 @@ from vv_agent.kernel._record_codec import RecordError
 from vv_agent.kernel._records import Record, copy_json, digest
 from vv_agent.kernel._reducer import Fold
 from vv_agent.kernel._sql import SQLStore
+from vv_agent.kernel._sqlite import SQLiteStore
 from vv_agent.kernel._store import Conflict, Lease, LeaseLost, SessionStore, StoredRecord
 from vv_agent.kernel._token_count import TokenCount, _StopIterationTransport
 from vv_agent.kernel._tool_metadata import ToolIdempotency, ToolMetadata
 from vv_agent.kernel._tool_values import ToolExecutionResult, ToolResultStatus
 
 SIM_HANDLER_VERSION = "sim-core-v1"
+
+
+def _sqlite_store(store):
+    current, seen = store, set()
+    while id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, SQLiteStore):
+            return current
+        for name in ("_root", "_root_store", "_store", "store"):
+            parent = getattr(current, name, None)
+            if parent is not None and parent is not current:
+                current = parent
+                break
+        else:
+            return None
+    return None
+
+
+def _sqlite_state_version(store, session_id):
+    root = _sqlite_store(store)
+    if root is None:
+        return None
+    with root._connection_lock:
+        data_version = root.connection.execute("PRAGMA data_version").fetchone()[0]
+        total_changes = root.connection.total_changes
+    head = root._one(
+        "SELECT head_seq,inbox_seq FROM sk_session WHERE tenant_id=%s AND session_id=%s",
+        (store.tenant_id, session_id),
+    )
+    return data_version, total_changes, *head
+
+
+ContentCacheVersion = tuple[int, int, int]
+
+
+def _sqlite_cache_version(store, provider) -> ContentCacheVersion | None:
+    revision = getattr(provider, "revision", None)
+    if type(revision) is not int:
+        return None
+
+    current, seen = store, set()
+    connection = connection_lock = None
+    while id(current) not in seen:
+        seen.add(id(current))
+        candidate = getattr(current, "connection", None)
+        if isinstance(candidate, sqlite3.Connection):
+            connection = candidate
+            connection_lock = getattr(current, "_connection_lock", None) or getattr(current, "connection_lock", None)
+            break
+        for name in ("_frame", "_durable", "_backend", "_root", "_root_store", "_store", "store"):
+            parent = getattr(current, name, None)
+            if parent is not None and parent is not current:
+                current = parent
+                break
+        else:
+            return None
+    if connection is None:
+        return None
+
+    def read_version() -> ContentCacheVersion:
+        return connection.execute("PRAGMA data_version").fetchone()[0], connection.total_changes, revision
+
+    try:
+        if connection_lock is None:
+            return read_version()
+        with connection_lock:
+            return read_version()
+    except Exception:
+        return None
 
 
 class SimRuntimeNotReady(Exception):
@@ -260,34 +351,211 @@ class LogicalSnapshot:
     definitions_by_id: dict[str, DefinitionContent]
 
 
-class ContentSignatureSource(Protocol):
-    _content_signatures: dict[str, Any]
-    _content_bodies: dict[tuple[Any, ...], bytes]
+def _content_state_fingerprint(row: tuple[Any, ...]) -> bytes:
+    fingerprint = hashlib.sha256(b"vv-agent/sim-content-cache/v1\0")
+    for value in row:
+        if value is None:
+            tag, payload = b"n", b""
+        elif type(value) is int:
+            tag, payload = b"i", str(value).encode("ascii")
+        elif isinstance(value, str):
+            tag, payload = b"s", value.encode("utf-8")
+        elif isinstance(value, (bytes, bytearray, memoryview)):
+            tag, payload = b"b", bytes(value)
+        else:
+            raise HydrationError("content cache state contains an unsupported value")
+        fingerprint.update(tag)
+        fingerprint.update(len(payload).to_bytes(8, "big"))
+        fingerprint.update(payload)
+    return fingerprint.digest()
+
+
+class ContentCacheSource(Protocol):
+    content_provider: Any
+    _content_bodies: dict[tuple[Any, ...], tuple[bytes, bytes, ContentCacheVersion | None]]
+
+
+class _CachedDurableContentReader(DurableContentReader):
+    """Expose SimContentReader through the durable frame seam used by core."""
+
+    def __init__(self, owner: SimContentReader, reader: DurableContentReader) -> None:
+        self._owner = owner
+        self._reader = reader
+        super().__init__(reader._store, tenant_id=reader.tenant_id, session_id=reader.session_id)
+
+    def read(self, tenant_id, session_id, owner, slot, ref):
+        return self._owner._read(self._reader, tenant_id, session_id, owner, slot, ref)
+
+    @contextmanager
+    def _read_frame(
+        self,
+        *,
+        record_seqs: Iterable[int] = (),
+        input_ids: Iterable[str] = (),
+        validate_each_read: bool = True,
+    ) -> Iterator[_CachedDurableContentReader]:
+        with self._reader._read_frame(
+            record_seqs=record_seqs,
+            input_ids=input_ids,
+            validate_each_read=validate_each_read,
+        ) as reader:
+            yield _CachedDurableContentReader(self._owner, reader)
 
 
 class SimContentReader:
-    def __init__(self, reader: DurableContentReader, runtime: ContentSignatureSource) -> None:
+    def __init__(self, reader: DurableContentReader, runtime: ContentCacheSource) -> None:
         self._reader = reader
         self._runtime = runtime
+
+    @property
+    def reader(self) -> DurableContentReader:
+        return _CachedDurableContentReader(self, self._reader)
+
+    @property
+    def runtime(self) -> ContentCacheSource:
+        return self._runtime
 
     @property
     def binding(self):
         return self._reader.binding
 
     def read(self, tenant_id, session_id, owner, slot, ref):
-        signature = self._runtime._content_signatures.get(session_id)
-        if signature is None:
-            return self._reader.read(tenant_id, session_id, owner, slot, ref)
-        key = (signature[2:], tenant_id, session_id, ref)
-        body = self._runtime._content_bodies.get(key)
-        if body is not None:
-            owner_kind, owner_value = owner_scope(owner)
-            column = 0 if owner_kind == "record_seq" else 1
-            if any(link[column] == owner_value and link[2] == ref.content_id and link[3] == slot for link in signature[4]):
+        return self._read(self._reader, tenant_id, session_id, owner, slot, ref)
+
+    def _read(self, reader: DurableContentReader, tenant_id, session_id, owner, slot, ref):
+        key = (tenant_id, session_id, owner, slot, ref)
+        version = _sqlite_cache_version(self._reader._store, self._runtime.content_provider)
+        cached = self._runtime._content_bodies.get(key)
+        if cached is not None:
+            body, fingerprint, cached_version = cached
+            if version is not None and cached_version == version:
                 return body
-        body = self._reader.read(tenant_id, session_id, owner, slot, ref)
-        self._runtime._content_bodies[key] = body
+            try:
+                self._assert_cached_link(reader, tenant_id, session_id, owner, slot, ref)
+                state = self._content_state(reader, tenant_id, session_id, ref)
+                if state[0] != fingerprint:
+                    raise IntegrityFailure("cached content state changed after validation")
+                self._assert_provider_key(tenant_id, session_id, state)
+                next_version = (
+                    None if version is None else _sqlite_cache_version(self._reader._store, self._runtime.content_provider)
+                )
+                if version is not None and next_version != version:
+                    raise IntegrityFailure("content state changed during cache validation")
+            except (HydrationError, BackendKeyUnavailable):
+                self._runtime._content_bodies.pop(key, None)
+                raise
+            self._runtime._content_bodies[key] = (body, state[0], next_version)
+            return body
+
+        body = reader.read(tenant_id, session_id, owner, slot, ref)
+        state = self._content_state(reader, tenant_id, session_id, ref)
+        next_version = None if version is None else _sqlite_cache_version(self._reader._store, self._runtime.content_provider)
+        if version is not None and next_version != version:
+            raise IntegrityFailure("content state changed during decryption")
+        self._runtime._content_bodies[key] = (body, state[0], next_version)
         return body
+
+    @staticmethod
+    def _content_state(
+        reader: DurableContentReader,
+        tenant_id: str,
+        session_id: str,
+        ref: ContentRef,
+    ) -> tuple[bytes, str, str, WrappedDataKey]:
+        backend = reader._store
+        seen: set[int] = set()
+        while id(backend) not in seen:
+            seen.add(id(backend))
+            fetchone = getattr(backend, "fetchone", None)
+            if callable(fetchone):
+                break
+            for attribute in ("_frame", "_durable", "_backend"):
+                parent = getattr(backend, attribute, None)
+                if parent is not None and parent is not backend:
+                    backend = parent
+                    break
+            else:
+                raise HydrationError("content cache state backend is unavailable")
+        else:
+            raise HydrationError("content cache state backend is unavailable")
+
+        row = fetchone(
+            "SELECT c.content_id,c.key_id,c.mac,c.size,c.labels,c.state,c.nonce,c.ciphertext,"
+            "c.object_locator,c.pin_until_ms,k.key_id,k.provider_id,k.wrapped_key,k.state "
+            "FROM sk_content c JOIN sk_session_key k ON k.tenant_id=c.tenant_id "
+            "AND k.session_id=c.session_id WHERE c.tenant_id={p} AND c.session_id={p} "
+            "AND c.content_id={p}",
+            (tenant_id, session_id, ref.content_id),
+        )
+        if row is None:
+            raise IntegrityFailure("content state disappeared after link validation")
+        try:
+            wrapped = WrappedDataKey(tenant_id, session_id, row[10], bytes(row[12]))
+        except (TypeError, ValueError, ContentBindingMismatch) as exc:
+            raise IntegrityFailure("content key state is malformed") from exc
+        return (_content_state_fingerprint(row), row[11], row[13], wrapped)
+
+    def _assert_provider_key(
+        self,
+        tenant_id: str,
+        session_id: str,
+        state: tuple[bytes, str, str, WrappedDataKey],
+    ) -> None:
+        provider = self._runtime.content_provider
+        if provider is None or state[1] != getattr(provider, "provider_id", None) or state[2] != "active":
+            raise KeyUnavailable("session content key is unavailable")
+        try:
+            data_key = provider.unwrap(tenant_id, session_id, state[3])
+        except BackendKeyUnavailable as exc:
+            raise KeyUnavailable("session content key is unavailable") from exc
+        except BackendContentIntegrityError as exc:
+            raise IntegrityFailure("session content key failed integrity validation") from exc
+        except ContentStoreError as exc:
+            raise HydrationError("session content key validation failed") from exc
+        if len(data_key) != 32:
+            raise KeyUnavailable("session content key is malformed")
+
+    @contextmanager
+    def _read_frame(
+        self,
+        *,
+        record_seqs: Iterable[int] = (),
+        input_ids: Iterable[str] = (),
+        validate_each_read: bool = True,
+    ) -> Iterator[DurableContentReader]:
+        with self._reader._read_frame(
+            record_seqs=record_seqs,
+            input_ids=input_ids,
+            validate_each_read=validate_each_read,
+        ) as reader:
+            yield _CachedDurableContentReader(self, reader)
+
+    @staticmethod
+    def _assert_cached_link(
+        reader: DurableContentReader,
+        tenant_id: str,
+        session_id: str,
+        owner: str,
+        slot: str,
+        ref: ContentRef,
+    ) -> None:
+        owner_kind, owner_value = owner_scope(owner)
+        try:
+            reader._store.assert_link(
+                tenant_id,
+                session_id,
+                ref,
+                slot,
+                **{owner_kind: owner_value},
+            )
+        except (ContentUnavailable, ContentBindingMismatch) as exc:
+            raise MissingContentLink(f"content owner link is unavailable: {owner}/{slot}") from exc
+        except BackendKeyUnavailable as exc:
+            raise KeyUnavailable("session content key is unavailable") from exc
+        except BackendContentIntegrityError as exc:
+            raise IntegrityFailure("content failed integrity validation") from exc
+        except ContentStoreError as exc:
+            raise HydrationError("content link validation failed") from exc
 
 
 def _count(request: TokenCount) -> int:
@@ -562,8 +830,12 @@ class SimDriver(CoreDriver):
     def _logical_state(self):
         if self.content_reader is None or self.state is not self.fold.state:
             return self.state
-        signature = self.runtime.world.cached_state_signature(self.store, self.sid, self.records)
-        self.runtime.world._content_signatures[self.sid] = signature
+        version = _sqlite_state_version(self.store, self.sid)
+        signature = (
+            (tuple((row.seq, row.record.encode()) for row in self.records), version)
+            if version is not None
+            else self.runtime.world.cached_state_signature(self.store, self.sid, self.records)
+        )
         cached = self.runtime._logical_snapshots.get(self.sid)
         if cached is not None and cached.signature == signature:
             return cached.fold.state
