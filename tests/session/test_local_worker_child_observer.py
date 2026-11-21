@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 import vv_agent.session.surfaces as surface_module
+from vv_agent import RunConfig
 from vv_agent.kernel._sql import SessionNotLive
 from vv_agent.session.store import Conflict
 from vv_agent.session.surfaces import SessionDriver
@@ -38,6 +39,18 @@ class _FakeStore:
 
     def is_runnable(self, session_id: str) -> bool:
         return session_id in self.runnable
+
+    def lease_status(self, session_id: str) -> tuple[int, int, int]:
+        return self.heads[session_id], 0, 0
+
+
+def _registration() -> Any:
+    return SimpleNamespace(
+        agent=None,
+        config=RunConfig(stream=lambda _event: None),
+        resolved=None,
+        handler_version="1",
+    )
 
 
 def _child_handle(session_id: str) -> dict[str, Any]:
@@ -72,7 +85,7 @@ def test_observer_wakes_known_child_only_for_new_head_or_first_discovery(monkeyp
     root = object()
     wakes: list[str] = []
     try:
-        driver._runtimes["root"] = SimpleNamespace()  # type: ignore[assignment]
+        driver._runtimes["root"] = _registration()
         store.states["root"] = _state("child-one")
         store.heads["child-one"] = 4
         monkeypatch.setattr(driver, "_runtime_lineage", lambda _store, _sid: (root, ()))
@@ -124,9 +137,9 @@ def test_deleted_child_is_pruned_without_stopping_live_child_observation(monkeyp
     try:
         driver._runtimes.update(
             {
-                "root": SimpleNamespace(),  # type: ignore[dict-item]
-                "other-root": SimpleNamespace(),  # type: ignore[dict-item]
-                "deleted-child": SimpleNamespace(),  # type: ignore[dict-item]
+                "root": _registration(),
+                "other-root": _registration(),
+                "deleted-child": _registration(),
             }
         )
         store.states["root"] = _state("deleted-child", "live-child")
@@ -142,7 +155,7 @@ def test_deleted_child_is_pruned_without_stopping_live_child_observation(monkeyp
             del store
             if session_id != "live-child":
                 return None
-            return SimpleNamespace(agent=None, config=None, resolved=None, handler_version="1")
+            return _registration()
 
         monkeypatch.setattr(driver, "_runtime_lineage", lambda _store, _sid: (root, ()))
         monkeypatch.setattr(driver, "_registration_for_cursor", registration)
@@ -167,7 +180,7 @@ def test_observer_propagates_non_deletion_conflicts(monkeypatch) -> None:
     store = _FakeStore()
     root = object()
     try:
-        driver._runtimes["root"] = SimpleNamespace()  # type: ignore[assignment]
+        driver._runtimes["root"] = _registration()
         store.states["root"] = _state("broken-child")
         store.heads["broken-child"] = 1
         driver._observer_cursors["broken-child"] = 1

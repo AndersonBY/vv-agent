@@ -143,11 +143,14 @@ def test_runner_path_workspace_isolated_from_process_cwd(tmp_path: Path, monkeyp
         ),
     )
 
-    memory_files = list(workspace.glob(".memory/session/*/session_memory.json"))
+    memory_saved_events = [
+        event for event in result.events if isinstance(event, DiagnosticEvent) and event.code == "session_memory_saved"
+    ]
     assert result.status == AgentStatus.COMPLETED
-    assert len(memory_files) == 1
-    assert "workspace isolation marker" in memory_files[0].read_text(encoding="utf-8")
+    assert len(memory_saved_events) == 1
+    assert memory_saved_events[0].details == {"entry_count": 1}
     assert not (process_cwd / ".vv-agent-workspace").exists()
+    assert not (process_cwd / ".memory").exists()
 
 
 def test_run_config_rejects_workspace_backend_in_workspace_field() -> None:

@@ -627,6 +627,9 @@ def test_lifecycle_events_replay_ack_and_rollback_parity(store, database, tmp_pa
 @pytest.mark.capability("session-memory")
 def test_session_memory_logged_extract_save_reload_parity(store, database, tmp_path, monkeypatch):
     memory = paired_memory_manager(monkeypatch, 999999)
+    process_cwd = tmp_path / "process-cwd"
+    process_cwd.mkdir()
+    monkeypatch.chdir(process_cwd)
     meta = {"session_id": "remember", "session_memory_min_tokens": 1, "session_memory_min_text_messages": 1}
     agent = Agent("test", "test")
     extraction = '[{"category":"user_intent","content":"retain user goal","importance":8}]'
@@ -641,16 +644,29 @@ def test_session_memory_logged_extract_save_reload_parity(store, database, tmp_p
     new = new_run(store, database, agent, config, steps, memory=memory, cut=cut_boundary("session_memory_saved"))
     same_result(new, old)
     assert [c["purpose"] for c in new.metadata["session_model_calls"]] == ["session_memory", "primary"]
-    new_file = Path(config.workspace) / ".memory/session/remember/session_memory.json"
-    assert new_file.exists()
-    assert "retain user goal" in new_file.read_text(encoding="utf-8")
+    memory_events = [event for event in new.events if isinstance(event, DiagnosticEvent) and event.code == "session_memory_saved"]
+    assert len(memory_events) == 1
+    assert memory_events[0].details == {"entry_count": 1}
     _, persisted, _ = read_fixture_state(store, "control")
     saved = [
         row.record
         for row in persisted
         if row.record.kind == "boundary_recorded" and row.record._payload["stage"] == "session_memory_saved"
     ]
-    assert saved and "retain user goal" in json.dumps(saved[-1]._payload["data"], ensure_ascii=False)
+    assert len(saved) == 1
+    entries = saved[0]._payload["data"]["state"]["entries"]
+    assert [(entry["category"], entry["content"], entry["importance"]) for entry in entries] == [
+        ("user_intent", "retain user goal", 8)
+    ]
+    _, raw_rows, _ = store.read_state("control")
+    raw_saved = next(
+        row.record
+        for row in raw_rows
+        if row.record.kind == "boundary_recorded" and row.record._payload["stage"] == "session_memory_saved"
+    )
+    assert "retain user goal" not in raw_saved.encode().decode("utf-8")
+    assert not (Path(config.workspace) / ".memory").exists()
+    assert not (process_cwd / ".memory").exists()
     # Rebuild the disposable state entirely from content-backed log state before compiling the next turn.
     push_fixture_input(store, "control", InboxItem("second", "user", {"content": "go"}))
     requests = []
@@ -667,7 +683,15 @@ def test_session_memory_logged_extract_save_reload_parity(store, database, tmp_p
     drive(store, "control", runtime=rt)
     new2 = project_result(store, "control", "control/turn/second", runtime=rt)
     same_result(new2, old2)
-    assert len(requests) == 2 and new_file.exists()
+    assert len(requests) == 2
+    replayed_memory_events = [
+        event
+        for event in SessionRunEventStore(store, "control").replay(run_id=new.run_id)
+        if isinstance(event, DiagnosticEvent) and event.code == "session_memory_saved"
+    ]
+    assert [event.to_dict() for event in replayed_memory_events] == [event.to_dict() for event in memory_events]
+    assert not (Path(config.workspace) / ".memory").exists()
+    assert not (process_cwd / ".memory").exists()
 
 
 class StreamingScripted(ScriptedLLM):
