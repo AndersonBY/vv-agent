@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 from vv_agent.app_server.host import AgentResolutionRequest, RunConfigResolutionRequest
 from vv_agent.app_server.protocol.identity import client_id
 from vv_agent.kernel._content import ContentRef, ContentUnavailable
+from vv_agent.kernel._requirements import SessionRequirements, model_capability_tags
 from vv_agent.memory.manager import MemoryManager
 from vv_agent.workspace.streaming import scan_text
 
@@ -20,7 +21,7 @@ from .projection import fold_hydrated_records, hydrate_records, hydration_for_se
 from .records import SessionSpec, copy_json, digest, inherited_seed_policies
 from .reducer import _fold_factory_for
 from .store import Conflict
-from .surfaces import _persisted_principal, _principal_payload
+from .surfaces import _persisted_principal, _principal_payload, _verified_routing_cache
 
 if TYPE_CHECKING:
     from .content_runtime import SessionContentWriter
@@ -215,6 +216,23 @@ def fork_thread(kernel, host, params, principal: PrincipalInput | None = None):
         "effective_model": copy_json(effective),
         "last_compaction": view["lastCompaction"],
     }
+    source_routing, _ = _verified_routing_cache(kernel.store, source)
+    source_level = source_routing.requirements.level
+    if source_level > 2:
+        raise ValueError("thread/fork supports only level-1 and level-2 source sessions")
+    fork_bootstrap = None
+    if source_level == 2:
+        # Preserve the static route floor while replacing every source model tag
+        # with the fork's effective binding; pending selections must not leak.
+        capabilities = {
+            capability for capability in source_routing.requirements.capabilities if not capability.startswith("model:")
+        }
+        capabilities.update(model_capability_tags(effective["binding"]))
+        fork_bootstrap = SessionRequirements.normalized(
+            level=2,
+            handler_version=source_routing.requirements.handler_version,
+            capabilities=capabilities,
+        )
     spec = SessionSpec(
         sid,
         page.records[0].record._payload["principal"],
@@ -229,6 +247,8 @@ def fork_thread(kernel, host, params, principal: PrincipalInput | None = None):
             },
             "app_server_fork": fork,
         },
+        feature_level=source_level,
+        bootstrap=fork_bootstrap,
     )
     try:
         with kernel.store.atomic() as tx:

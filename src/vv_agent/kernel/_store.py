@@ -246,6 +246,11 @@ class ContentSessionTx(SessionTx, Protocol):
 
 
 class SessionStore(Protocol):
+    @property
+    def max_feature_level(self) -> int:
+        """Return the highest session feature level this store can durably write."""
+        ...
+
     def for_tenant(self, tenant_id: str) -> SessionStore: ...
 
     def heartbeat_store_factory(self) -> Callable[[], AbstractContextManager[SessionStore]]:

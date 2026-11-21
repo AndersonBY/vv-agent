@@ -20,6 +20,7 @@ from vv_agent.session.runtime import Runtime
 from vv_agent.session.store import Conflict, SessionStore
 from vv_agent.session.surfaces import SessionDriver
 from vv_agent.session.timing import SystemClock, ThreadInvoker, ThreadLeaseKeeper
+from vv_agent.tools.function import function_tool
 from vv_agent.types import AgentStatus, LLMResponse, SubAgentConfig, ToolCall
 
 
@@ -252,9 +253,9 @@ def test_worker_factory_rebinds_lifecycle_fields_when_store_is_omitted() -> None
         driver.close()
 
 
-def test_child_claim_derives_root_bindings_and_rebinds_for_its_claim_store(tmp_path: Path) -> None:
+def test_child_claim_uses_root_only_factory_and_rebinds_child_runtime(tmp_path: Path) -> None:
     holder: dict[str, SessionDriver] = {}
-    factory_calls: list[tuple[str, SessionStore, Runtime]] = []
+    factory_calls: list[tuple[str, str, SessionStore, Runtime]] = []
     claimed_runtimes: list[tuple[str, SessionStore, Runtime]] = []
     inherited_provider = cast(Provider, object())
     inherited_host_binding = "host-claim-binding"
@@ -290,7 +291,7 @@ def test_child_claim_derives_root_bindings_and_rebinds_for_its_claim_store(tmp_p
             store=claim_store,
             handler_version="handler/v2",
         )
-        if session_id == "parent":
+        if agent.name == "parent":
             runtime.children["inherited_child"] = inherited_child
             runtime.providers["inherited_provider"] = inherited_provider
             runtime.host_bindings["claim_host"] = inherited_host_binding
@@ -298,7 +299,7 @@ def test_child_claim_derives_root_bindings_and_rebinds_for_its_claim_store(tmp_p
             runtime.lease_keeper = inherited_lease_keeper
             runtime.invoker = inherited_invoker
             runtime.ttl_ms = 47_000
-        factory_calls.append((session_id, claim_store, runtime))
+        factory_calls.append((session_id, agent.name, claim_store, runtime))
         return runtime
 
     driver = SessionDriver(
@@ -336,9 +337,15 @@ def test_child_claim_derives_root_bindings_and_rebinds_for_its_claim_store(tmp_p
                 "parent",
                 "Use the child tool.",
                 model="m",
-                sub_agents={"worker": SubAgentConfig(model="m", description="Worker instructions.")},
+                sub_agents={
+                    "worker": SubAgentConfig(
+                        model="m",
+                        description="Worker instructions.",
+                        exclude_tools=["forbidden"],
+                    )
+                },
             ),
-            RunConfig(model_provider=provider),
+            RunConfig(model_provider=provider, workspace=tmp_path),
             "go",
             handler_version="handler/v2",
         )
@@ -348,11 +355,15 @@ def test_child_claim_derives_root_bindings_and_rebinds_for_its_claim_store(tmp_p
         child_claim_runtime = next(item for item in claimed_runtimes if item[0] == child_session_id)
         child_claim_store = child_claim_runtime[1]
         child_runtime = child_claim_runtime[2]
-        child_claim_factory_calls = [call for call in factory_calls if call[1] is child_claim_store]
+        child_claim_factory_calls = [call for call in factory_calls if call[2] is child_claim_store]
+        child_created = driver._created_payload(driver.store, child_session_id)
 
-        assert [session_id for session_id, _, _ in child_claim_factory_calls] == ["parent"]
-        child_root = child_claim_factory_calls[0][2]
+        assert [(session_id, agent_name) for session_id, agent_name, _, _ in child_claim_factory_calls] == [("parent", "parent")]
+        child_root = child_claim_factory_calls[0][3]
         assert child_runtime.agent.name == "worker"
+        assert child_runtime.config.workspace == Path(child_created["workspace"])
+        assert child_runtime.frozen_task is not None
+        assert "forbidden" in child_runtime.frozen_task.metadata["_vv_agent_disallowed_tools"]
         assert child_runtime.children is child_root.children
         assert child_runtime.host_bindings is child_root.host_bindings
         assert child_runtime.children["inherited_child"] is inherited_child
@@ -363,12 +374,118 @@ def test_child_claim_derives_root_bindings_and_rebinds_for_its_claim_store(tmp_p
         assert child_runtime.invoker is inherited_invoker
         assert child_runtime.ttl_ms == 47_000
         assert getattr(child_runtime.heartbeat_store, "__self__", None) is child_claim_store
-        assert child_runtime.content_reader is not None
+        assert cast(Any, child_runtime.content_reader).reader.binding == (driver.tenant_id, child_session_id)
 
         first_parent_claim = next(item for item in claimed_runtimes if item[0] == "parent")
         assert claimed_runtimes.index(first_parent_claim) < claimed_runtimes.index(child_claim_runtime)
         assert first_parent_claim[1] is not child_claim_store
         with pytest.raises(sqlite3.ProgrammingError, match="closed"):
             cast(Any, first_parent_claim[1]).connection.execute("SELECT 1")
+    finally:
+        driver.close()
+
+
+def test_custom_child_claim_rebuilds_with_child_identity_and_workspace(tmp_path: Path) -> None:
+    holder: dict[str, SessionDriver] = {}
+    factory_calls: list[tuple[str, str, Path | None, SessionStore, Runtime]] = []
+    claimed_runtimes: list[tuple[str, SessionStore, Runtime]] = []
+    inherited_host_binding = "custom-child-host-binding"
+
+    @function_tool
+    def custom_child() -> str:
+        raise AssertionError("custom child must use the session kernel")
+
+    def admit_child(plan: Any) -> ChildSession:
+        registration = holder["driver"]._runtime_registration(plan.session_id)
+        return ChildSession(
+            SessionSpec(
+                "custom-child",
+                holder["driver"]._session_principal(plan.session_id).to_dict(),
+                cast(Any, str(tmp_path / "custom-child")),
+                attributes={},
+                feature_level=registration.requirements.level,
+                bootstrap=(registration.requirements if registration.requirements.level == 2 else None),
+            ),
+            "custom child work",
+        )
+
+    def runtime_factory(
+        claim_store: SessionStore,
+        agent: Agent,
+        config: RunConfig,
+        task: Any,
+        session_id: str,
+    ) -> Runtime:
+        runtime = holder["driver"].runtime(
+            agent,
+            config,
+            task,
+            session_id=session_id,
+            store=claim_store,
+            handler_version="handler/v2",
+        )
+        if agent.name == "parent":
+            runtime.children["custom_child"] = admit_child
+            runtime.host_bindings["custom_host"] = inherited_host_binding
+        factory_calls.append(
+            (
+                session_id,
+                agent.name,
+                Path(config.workspace) if config.workspace is not None else None,
+                claim_store,
+                runtime,
+            )
+        )
+        return runtime
+
+    driver = SessionDriver(
+        runtime_factory=runtime_factory,
+        worker_level=2,
+        handler_versions=("handler/v2",),
+    )
+    holder["driver"] = driver
+    original_build = driver._build_runtime_for_claim
+
+    def build_runtime(claim_store: SessionStore, session_id: str) -> Runtime:
+        runtime = original_build(claim_store, session_id)
+        claimed_runtimes.append((session_id, claim_store, runtime))
+        return runtime
+
+    cast(Any, driver)._build_runtime_for_claim = build_runtime
+    provider = ScriptedModelProvider.new(
+        "scripted",
+        "m",
+        [
+            LLMResponse("", [ToolCall("child-call", "custom_child", {})]),
+            LLMResponse("custom child done"),
+            LLMResponse("parent done"),
+        ],
+    )
+
+    try:
+        driver.create("parent", str(tmp_path))
+        handle = driver.start(
+            "parent",
+            Agent("parent", "Use the custom child.", model="m", tools=[custom_child]),
+            RunConfig(model_provider=provider, workspace=tmp_path),
+            "go",
+            handler_version="handler/v2",
+        )
+        assert handle.result(timeout=8).final_output == "parent done"
+
+        child_claim_runtime = next(item for item in claimed_runtimes if item[0] == "custom-child")
+        child_claim_store = child_claim_runtime[1]
+        child_runtime = child_claim_runtime[2]
+        child_calls = [call for call in factory_calls if call[3] is child_claim_store]
+
+        assert [(session_id, agent_name, workspace) for session_id, agent_name, workspace, _, _ in child_calls] == [
+            ("parent", "parent", tmp_path),
+            ("custom-child", "parent", tmp_path / "custom-child"),
+        ]
+        assert child_runtime.agent.name == "parent"
+        assert Path(child_runtime.config.workspace) == tmp_path / "custom-child"
+        assert child_runtime.host_bindings["custom_host"] == inherited_host_binding
+        assert getattr(child_runtime.heartbeat_store, "__self__", None) is child_claim_store
+        assert cast(Any, child_runtime.content_reader).reader.binding == (driver.tenant_id, "custom-child")
     finally:
         driver.close()

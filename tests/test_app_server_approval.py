@@ -20,6 +20,7 @@ from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.events import ApprovalRequestedEvent
 from vv_agent.llm import ScriptedLLM
 from vv_agent.model import resolve_model_selection
+from vv_agent.runtime.hooks import BaseRuntimeHook, BeforeToolCallPatch
 from vv_agent.session.app_server import _JoinDriveState, _KernelRunAdapter
 from vv_agent.session.reducer import ExecutionState
 from vv_agent.types import LLMResponse, ToolCall
@@ -64,6 +65,140 @@ def test_app_server_approval_allow_runs_tool_and_completes_turn() -> None:
 
     assert calls == ["ran"]
     assert _completed_status(outbound) == "completed"
+
+
+def test_wake_keeps_committed_progress_in_forward_approval_order(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+    server, transport = _server_with_approval_tool(calls)
+    _initialize(server, transport, request_id=0, client_name="owner")
+    thread_id = _start_thread(server, transport, request_id=1)
+    position = server.run_adapter._notification_positions[thread_id]
+    worker = server.kernel._worker
+    original_post_observation = worker.post_observation
+    monkeypatch.setattr(worker, "post_observation", lambda _callback: None)
+    server.wake(thread_id)
+    monkeypatch.setattr(worker, "post_observation", original_post_observation)
+
+    assert position.replay_approvals is False
+
+    _send(transport, server, {"jsonrpc": "2.0", "id": 2, "method": "turn/start", "params": _turn_params()})
+    outbound = []
+    while True:
+        message = transport.receive_outbound(timeout=10)
+        outbound.append(message)
+        if message.get("method") == "approval/request":
+            approval = message
+            break
+    causal_methods = [
+        method
+        for method in (
+            message.get("method")
+            for message in outbound
+            if message.get("method") in {"turn/started", "item/started", "approval/requested", "approval/request"}
+        )
+        if method is not None
+    ]
+    assert causal_methods == ["turn/started", "item/started", "approval/requested", "approval/request"]
+
+    _send(
+        transport,
+        server,
+        {"jsonrpc": "2.0", "id": approval["id"], "result": {"decision": "deny"}},
+    )
+    _drain_until_turn_completed(transport)
+    assert calls == []
+
+
+def test_app_server_approval_request_includes_tool_arguments() -> None:
+    calls: list[dict[str, object]] = []
+    arguments = {"path": "notes/private.txt", "force": True}
+    server, transport = _server_with_parameterized_approval_tool(calls, arguments)
+
+    approval_request = _start_and_wait_for_approval(server, transport)
+    approval_params = cast(dict[str, object], approval_request["params"])
+    requested = cast(dict[str, object], approval_request["_requested"])
+
+    assert approval_params["arguments"] == arguments
+    assert cast(dict[str, object], requested["params"])["arguments"] == arguments
+    assert calls == []
+
+    _send(
+        transport,
+        server,
+        {"jsonrpc": "2.0", "id": approval_request["id"], "result": {"decision": "allow"}},
+    )
+    outbound = _drain_until_turn_completed(transport)
+
+    _send(transport, server, {"jsonrpc": "2.0", "id": 3, "method": "thread/read", "params": {"threadId": "thread_1"}})
+    read = _drain_until(transport, lambda message: message.get("id") == 3)
+    items = cast(dict[str, object], read["result"])["items"]
+    approval_items = [item for item in cast(list[dict[str, object]], items) if item["type"] == "approval"]
+    assert cast(dict[str, object], approval_items[0]["payload"])["arguments"] == arguments
+
+    assert calls == [arguments]
+    assert _completed_status(outbound) == "completed"
+
+
+def test_app_server_approval_uses_prepared_arguments_and_bound_digest(surface) -> None:
+    calls: list[dict[str, object]] = []
+    original = {"path": "notes/original.txt", "force": False}
+    prepared = {"path": "notes/safe.txt", "force": True}
+
+    class RewriteArguments(BaseRuntimeHook):
+        def before_tool_call(self, event):
+            return BeforeToolCallPatch(call=ToolCall(event.call.id, event.call.name, prepared))
+
+    server, transport = _server_with_parameterized_approval_tool(calls, original, hooks=[RewriteArguments()])
+    approval_request = _start_and_wait_for_approval(server, transport)
+    approval_params = cast(dict[str, object], approval_request["params"])
+
+    assert approval_params["arguments"] == prepared
+    assert calls == []
+
+    state, _, _ = surface.store.read_state("thread_1")
+    (operation_id, attempt_number), wait = next(iter(state.waits.items()))
+    operation = state.operations[operation_id]
+    attempt = operation.attempts[attempt_number]
+    request_digest = wait["handle"]["request_digest"]
+    assert attempt.prepared is not None
+    assert request_digest == attempt.prepared._payload["request_digest"]
+    assert request_digest == attempt.execution_plan._payload["request_digest"]
+
+    _send(
+        transport,
+        server,
+        {"jsonrpc": "2.0", "id": approval_request["id"], "result": {"decision": "allow"}},
+    )
+    outbound = _drain_until_turn_completed(transport)
+    completed_state, _, _ = surface.store.read_state("thread_1")
+
+    assert calls == [prepared]
+    answer = completed_state.operations[operation_id].attempts[attempt_number].approval_answer
+    assert answer is not None
+    assert answer._payload["input"]["payload"]["request_digest"] == request_digest
+    assert _completed_status(outbound) == "completed"
+
+
+def test_app_server_approval_fails_closed_without_trusted_execution_plan() -> None:
+    adapter = object.__new__(_KernelRunAdapter)
+    event = ApprovalRequestedEvent(
+        run_id="thread_1/turn/turn_1",
+        trace_id="thread_1/turn/turn_1",
+        tool_name="dangerous_tool",
+        tool_call_id="call_1",
+        message="Approval required",
+        request_id="approval_1",
+    )
+
+    with pytest.raises(ValueError, match="trusted approval execution plan is unavailable"):
+        adapter._approval_arguments(
+            "thread_1",
+            object(),
+            ExecutionState(),
+            (),
+            event,
+            {"operation_id": "missing", "attempt": 1},
+        )
 
 
 def test_explicit_automatic_approval_provider_is_preserved() -> None:
@@ -217,10 +352,99 @@ def test_pending_approval_replay_respects_database_clock_and_durable_answer(
     adapter._turn_connections = {("thread_1", "turn_1"): "conn_1"}
     adapter._hydration = lambda *_args, **_kwargs: None
     adapter._approval_answered = lambda *_args: answered
+    adapter._approval_arguments = lambda *_args, **_kwargs: {}
 
     adapter._send_pending_approvals("thread_1", store, after_seq=0, through_seq=1)
 
     assert bool(router.sent) is expected_notification
+
+
+def test_pending_approval_without_durable_wait_is_skipped(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Store:
+        def read_state(self, session_id: str):
+            assert session_id == "thread_1"
+            return ExecutionState(), (), 0
+
+        def _now(self) -> int:
+            return 1
+
+    class Router:
+        def __init__(self) -> None:
+            self.sent: list[object] = []
+
+        def is_registered(self, connection_id: str) -> bool:
+            return connection_id == "conn_1"
+
+        def get_pending_server_request(self, request_id: RequestId):
+            del request_id
+            return None
+
+        def send_server_request(self, *args, **kwargs):
+            self.sent.append((args, kwargs))
+
+    class Worker:
+        def wake(self, session_id: str) -> None:
+            raise AssertionError(f"unexpected wake for {session_id}")
+
+    class Kernel:
+        def __init__(self) -> None:
+            self._runtimes: dict[str, object] = {}
+            self._worker = Worker()
+
+        def waits(self, session_id: str, *, snapshot, store):
+            del snapshot, store
+            assert session_id == "thread_1"
+            return []
+
+    event = ApprovalRequestedEvent(
+        run_id="turn_1",
+        trace_id="trace_1",
+        tool_name="dangerous_tool",
+        tool_call_id="call_1",
+        message="Review this tool call.",
+        request_id="approval_1",
+        metadata={"session_seq": 1},
+    )
+    monkeypatch.setattr("vv_agent.session.app_server.project_records", lambda *_args, **_kwargs: [event])
+
+    router = Router()
+    adapter = object.__new__(_KernelRunAdapter)
+    adapter.kernel = Kernel()
+    adapter._router = router
+    adapter._turn_connections = {("thread_1", "turn_1"): "conn_1"}
+    adapter._hydration = lambda *_args, **_kwargs: None
+    adapter._approval_arguments = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("approval arguments must not be hydrated without a durable wait")
+    )
+
+    adapter._send_pending_approvals("thread_1", Store(), after_seq=0, through_seq=1)
+
+    assert router.sent == []
+
+
+def test_approval_answered_uses_payload_request_id_for_custom_input_id() -> None:
+    calls: list[str] = []
+    server, transport = _server_with_approval_tool(calls)
+    approval = _start_and_wait_for_approval(server, transport)
+    params = cast(dict[str, object], approval["params"])
+    thread_id = cast(str, params["threadId"])
+    request_id = cast(str, params["requestId"])
+    runtime = server.store._runtime_view(thread_id)
+
+    server.kernel.approve(
+        thread_id,
+        runtime,
+        request_id,
+        ApprovalDecision.allow(),
+        "custom-approval-answer",
+    )
+
+    assert server.run_adapter._approval_answered(server.kernel.store, thread_id, request_id) is True
+    assert server.run_adapter._approval_answered(server.kernel.store, thread_id, request_id + "-different") is False
+    server.kernel._worker.wake(thread_id)
+    outbound = _drain_until_turn_completed(transport)
+    assert calls == ["ran"]
+    assert not any(message.get("method") == "approval/request" for message in outbound)
 
 
 @pytest.mark.parametrize(("record_kind", "expected_due"), [("approval", 10.05), ("turn", 10.05)])
@@ -543,10 +767,48 @@ def test_pure_observer_reconnect_replays_durable_approval_without_local_runtime(
     assert not second.kernel.handles
 
 
+def test_owner_reconnect_replays_request_without_broadcasting_requested() -> None:
+    calls: list[str] = []
+    server, owner = _server_with_approval_tool(calls)
+    observer = ChannelTransport(connection_id="observer")
+    server.router.register_transport(observer)
+    _initialize(server, owner, request_id=0, client_name="owner")
+    thread_id = _start_thread(server, owner, request_id=1)
+    _initialize(server, observer, request_id=10, client_name="observer")
+    _send(
+        observer,
+        server,
+        {"jsonrpc": "2.0", "id": 11, "method": "thread/resume", "params": {"threadId": thread_id}},
+    )
+    _drain_until(observer, lambda message: message.get("id") == 11)
+    _drain_available(observer)
+
+    _send(owner, server, {"jsonrpc": "2.0", "id": 2, "method": "turn/start", "params": _turn_params(thread_id)})
+    approval = _drain_until(owner, lambda message: message.get("method") == "approval/request")
+    _drain_until(observer, lambda message: message.get("method") == "approval/requested")
+    _drain_available(observer)
+
+    server.router.unregister_transport(owner.connection_id)
+    replacement = ChannelTransport(connection_id="replacement")
+    server.router.register_transport(replacement)
+    _initialize(server, replacement, request_id=20, client_name="replacement")
+    _send(
+        replacement,
+        server,
+        {"jsonrpc": "2.0", "id": 21, "method": "thread/resume", "params": {"threadId": thread_id}},
+    )
+    replayed = _drain_until(replacement, lambda message: message.get("method") == "approval/request")
+    observer_after_reconnect = _drain_available(observer)
+
+    assert replayed["id"] == approval["id"]
+    assert not any(message.get("method") in {"approval/requested", "approval/request"} for message in observer_after_reconnect)
+
+
 def test_second_turn_registers_config_before_worker_can_drive() -> None:
     first_calls: list[str] = []
     second_calls: list[str] = []
     registered_turns: list[object] = []
+    drive_turns: list[object] = []
     second_config_entered = threading.Event()
     release_second_config = threading.Event()
     transport = ChannelTransport(connection_id="owner")
@@ -561,7 +823,9 @@ def test_second_turn_registers_config_before_worker_can_drive() -> None:
 
     def second_model(_request):
         second_calls.append("second")
-        registered_turns.append(server.kernel._runtime_registration("thread_1").config.metadata.get("turn_id"))
+        registered_turn = server.kernel._runtime_registration("thread_1").config.metadata.get("turn_id")
+        assert registered_turn == "thread_1/turn/turn_2"
+        registered_turns.append(registered_turn)
         return LLMResponse("second done")
 
     second_provider = ScriptedModelProvider.from_callback("second", "m", second_model)
@@ -612,6 +876,16 @@ def test_second_turn_registers_config_before_worker_can_drive() -> None:
     assert _completed_status(first_outbound) == "completed"
     assert first_calls == ["first"]
 
+    worker = server.kernel._worker
+    original_drive = worker.support.drive
+    assert original_drive is not None
+
+    def tracked_drive(store, session_id, *, lease):
+        drive_turns.append(server.kernel._runtime_registration(session_id).config.metadata.get("turn_id"))
+        original_drive(store, session_id, lease=lease)
+
+    worker.support = replace(worker.support, drive=tracked_drive)
+
     second_result: dict[str, object] = {}
 
     def start_second() -> None:
@@ -637,7 +911,6 @@ def test_second_turn_registers_config_before_worker_can_drive() -> None:
     try:
         thread.start()
         assert second_config_entered.wait(5)
-        worker = server.kernel._worker
         previous_pass = worker.coordinate_pass
         worker.wake("thread_1")
         assert worker.wait_for_coordinate_pass(previous_pass, 5)
@@ -655,6 +928,7 @@ def test_second_turn_registers_config_before_worker_can_drive() -> None:
     assert first_calls == ["first"]
     assert second_calls == ["second"]
     assert registered_turns == ["thread_1/turn/turn_2"]
+    assert drive_turns == ["thread_1/turn/turn_2"]
 
 
 def test_app_server_follow_up_routes_callback_to_driving_subscriber() -> None:
@@ -884,6 +1158,40 @@ def _server_with_approval_tool(
     return AppServer(transport=transport, host=host), transport
 
 
+def _server_with_parameterized_approval_tool(
+    calls: list[dict[str, object]],
+    arguments: dict[str, object],
+    *,
+    hooks: list[BaseRuntimeHook] | None = None,
+) -> tuple[AppServer, ChannelTransport]:
+    @function_tool(needs_approval=True)
+    def dangerous_tool(path: str, force: bool) -> str:
+        calls.append({"path": path, "force": force})
+        return "allowed"
+
+    llm = ScriptedLLM(
+        steps=[
+            LLMResponse(content="calling", tool_calls=[ToolCall(id="call_1", name="dangerous_tool", arguments=arguments)]),
+            LLMResponse(content="done"),
+        ]
+    )
+    transport = ChannelTransport(connection_id="conn_1")
+    host = DefaultAppServerHost(
+        agent=Agent(
+            name="assistant",
+            instructions="Use the tool.",
+            model="test-model",
+            tools=[dangerous_tool],
+            hooks=hooks or [],
+        ),
+        run_config=RunConfig(
+            model_provider=FixedModelProvider(llm, _resolved_model()),
+            max_cycles=3,
+        ),
+    )
+    return AppServer(transport=transport, host=host), transport
+
+
 @contextmanager
 def _controlled_session_clock(surface, now_ms: Callable[[], int]):
     """Apply test database time to worker drive and heartbeat connections."""
@@ -945,14 +1253,28 @@ def _start_and_wait_for_approval(server: AppServer, transport: ChannelTransport)
         },
     )
     requested = None
+    outbound = []
     while True:
-        message = transport.receive_outbound(timeout=10)
+        try:
+            message = transport.receive_outbound(timeout=10)
+        except queue.Empty as exc:
+            raise AssertionError(f"approval request did not arrive; outbound={outbound!r}") from exc
+        outbound.append(message)
         if message.get("method") == "approval/requested":
             requested = message
         if message.get("method") == "approval/request":
             if requested is not None:
                 message["_requested"] = requested
             return message
+
+
+def _turn_params(thread_id: str = "thread_1") -> dict[str, object]:
+    return {
+        "inputId": "turn_1",
+        "expectedTurnId": None,
+        "threadId": thread_id,
+        "input": [{"type": "text", "text": "run tool"}],
+    }
 
 
 def _initialize(

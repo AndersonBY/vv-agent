@@ -14,6 +14,7 @@ from vv_agent.app_server.schema import json_schema_bundle
 from vv_agent.kernel._requirements import SessionRequirements, normalize_requirements
 from vv_agent.model import ModelError, ModelRef, ScriptedModelProvider, resolve_model_selection
 from vv_agent.session.runtime import static_model_selection_requirements, static_session_requirements
+from vv_agent.session.store import Conflict
 
 
 def _selection_bootstrap(selections, resolve_model):
@@ -103,6 +104,138 @@ def test_model_selection_method_admission_replay_conflict_and_schema():
         validator.validate(wire)
         with pytest.raises(ValidationError):
             validator.validate(wire | {"params": params | {"extra": True}})
+    finally:
+        server.run_adapter.join()
+        server.kernel.close()
+
+
+def test_static_bootstrap_is_the_default_runtime_floor_not_the_advertised_catalog():
+    provider = ScriptedModelProvider.new("test", "a", [])
+    agent = Agent("test", "Answer.", model=ModelRef.named("a"))
+    config = RunConfig(model_provider=provider)
+    host = DefaultAppServerHost(
+        agent=agent,
+        run_config=config,
+        models=[model_summary(provider.resolve(ModelRef.named(model))) for model in ("a", "b")],
+    )
+    transport = ChannelTransport(connection_id="bootstrap")
+    server = AppServer(transport=transport, host=host)
+
+    def send(identity, method, params):
+        server.processor.process_message(
+            "bootstrap",
+            {"jsonrpc": "2.0", "id": identity, "method": method, "params": params},
+        )
+        while (wire := transport.receive_outbound(timeout=5)).get("id") != identity:
+            pass
+        return wire
+
+    try:
+        send(0, "initialize", {"clientInfo": {"name": "bootstrap"}})
+        thread_id = send(1, "thread/start", {"inputId": "thread"})["result"]["threadId"]
+        created = server.kernel.store.read(thread_id, limit=1).records[0].record
+        bootstrap = normalize_requirements(created._payload["bootstrap"])
+        expected = static_session_requirements(
+            agent,
+            config,
+            provider.resolve(ModelRef.named("a")),
+            level=2,
+            handler_version=server.kernel.default_handler_version,
+        )
+        selected = static_model_selection_requirements(
+            {"model": "b", "route": {}},
+            resolve_model=host.resolve_model,
+            handler_version=server.kernel.default_handler_version,
+        )
+
+        assert bootstrap == expected
+        assert set(selected.capabilities).isdisjoint(bootstrap.capabilities)
+    finally:
+        server.run_adapter.join()
+        server.kernel.close()
+
+
+def test_model_selection_widens_support_only_after_durable_push(monkeypatch):
+    provider = ScriptedModelProvider.new("test", "b", [])
+    agent = Agent("test", "Answer.", model=ModelRef.named("b"))
+    host = DefaultAppServerHost(agent=agent, run_config=RunConfig(model_provider=provider))
+    transport = ChannelTransport(connection_id="selection-order")
+    server = AppServer(transport=transport, host=host)
+
+    def send(identity, method, params):
+        server.processor.process_message(
+            "selection-order", {"jsonrpc": "2.0", "id": identity, "method": method, "params": params}
+        )
+        while (wire := transport.receive_outbound(timeout=5)).get("id") != identity:
+            pass
+        return wire
+
+    try:
+        send(0, "initialize", {"clientInfo": {"name": "selection-order"}})
+        send(1, "thread/start", {"inputId": "thread"})
+        calls = []
+        push = server.kernel.push
+        ensure = server.kernel._ensure_static_worker_support
+
+        def tracked_push(*args, **kwargs):
+            calls.append("push")
+            return push(*args, **kwargs)
+
+        def tracked_ensure(**kwargs):
+            calls.append("ensure")
+            return ensure(**kwargs)
+
+        monkeypatch.setattr(server.kernel, "push", tracked_push)
+        monkeypatch.setattr(server.kernel, "_ensure_static_worker_support", tracked_ensure)
+
+        server.run_adapter.select_model(
+            thread_id="thread",
+            input_id="select",
+            selection={"model": "b", "route": {}},
+        )
+
+        assert calls == ["push", "ensure"]
+    finally:
+        server.run_adapter.join()
+        server.kernel.close()
+
+
+def test_model_selection_does_not_swallow_resolver_conflict(monkeypatch):
+    provider = ScriptedModelProvider.new("test", "b", [])
+    agent = Agent("test", "Answer.", model=ModelRef.named("b"))
+    transport = ChannelTransport(connection_id="selection-conflict")
+    server = AppServer(
+        transport=transport,
+        host=DefaultAppServerHost(agent=agent, run_config=RunConfig(model_provider=provider)),
+    )
+
+    def send(identity, method, params):
+        server.processor.process_message(
+            "selection-conflict", {"jsonrpc": "2.0", "id": identity, "method": method, "params": params}
+        )
+        while (wire := transport.receive_outbound(timeout=5)).get("id") != identity:
+            pass
+        return wire
+
+    try:
+        send(0, "initialize", {"clientInfo": {"name": "selection-conflict"}})
+        send(1, "thread/start", {"inputId": "thread"})
+        support = server.kernel._worker.support
+
+        def conflict(*_args, **_kwargs):
+            raise Conflict("damaged model routing")
+
+        monkeypatch.setattr("vv_agent.session.app_server.static_model_selection_requirements", conflict)
+
+        with pytest.raises(Conflict, match="damaged model routing"):
+            server.run_adapter.select_model(
+                thread_id="thread",
+                input_id="select",
+                selection={"model": "b", "route": {}},
+            )
+
+        assert server.kernel._worker.support == support
+        assert server.kernel.store.read_input("thread", "select") is None
     finally:
         server.run_adapter.join()
         server.kernel.close()
@@ -228,6 +361,10 @@ def test_default_surfaces_resolve_exact_model_id_and_bill_actual_model(
             transport = ChannelTransport(connection_id="test")
             server = AppServer(transport=transport, host=host)
             driver = server.kernel
+            driver._ensure_static_worker_support(
+                level=2,
+                capabilities=level_two.capabilities,
+            )
 
             def send(identity, method, params):
                 server.processor.process_message("test", {"jsonrpc": "2.0", "id": identity, "method": method, "params": params})
@@ -372,8 +509,6 @@ def test_custom_app_server_host_resolver_controls_real_selected_call_and_usage()
         return wire
 
     try:
-        from test_app_server_distributed import eventually
-
         send(0, "initialize", {"clientInfo": {"name": "host-hook"}})
         send(1, "thread/start", {"inputId": "thread"})
         send(
@@ -383,10 +518,13 @@ def test_custom_app_server_host_resolver_controls_real_selected_call_and_usage()
         )
         send(3, "turn/start", {"threadId": "thread", "inputId": "prompt", "expectedTurnId": None, "input": []})
         server.wake("thread")
+        from test_app_server_distributed import eventually
+
         eventually(
             lambda: bool(
                 (turns := server.store.read_thread("thread").turns) and turns[0].result.get("finalOutput") == "selected client"
-            )
+            ),
+            timeout=30,
         )
         server.run_adapter.join()
         result = server.store.read_thread("thread").turns[0].result

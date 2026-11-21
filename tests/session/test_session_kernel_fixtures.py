@@ -11,6 +11,7 @@ from copy import deepcopy
 from hashlib import sha256
 from pathlib import Path
 from threading import Event
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -21,13 +22,30 @@ from support.interactions import displayed_target
 from vv_agent import Agent, InteractionAnswer, RunConfig, Runner
 from vv_agent.approval import ApprovalBroker
 from vv_agent.events import ApprovalRequestedEvent, event_from_dict
+from vv_agent.kernel import _driver_inputs as inputs
+from vv_agent.kernel import _sql as sql_module
+from vv_agent.kernel._content import ContentRef
+from vv_agent.kernel._content_publication import make_record_before_publication
+from vv_agent.kernel._content_reader import DurableContentReader
+from vv_agent.kernel._driver import CoreDriver
+from vv_agent.kernel._hydration import KeyUnavailable, MissingContentLink
+from vv_agent.kernel._sql import LedgerIntegrityError, SQLStore
 from vv_agent.model import ScriptedModelProvider
-from vv_agent.session.projection import project_records
-from vv_agent.session.records import InboxItem, Record, RecordError
+from vv_agent.session import _recovery_phase
+from vv_agent.session._driver_scope import _Scope
+from vv_agent.session.content_store import LocalKeyProvider
+from vv_agent.session.kernel import _Driver
+from vv_agent.session.projection import hydrate_records, hydration_for_session_store, project_records
+from vv_agent.session.records import InboxItem, Record, RecordError, digest, make_record
 from vv_agent.session.reducer import TransitionError, fold
 from vv_agent.session.sqlite import SQLiteStore
-from vv_agent.session.store import StoredRecord
-from vv_agent.session.surfaces import SessionDriver
+from vv_agent.session.store import Lease, StoredRecord
+from vv_agent.session.surfaces import (
+    SessionDriver,
+    _project_record_page,
+    _read_snapshot,
+    _tenant_bound_sql_store,
+)
 from vv_agent.tools.function import function_tool
 from vv_agent.types import AgentResult, LLMResponse, ToolCall
 
@@ -105,6 +123,57 @@ def test_generated_fixtures_match_vendored_snapshot(generated_fixtures):
     (produced, vendored), _, _, _ = generated_fixtures
     differences = sorted(name for name in FILES if (produced / name).read_bytes() != (vendored / name).read_bytes())
     assert not differences, differences
+
+
+def test_app_server_timeout_uses_public_resume_and_retains_durable_decision():
+    fixtures = AUTHOR["Fixtures"]()
+    try:
+        app = fixtures.app_server()
+        resumes = []
+        resolved_rows = []
+        for entry in app["transcripts"]:
+            request = entry.get("request", {})
+            if request.get("method") == "thread/resume" and request.get("params", {}).get("threadId") == "thread_3":
+                resumes.append((request["params"].get("subscribe"), entry["responses"][0]))
+            if any(
+                notification.get("method") == "approval/resolved"
+                and notification.get("params", {}).get("threadId") == "thread_3"
+                and notification.get("params", {}).get("turnId") == "thread_3/turn/turn_2"
+                for notification in entry.get("notifications", [])
+            ):
+                resolved_rows.append(entry)
+
+        assert [(subscribe, "error" not in response) for subscribe, response in resumes] == [
+            (False, True),
+            (True, True),
+        ]
+        assert any(response["result"]["thread"]["status"] == "approval_wait" for subscribe, response in resumes if subscribe)
+        assert len(resolved_rows) == 1
+        resolved = [
+            notification
+            for notification in resolved_rows[0]["notifications"]
+            if notification.get("method") == "approval/resolved"
+        ]
+        assert [(notification["params"]["turnId"], notification["params"]["decision"]) for notification in resolved] == [
+            ("thread_3/turn/turn_2", "timeout")
+        ]
+        assert not any(notification.get("method") == "approval/request" for notification in resolved_rows[0]["notifications"])
+
+        state, records, _ = fixtures.kernel.store.read_state("thread_3")
+        assert state.active_turn_id is None
+        assert state.waits == {}
+        assert state.turns["thread_3/turn/turn_2"].ended
+        timeout_answers = [
+            row.record
+            for row in records
+            if row.record.kind == "input_applied"
+            and row.record.payload["input"]["kind"] == "approval_answer"
+            and row.record.payload["input"].get("target_turn_id") == "thread_3/turn/turn_2"
+            and row.record.payload["input"]["payload"].get("decision") == "timeout"
+        ]
+        assert len(timeout_answers) == 1
+    finally:
+        fixtures.kernel.close()
 
 
 def test_fixture_store_explicitly_uses_hash_only_ledger_mode():
@@ -1152,3 +1221,554 @@ def test_private_memory_route_freezes_separate_provider_and_endpoint(purpose, tm
         ]
     finally:
         kernel.close()
+
+
+@pytest.mark.parametrize(
+    ("tamper", "error", "message"),
+    (
+        ("commit_body", LedgerIntegrityError, "commit body digest mismatch"),
+        ("commit_digest", LedgerIntegrityError, "commit body digest mismatch"),
+        ("commit_sequences", LedgerIntegrityError, "record sequences do not match"),
+        ("commit_head_seq", LedgerIntegrityError, "head_seq column does not match"),
+        ("commit_created_ms", ValueError, "created_ms must be a nonnegative integer"),
+        ("inbox", LedgerIntegrityError, "consumed input is missing or unconsumed"),
+        ("consumer", LedgerIntegrityError, "creation consumer is missing"),
+    ),
+)
+def test_commit_verification_rejects_tampered_sql_after_warmed_pass(tamper, error, message):
+    kernel = SessionDriver()
+    try:
+        handle = start_runner(
+            kernel,
+            f"verify-tamper-{tamper}",
+            Agent("verify-tamper", "Answer."),
+            "go",
+            run_config=RunConfig(
+                model_provider=ScriptedModelProvider.new("test", "fixture", [LLMResponse("done"), LLMResponse("done")]),
+                max_cycles=2,
+                no_tool_policy="continue",
+            ),
+        )
+        handle.result(timeout=30)
+        kernel._worker.stop()
+        assert kernel._worker.join(5)
+
+        sid = handle.session_id
+        raw = _tenant_bound_sql_store(kernel.store)
+        assert isinstance(raw, SQLStore)
+        head = raw.read(sid, limit=1).head_seq
+        raw._verified_records(sid, head)
+        commits = raw._rows(
+            "SELECT commit_id,body,digest,record_sequences,head_seq,created_ms FROM sk_commit "
+            "WHERE tenant_id=%s AND session_id=%s ORDER BY created_ms,commit_id",
+            (raw.tenant_id, sid),
+        )
+        commit_id, _, _, _, stored_head, _ = commits[0]
+        if tamper == "commit_body":
+            raw._rows(
+                "UPDATE sk_commit SET body=%s WHERE tenant_id=%s AND session_id=%s AND commit_id=%s",
+                (b"{}", raw.tenant_id, sid, commit_id),
+            )
+        elif tamper == "commit_digest":
+            raw._rows(
+                "UPDATE sk_commit SET digest=%s WHERE tenant_id=%s AND session_id=%s AND commit_id=%s",
+                ("0" * 64, raw.tenant_id, sid, commit_id),
+            )
+        elif tamper == "commit_sequences":
+            commit_id = next(row[0] for row in commits if row[3] != b"[]")
+            raw._rows(
+                "UPDATE sk_commit SET record_sequences=%s WHERE tenant_id=%s AND session_id=%s AND commit_id=%s",
+                (b"[]", raw.tenant_id, sid, commit_id),
+            )
+        elif tamper == "commit_head_seq":
+            raw._rows(
+                "UPDATE sk_commit SET head_seq=%s WHERE tenant_id=%s AND session_id=%s AND commit_id=%s",
+                (stored_head + 1, raw.tenant_id, sid, commit_id),
+            )
+        elif tamper == "commit_created_ms":
+            raw._rows("PRAGMA ignore_check_constraints=ON")
+            raw._rows(
+                "UPDATE sk_commit SET created_ms=-1 WHERE tenant_id=%s AND session_id=%s AND commit_id=%s",
+                (raw.tenant_id, sid, commit_id),
+            )
+            raw._rows("PRAGMA ignore_check_constraints=OFF")
+        elif tamper == "inbox":
+            input_id = next(
+                json.loads(row_body)["consume_input_ids"][0]
+                for (row_body,) in raw._rows(
+                    "SELECT body FROM sk_commit WHERE tenant_id=%s AND session_id=%s ORDER BY created_ms,commit_id",
+                    (raw.tenant_id, sid),
+                )
+                if json.loads(row_body)["consume_input_ids"]
+            )
+            raw._rows(
+                "UPDATE sk_inbox SET consumed_seq=NULL WHERE tenant_id=%s AND session_id=%s AND input_id=%s",
+                (raw.tenant_id, sid, input_id),
+            )
+        else:
+            consumer = next(
+                json.loads(row_body)["consumers"][0]
+                for (row_body,) in raw._rows(
+                    "SELECT body FROM sk_commit WHERE tenant_id=%s AND session_id=%s ORDER BY created_ms,commit_id",
+                    (raw.tenant_id, sid),
+                )
+                if json.loads(row_body)["consumers"]
+            )
+            raw._rows(
+                "DELETE FROM sk_consumer WHERE tenant_id=%s AND session_id=%s AND consumer=%s",
+                (raw.tenant_id, sid, consumer),
+            )
+
+        with pytest.raises(error, match=message):
+            raw._verified_records(sid, head)
+    finally:
+        kernel.close()
+
+
+def test_commit_verification_reads_inbox_and_consumer_inventory_once_per_pass():
+    kernel = SessionDriver()
+    try:
+        handle = start_runner(
+            kernel,
+            "verify-query-counts",
+            Agent("verify-counts", "Answer."),
+            "go",
+            run_config=RunConfig(
+                model_provider=ScriptedModelProvider.new("test", "fixture", [LLMResponse("done"), LLMResponse("done")]),
+                max_cycles=2,
+                no_tool_policy="continue",
+            ),
+        )
+        handle.result(timeout=30)
+        kernel._worker.stop()
+        assert kernel._worker.join(5)
+
+        sid = handle.session_id
+        raw = _tenant_bound_sql_store(kernel.store)
+        assert isinstance(raw, SQLStore)
+        head = raw.read(sid, limit=1).head_seq
+        queries = []
+        original_rows = raw._rows
+        original_canonical = sql_module.canonical_json_bytes
+        commit_count = raw._rows(
+            "SELECT commit_id FROM sk_commit WHERE tenant_id=%s AND session_id=%s",
+            (raw.tenant_id, sid),
+        )
+        raw._commit_parse_cache.clear()
+        canonical_calls = 0
+
+        def counted_rows(query, params=()):
+            queries.append(" ".join(query.split()))
+            return original_rows(query, params)
+
+        def counted_canonical(*args, **kwargs):
+            nonlocal canonical_calls
+            canonical_calls += 1
+            return original_canonical(*args, **kwargs)
+
+        with patch.object(raw, "_rows", counted_rows), patch.object(sql_module, "canonical_json_bytes", counted_canonical):
+            raw._verified_records(sid, head)
+            raw._verified_records(sid, head)
+
+        commit_rows_prefix = "SELECT commit_id,body,digest,record_sequences,head_seq,created_ms"
+        assert sum(query.startswith(commit_rows_prefix) for query in queries) == 2
+        assert sum("FROM sk_inbox" in query and "consumed_seq IS NOT NULL" in query for query in queries) == 2
+        assert sum("FROM sk_consumer" in query for query in queries) == 2
+        assert not any("FROM sk_inbox" in query and "input_id=%s" in query for query in queries)
+        assert not any("FROM sk_consumer" in query and "consumer=%s" in query for query in queries)
+        assert canonical_calls == 2 * len(commit_count)
+        assert len(raw._commit_parse_cache) == len(commit_count) <= 1024
+    finally:
+        kernel.close()
+
+
+def test_projection_280_pages_share_one_verified_snapshot_frame():
+    cycles = 280
+
+    def count_messages(messages, **_kwargs):
+        return len(messages)
+
+    kernel = SessionDriver()
+    try:
+        with (
+            patch("vv_agent.memory.manager.count_messages_tokens", count_messages),
+            patch("vv_agent.session.compaction.count_messages_tokens", count_messages),
+            patch("vv_agent.session.reducer.count_messages_tokens", count_messages),
+        ):
+            handle = start_runner(
+                kernel,
+                "projection-delivery-280",
+                Agent("projection", "Answer."),
+                "go",
+                run_config=RunConfig(
+                    model_provider=ScriptedModelProvider.new("test", "fixture", [LLMResponse("done")]),
+                    max_cycles=1,
+                ),
+            )
+            handle.result(timeout=60)
+        kernel._worker.stop()
+        assert kernel._worker.join(5)
+
+        sid = handle.session_id
+        store = kernel.store
+        _, seed_rows, _ = store.read_state(sid)
+        by_kind = {stored.record.kind: stored for stored in seed_rows}
+        raw = _tenant_bound_sql_store(store)
+        assert isinstance(raw, SQLStore)
+        probe = raw.acquire(sid, owner="projection-delivery-probe", ttl_ms=60_000)
+        assert probe is not None
+        writer_epoch = probe.epoch + 1
+        raw.release(probe)
+
+        records, source_sequences = [], []
+        for index in range(1, cycles):
+            turn_id = f"{sid}/turn/projection/{index}"
+            operation_id = f"{turn_id}/model/primary/1"
+            for kind, attempt in (
+                ("turn_started", None),
+                ("op_planned", 1),
+                ("op_started", 1),
+                ("op_completed", 1),
+                ("turn_ended", None),
+            ):
+                template = by_kind[kind]
+                payload = deepcopy(template.record._payload)
+                selected_operation = operation_id if kind.startswith("op_") else None
+                if kind == "turn_started":
+                    payload["input_ids"] = []
+                    payload["generation"] = index
+                elif kind == "op_planned":
+                    payload["idempotency_key"] = f"{sid}/{turn_id}/model/primary/1"
+                elif kind == "op_started":
+                    payload["dispatch_id"] = f"{operation_id}/1"
+                    payload["epoch"] = writer_epoch
+                elif kind == "turn_ended":
+                    payload["adopted_results"] = [{"attempt": 1, "operation_id": operation_id}]
+                records.append(
+                    make_record(
+                        kind,
+                        session_id=sid,
+                        turn_id=turn_id,
+                        operation_id=selected_operation,
+                        attempt=attempt,
+                        payload=payload,
+                        feature_level=template.record.feature_level,
+                    )
+                )
+                source_sequences.append(template.seq)
+
+        head = raw.read(sid, limit=1)
+        lease = raw.acquire(sid, owner="projection-delivery", ttl_ms=60_000)
+        assert lease is not None
+        try:
+            with raw.atomic() as tx:
+                receipt = tx.append(
+                    sid,
+                    lease=lease,
+                    expected_seq=head.head_seq,
+                    commit_id="projection-delivery-280",
+                    records=tuple(records),
+                )
+                for (_record_id, new_seq), old_seq in zip(receipt.record_sequences, source_sequences, strict=True):
+                    raw._rows(
+                        "INSERT INTO sk_content_link(tenant_id,session_id,content_id,record_seq,input_id,slot) "
+                        "SELECT tenant_id,session_id,content_id,%s,NULL,slot FROM sk_content_link "
+                        "WHERE tenant_id=%s AND session_id=%s AND record_seq=%s",
+                        (new_seq, raw.tenant_id, sid, old_seq),
+                    )
+        finally:
+            raw.release(lease)
+
+        verify_calls, content_reads = [], []
+        original_verify = SQLStore._verified_records
+        original_read = DurableContentReader.read
+
+        def counted_verify(self, session_id, through, **kwargs):
+            verify_calls.append((session_id, through))
+            return original_verify(self, session_id, through, **kwargs)
+
+        def counted_read(self, tenant_id, session_id, owner, slot, ref):
+            content_reads.append((owner, slot, ref.content_id))
+            return original_read(self, tenant_id, session_id, owner, slot, ref)
+
+        with (
+            patch.object(SQLStore, "_verified_records", counted_verify),
+            patch.object(DurableContentReader, "read", counted_read),
+            _read_snapshot(store),
+        ):
+            head_seq = raw.projection_prefix(sid).head_seq
+            paged_events = []
+            cursor, pages = 0, 0
+            while cursor < head_seq:
+                next_cursor, events, _has_more = _project_record_page(
+                    store,
+                    sid,
+                    after_seq=cursor,
+                    through_seq=head_seq,
+                )
+                assert next_cursor > cursor
+                cursor = next_cursor
+                paged_events.extend(events)
+                pages += 1
+
+        assert len(paged_events) >= 1_100
+        assert pages >= 5
+        assert verify_calls == [(sid, head_seq)]
+        assert sum(through for _session_id, through in verify_calls) == head_seq
+        assert len(content_reads) > pages
+
+        _, source_records, _ = store.read_state(sid)
+        hydration = hydration_for_session_store(store, sid)
+        expected_events = project_records(hydrate_records(source_records, hydration))
+        assert [event.to_dict() for event in paged_events] == [event.to_dict() for event in expected_events]
+
+        _, _, cursor, has_more, _, _ = kernel._handle_event_page(
+            sid,
+            handle.run_id,
+            after_seq=0,
+        )
+        assert has_more
+        planned = next(stored for stored in source_records if stored.record.kind == "op_planned")
+        request_ref = ContentRef.from_dict(planned.record._payload["request"])
+        with pytest.raises(MissingContentLink):
+            hydration.read("record:1", "request", request_ref)
+        assert kernel.content_key_provider.destroy(store.tenant_id, request_ref.key_id).accepted
+        with pytest.raises(KeyUnavailable):
+            kernel._handle_event_page(
+                sid,
+                handle.run_id,
+                after_seq=cursor,
+            )
+    finally:
+        kernel.close()
+
+
+def test_event_pages_isolate_store_arguments_across_shared_driver_state():
+    entered_a, entered_b, release = Event(), Event(), Event()
+    kernel_a, kernel_b = SessionDriver(), SessionDriver()
+    handle_a = handle_b = None
+
+    def complete_a(_request):
+        entered_a.set()
+        assert release.wait(5)
+        return LLMResponse("store-a result")
+
+    def complete_b(_request):
+        entered_b.set()
+        assert release.wait(5)
+        return LLMResponse("store-b result")
+
+    try:
+        handle_a = start_runner(
+            kernel_a,
+            "store-arguments",
+            Agent("store-a", "Answer."),
+            "go",
+            run_config=RunConfig(model_provider=ScriptedModelProvider.from_callback("test", "a", complete_a)),
+        )
+        handle_b = start_runner(
+            kernel_b,
+            "store-arguments",
+            Agent("store-b", "Answer."),
+            "go",
+            run_config=RunConfig(model_provider=ScriptedModelProvider.from_callback("test", "b", complete_b)),
+        )
+        assert entered_a.wait(5) and entered_b.wait(5)
+        assert handle_a.run_id == handle_b.run_id
+
+        page_a = kernel_a._handle_event_page(
+            handle_a.session_id,
+            handle_a.run_id,
+            after_seq=0,
+            store=kernel_a.store,
+        )
+        page_b = kernel_a._handle_event_page(
+            handle_b.session_id,
+            handle_b.run_id,
+            after_seq=0,
+            store=kernel_b.store,
+        )
+        assert {event.agent_name for event in page_a[1] if event.agent_name is not None} == {"store-a"}
+        assert {event.agent_name for event in page_b[1] if event.agent_name is not None} == {"store-b"}
+    finally:
+        release.set()
+        for kernel, handle in ((kernel_a, handle_a), (kernel_b, handle_b)):
+            if handle is None:
+                kernel.close()
+                continue
+            handle.result(timeout=5)
+            handle.close()
+
+
+def _start_logical_driver(
+    sessions: SessionDriver,
+    store: SQLiteStore,
+    session_id: str,
+) -> tuple[_Driver, Lease]:
+    sessions.create(
+        session_id,
+        "/workspace",
+        {"seed": {"messages": [{"role": "system", "content": "Seed context."}], "shared_state": {}}},
+    )
+    sessions.push(session_id, InboxItem("input", "user", {"content": "go"}))
+    runtime = sessions.runtime(
+        Agent("logical-fold", "Work carefully.", model="scripted"),
+        RunConfig(
+            model_provider=ScriptedModelProvider.new("scripted", "scripted", []),
+            workspace="/workspace",
+        ),
+        session_id=session_id,
+    )
+    driver_store = sessions.store
+    lease = driver_store.acquire(session_id, owner="logical-fold", ttl_ms=15_000)
+    assert lease is not None
+    driver = _Driver(driver_store, session_id, runtime, _Scope(lease, runtime, now_ms=driver_store._now()))
+    assert _recovery_phase.run(driver, inputs.apply_input(driver, one_turn=False))
+    assert _recovery_phase.run(driver, inputs.start_turn(driver))
+    return driver, lease
+
+
+def _logical_tool_plan(driver: _Driver, request: dict[str, Any], attempt: int) -> Record:
+    turn_id = driver.state.active_turn_id
+    assert turn_id is not None
+    return make_record_before_publication(
+        "op_planned",
+        session_id=driver.sid,
+        turn_id=turn_id,
+        operation_id="retry-operation",
+        attempt=attempt,
+        payload={
+            "op_kind": "tool",
+            "purpose": None,
+            "request": request,
+            "request_digest": digest(request),
+            "context_version": "v1",
+            "dependencies": [],
+            "tool": None,
+            "idempotency_key": "retry-call",
+            "budget_admission": {},
+            "not_before_ms": None,
+            "provider_binding": None,
+            "consumed_unknowns": [],
+            "policy_decision": None,
+        },
+    )
+
+
+def test_active_logical_fold_refreshes_same_batch_retry_records_once(tmp_path: Path):
+    session_id = "logical-retry-refresh"
+    provider = LocalKeyProvider(b"k" * 32)
+    try:
+        with SQLiteStore.standalone(str(tmp_path / "logical-retry-refresh.sqlite")) as store:
+            store.install_schema()
+            store.configure_input_admission(allow_unsigned=True)
+            sessions = SessionDriver(store=store, content_key_provider=provider)
+            driver, lease = _start_logical_driver(sessions, store, session_id)
+            other = _Driver(
+                sessions.store,
+                session_id,
+                driver.runtime,
+                _Scope(lease, driver.runtime, now_ms=sessions.store._now()),
+            )
+
+            request = {"id": "retry-call", "name": "retry_probe_tool", "arguments": {"text": "one"}}
+            first = _logical_tool_plan(other, request, attempt=1)
+            started = other.record(
+                "op_started",
+                {
+                    "dispatch_id": "retry-call/1",
+                    "authorization_version": "1",
+                    "epoch": lease.epoch,
+                    "mode": "sync",
+                },
+                first,
+            )
+            unknown = other.record(
+                "op_unknown",
+                {
+                    "reason": {"kind": "worker_lost"},
+                    "dispatch_evidence": {"kind": "tool"},
+                    "observation": {"attempt": 1},
+                    "retry": "retry",
+                    "retry_at_ms": None,
+                    "duplicate_cost_risk": True,
+                    "measurement_missing": True,
+                },
+                first,
+            )
+            retry = _logical_tool_plan(other, request, attempt=2)
+
+            with driver._logical_state_scope():
+                assert driver._active_logical_fold is not None
+                other.commit([first, started, unknown, retry])
+                stored_plans = [
+                    row
+                    for row in store.read_state(session_id)[1]
+                    if row.record.kind == "op_planned" and row.record.operation_id == "retry-operation"
+                ]
+                retry_owner = f"record:{stored_plans[1].seq}"
+                reads: list[tuple[str, str]] = []
+                original_read = DurableContentReader.read
+
+                def counted_read(self, tenant_id, read_session_id, owner, slot, ref):
+                    reads.append((owner, slot))
+                    return original_read(self, tenant_id, read_session_id, owner, slot, ref)
+
+                with patch.object(DurableContentReader, "read", counted_read):
+                    driver.refresh()
+
+                assert reads.count((retry_owner, "request")) == 1
+                assert retry.record_id in driver._logical_retry_record_ids
+                retry_attempt = driver.state.operations["retry-operation"].attempts[2]
+                assert retry_attempt.plan._payload["request"] == request
+                raw_retry = next(
+                    row.record for row in driver.records if row.record.kind == "op_planned" and row.record.attempt == 2
+                )
+                assert ContentRef.from_dict(raw_retry._payload["request"])
+
+            assert sessions.store.release(lease)
+    finally:
+        provider.close()
+
+
+def test_logical_commit_preserves_fresh_state_ownership_after_replay_reload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    session_id = "logical-replay-reload"
+    provider = LocalKeyProvider(b"k" * 32)
+    try:
+        with SQLiteStore.standalone(str(tmp_path / "logical-replay-reload.sqlite")) as store:
+            store.install_schema()
+            store.configure_input_admission(allow_unsigned=True)
+            sessions = SessionDriver(store=store, content_key_provider=provider)
+            driver, lease = _start_logical_driver(sessions, store, session_id)
+
+            with driver._logical_state_scope():
+                boundary = driver.boundary_record(
+                    "before_memory",
+                    "normal-commit",
+                    {"messages": [], "shared_state": {}},
+                    source_digest=digest([message.to_dict() for message in driver.transcript()]),
+                )
+                driver.commit([boundary])
+                assert driver._state is driver._logical_projected_state
+                assert driver._logical_dirty is False
+                assert boundary.record_id in {record.record_id for record in driver.state.boundaries.values()}
+
+                committed = next(row for row in driver.records if row.record.record_id == boundary.record_id)
+                replay_records = [row.record for row in driver.records if row.commit_id == committed.commit_id]
+                record_count = len(driver.records)
+                load_version = getattr(driver, "_load_state_version", 0)
+                monkeypatch.setattr(CoreDriver, "refresh", lambda self: self.load_state())
+                driver.commit(replay_records)
+
+                assert getattr(driver, "_load_state_version", 0) == load_version + 1
+                assert len(driver.records) == record_count
+                assert driver._state is driver.fold.state
+                assert driver._logical_dirty is True
+                assert boundary.record_id in {record.record_id for record in driver.state.boundaries.values()}
+
+            assert sessions.store.release(lease)
+    finally:
+        provider.close()

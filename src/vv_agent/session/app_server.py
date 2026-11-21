@@ -23,6 +23,7 @@ from vv_agent.kernel._content_runtime import SessionContentWriter as CoreSession
 from vv_agent.kernel._provider_outcomes import ProviderResultInvalid
 from vv_agent.kernel._requirements import SessionRequirements, normalize_requirements
 from vv_agent.kernel._sql import UnsupportedFeatureLevel
+from vv_agent.model import ModelError
 from vv_agent.types import AgentStatus, Message
 
 from .content_runtime import SessionContentWriter
@@ -37,6 +38,7 @@ from .projection import (
 from .records import InboxItem, SessionSpec, digest
 from .reducer import ExecutionState
 from .result import project_result
+from .runtime import static_model_selection_requirements, static_session_requirements, static_worker_supports
 from .store import Conflict
 from .surfaces import PrincipalInput, SessionDriver, _principal_payload
 from .timing import Clock, SystemClock
@@ -213,6 +215,22 @@ class _KernelThreadStore:
         self.clock = clock if clock is not None else SystemClock()
         self.kernel = kernel
 
+    def prepare_static_session(self, requirements: SessionRequirements) -> bool:
+        """Prepare the App Server store for one level-2 creation bootstrap."""
+
+        requirements = normalize_requirements(requirements)
+        if requirements.level < 2:
+            raise ValueError("App Server static bootstrap requires requirements.level >= 2")
+        if self.kernel._owns_store:
+            self.kernel._ensure_static_worker_support(
+                level=requirements.level,
+                capabilities=requirements.capabilities,
+            )
+        feature_level = self.kernel.store.max_feature_level
+        if isinstance(feature_level, bool) or not isinstance(feature_level, int) or feature_level < 1:
+            raise ValueError("SessionStore.max_feature_level must be a positive integer")
+        return feature_level >= requirements.level
+
     def _hydration(self, thread_id: str, store=None) -> SessionHydration:
         return hydration_for_store(
             store or self.kernel.store,
@@ -358,7 +376,7 @@ class _KernelThreadStore:
             try:
                 existing = self._thread_creation(input_id)
             except KeyError:
-                raise
+                raise create_error from None
             if not self._thread_creation_matches(
                 existing,
                 thread_id=input_id,
@@ -580,6 +598,161 @@ class _KernelRunAdapter(RunAdapter):
             session_id=thread_id,
         )
 
+    def _routing_requirements(
+        self,
+        thread_id: str,
+        state: ExecutionState,
+        records,
+        *,
+        stored_inputs=None,
+    ) -> SessionRequirements:
+        """Derive worker support from public durable reads; claiming verifies the SQL cache."""
+
+        if not records or records[0].record.kind != "session_created":
+            raise Conflict("session has no durable session_created record")
+        if stored_inputs is None:
+            stored_inputs = self.kernel.store.peek_inbox(thread_id, ready_only=False)
+        creation = hydrate_record_payload(records[0], self._hydration(thread_id))
+        bootstrap = (
+            SessionRequirements(1, None, ())
+            if records[0].record.feature_level == 1
+            else normalize_requirements(creation["bootstrap"])
+        )
+
+        if state.active_turn_id is not None:
+            turn = state.turns.get(state.active_turn_id)
+            if turn is None:
+                raise Conflict("active turn has no durable turn_started record")
+            route = normalize_requirements(turn.start._payload["requirements"])
+        else:
+            candidates = []
+            for key, record in state.applied_inputs.items():
+                item = InboxItem(**record._payload["input"])
+                if (
+                    key not in state.admitted_inputs
+                    and record._payload["disposition"] == "queued"
+                    and item.kind in {"user", "follow_up"}
+                ):
+                    candidates.append(item)
+            candidates.extend(
+                stored.item
+                for stored in stored_inputs
+                if stored.item.kind in {"user", "follow_up"} and stored.item.target_turn_id is None
+            )
+            selected = next((item for item in candidates if item.kind == "user"), candidates[0] if candidates else None)
+            route = normalize_requirements(selected.requirements) if selected and selected.requirements is not None else bootstrap
+
+        capabilities = set(route.capabilities)
+        level = route.level
+        applied_selection = state.model_selection
+        selections = [InboxItem(**applied_selection._payload["input"])] if applied_selection is not None else []
+        selections.extend(stored.item for stored in stored_inputs if stored.item.kind == "model_selection")
+        effective_selection = None
+        for selection in selections:
+            requirements = normalize_requirements(selection.requirements) if selection.requirements is not None else None
+            if requirements is not None and requirements.handler_version not in {None, route.handler_version}:
+                continue
+            effective_selection = None if selection.payload.get("selection") is None else requirements
+        if effective_selection is not None:
+            level = max(level, effective_selection.level)
+            capabilities.update(effective_selection.capabilities)
+
+        return SessionRequirements.normalized(
+            level=level,
+            handler_version=route.handler_version,
+            capabilities=capabilities,
+        )
+
+    def _restore_worker_support(self, thread_id: str, *, state=None, records=None) -> None:
+        if state is None or records is None:
+            state, records, _ = self.kernel.store.read_state(thread_id)
+        stored_inputs = self.kernel.store.peek_inbox(thread_id, ready_only=False)
+        required = self._routing_requirements(thread_id, state, records, stored_inputs=stored_inputs)
+        if required.level < 2:
+            return
+        handler_version = self.kernel._handler_version(required.handler_version or self.kernel.default_handler_version)
+        _thread, agent, config = self._binding(thread_id)
+        runtime = self.kernel.runtime(agent, config, session_id=thread_id)
+        base = static_session_requirements(
+            agent,
+            config,
+            runtime.resolved,
+            level=required.level,
+            handler_version=handler_version,
+            extra_capabilities=self.kernel.capabilities,
+        )
+        # Registration widens support monotonically. Preserve capabilities that
+        # this worker has already declared when restoring a later turn.
+        capabilities = set(self.kernel._worker.support.capabilities)
+        capabilities.update(
+            static_worker_supports(
+                agent,
+                config,
+                runtime.resolved,
+                extra_capabilities=self.kernel.capabilities,
+            )
+        )
+        capabilities.update(base.capabilities)
+
+        selections: dict[str, InboxItem] = {}
+        if state.model_selection is not None:
+            applied = InboxItem(**state.model_selection._payload["input"])
+            selections[applied.input_id] = applied
+        for stored in stored_inputs:
+            if stored.item.kind == "model_selection":
+                selections.setdefault(stored.item.input_id, stored.item)
+        hydration = self._hydration(thread_id)
+        required_capabilities = set(required.capabilities)
+        for item in selections.values():
+            selection = hydrate_input(item, hydration).payload.get("selection")
+            if not isinstance(selection, dict):
+                continue
+            try:
+                declared = static_model_selection_requirements(
+                    selection,
+                    resolve_model=self._host.resolve_model,
+                    handler_version=handler_version,
+                )
+            except (ModelError, ValueError):
+                continue
+            if set(declared.capabilities) <= required_capabilities:
+                capabilities.update(declared.capabilities)
+
+        level = max(self.kernel._worker.support.level, required.level, base.level)
+        self.kernel._require_session_support(
+            required,
+            level=level,
+            handler_version=handler_version,
+            capabilities=tuple(sorted(capabilities)),
+        )
+        self.kernel._ensure_static_worker_support(
+            level=level,
+            capabilities=tuple(sorted(capabilities)),
+        )
+
+    def _warn_worker_support_restore(self, thread_id: str, error: Exception, reason: str) -> None:
+        self._notify_subscribers(
+            thread_id,
+            "error/warning",
+            {"message": str(error), "code": "worker_support_restore", "reason": reason},
+        )
+
+    def _warn_turn_start_support_error(self, thread_id: str, error: Exception) -> bool:
+        if isinstance(error, UnsupportedFeatureLevel):
+            reason = "unsupported_feature_level"
+        elif isinstance(error, ModelError):
+            reason = "model_resolution_failed"
+        elif isinstance(error, Conflict):
+            if type(error) is not Conflict:
+                return False
+            reason = "worker_support_conflict"
+        elif isinstance(error, ValueError):
+            reason = "invalid_worker_support"
+        else:
+            return False
+        self._warn_worker_support_restore(thread_id, error, reason)
+        return True
+
     def _with_app_server_controls(self, run_config, *, connection_id: str | None, thread_id: str, turn_id: str):
         return replace(
             run_config,
@@ -615,7 +788,57 @@ class _KernelRunAdapter(RunAdapter):
         runtime_config = self._turn_runtime_config(config, thread_id=thread_id, turn_id=turn_id)
         return self.kernel.runtime(agent, runtime_config, session_id=thread_id)
 
-    def subscribe(self, thread_id, connection_id):
+    def _submission_matches(
+        self,
+        thread_id: str,
+        retained: InboxItem,
+        *,
+        kind: str,
+        expected_turn_id: str | None,
+        content: Any,
+        actor_payload: dict[str, Any],
+    ) -> bool:
+        retained_content = hydrate_input(retained, self._hydration(thread_id)).payload.get("content")
+        return (
+            retained.kind == ("user" if kind == "start" else kind)
+            and retained.target_turn_id == (expected_turn_id if kind == "steer" else None)
+            and self._controller_actor_matches(thread_id, retained, actor_payload)
+            and canonical_json_bytes(retained_content) == canonical_json_bytes(content)
+        )
+
+    def _replay_submission(
+        self,
+        *,
+        thread_id: str,
+        input_id: str,
+        expected_turn_id: str | None,
+        kind: str,
+        content: Any,
+        actor: PrincipalInput | None,
+    ) -> dict[str, Any] | None:
+        stored = self.kernel.store.read_input(thread_id, input_id)
+        if stored is None:
+            return None
+        actor_payload = self._controller_actor_payload(thread_id, actor)
+        if not self._submission_matches(
+            thread_id,
+            stored.item,
+            kind=kind,
+            expected_turn_id=expected_turn_id,
+            content=content,
+            actor_payload=actor_payload,
+        ):
+            raise SubmissionConflict("submission_conflict")
+        return {
+            "threadId": thread_id,
+            "turnId": expected_turn_id if kind == "steer" else f"{thread_id}/turn/{input_id}",
+            "inputId": input_id,
+            "inputSeq": stored.input_seq,
+            "accepted": True,
+            "replayed": True,
+        }
+
+    def subscribe(self, thread_id, connection_id, *, restore_errors_as_warning: bool = False):
         state, records, _ = self.kernel.store.read_state(thread_id)
         start = state.turns[state.active_turn_id].start if state.active_turn_id else None
         position = next(r.seq for r in records if r.record == start) - 1 if start else records[-1].seq
@@ -635,6 +858,17 @@ class _KernelRunAdapter(RunAdapter):
             # takeover while another node is driving the turn.
             self._claim_disconnected_turn_owner(connection_id, thread_id, state, allow_missing=True)
         self._state_manager.subscribe(thread_id, connection_id)
+        if self.kernel._worker.support.drive is not None:
+            try:
+                self._restore_worker_support(thread_id, state=state, records=records)
+            except ModelError as exc:
+                if not restore_errors_as_warning:
+                    raise ValueError(str(exc)) from None
+                if not self._warn_turn_start_support_error(thread_id, exc):
+                    raise
+            except (UnsupportedFeatureLevel, Conflict, ValueError) as error:
+                if not restore_errors_as_warning or not self._warn_turn_start_support_error(thread_id, error):
+                    raise
         registration = self.kernel._registration_for_cursor(thread_id)
         pending_start = self._has_pending_start_input(thread_id, self.kernel.store, state)
         # Observe durable state without a local runtime, but leave worker scans
@@ -686,7 +920,6 @@ class _KernelRunAdapter(RunAdapter):
         if position is not None:
             position.due = 0.0
             position.delay = 0.05
-            position.replay_approvals = True
         try:
             self.kernel._worker.post_observation(self._observe_with_driver)
         except RuntimeError as exc:
@@ -730,6 +963,7 @@ class _KernelRunAdapter(RunAdapter):
                     position.due = 0.0
                     position.delay = 0.05
                 previous_seq = position.seq
+                progressed = operational
                 approval_seq = self._next_approval_seq(sid, store, after_seq=previous_seq)
                 if position.replay_approvals:
                     blocked = self._send_pending_approvals(
@@ -745,7 +979,7 @@ class _KernelRunAdapter(RunAdapter):
                     position.replay_approvals = False
                 if approval_seq is not None:
                     progressed = (
-                        self._publish_turns(sid, store=store, through_seq=approval_seq - 1, include_items=True) or operational
+                        self._publish_turns(sid, store=store, through_seq=approval_seq - 1, include_items=True) or progressed
                     )
                     blocked = self._send_pending_approvals(
                         sid,
@@ -756,7 +990,15 @@ class _KernelRunAdapter(RunAdapter):
                     if blocked is not None:
                         self._reconcile_local_turn(sid, store)
                         continue
-                    progressed = self._publish_turns(sid, store=store, include_items=True) or progressed
+                    progressed = (
+                        self._publish_turns(
+                            sid,
+                            store=store,
+                            include_items=True,
+                            skip_approval_requested_seq=approval_seq,
+                        )
+                        or progressed
+                    )
                 else:
                     progressed = self._publish_turns(sid, store=store, include_items=True) or operational
                 self._reconcile_local_turn(sid, store)
@@ -795,7 +1037,15 @@ class _KernelRunAdapter(RunAdapter):
             self.kernel._abandon_handle(active.handle)
         return True
 
-    def _publish_turns(self, sid, *, store, through_seq=None, include_items=False):
+    def _publish_turns(
+        self,
+        sid,
+        *,
+        store,
+        through_seq=None,
+        include_items=False,
+        skip_approval_requested_seq: int | None = None,
+    ):
         """Publish one committed record page exactly once for this node position."""
 
         position = self._notification_positions.get(sid)
@@ -853,6 +1103,7 @@ class _KernelRunAdapter(RunAdapter):
                 (event.metadata["session_seq"], method, params)
                 for method, params in projection.additional_notifications
                 if method.startswith(("approval/", "contextCompaction/"))
+                and not (method == "approval/requested" and event.metadata["session_seq"] == skip_approval_requested_seq)
             )
         position.seq = max(position.seq, rows[-1].seq)
         rank = {"turn/started": 0, "turn/completed": 2}
@@ -1004,11 +1255,16 @@ class _KernelRunAdapter(RunAdapter):
             self._router.cancel_matching_server_requests(thread_id=sid, turn_id=active.turn_id)
 
     def _approval_answered(self, store, thread_id: str, request_id: str) -> bool:
-        input_id = f"approval/{request_id}/answer"
         state, _records, _ = store.read_state(thread_id)
-        if input_id in state.applied_inputs:
-            return True
-        return any(entry.item.input_id == input_id for entry in store.peek_inbox(thread_id))
+        applied = any(
+            (item := InboxItem(**record._payload["input"])).kind == "approval_answer"
+            and item.payload.get("request_id") == request_id
+            for record in state.applied_inputs.values()
+        )
+        return applied or any(
+            entry.item.kind == "approval_answer" and entry.item.payload.get("request_id") == request_id
+            for entry in store.peek_inbox(thread_id)
+        )
 
     def _next_approval_seq(self, sid: str, store, *, after_seq: int) -> int | None:
         cursor = after_seq
@@ -1022,6 +1278,26 @@ class _KernelRunAdapter(RunAdapter):
                 if isinstance(event, ApprovalRequestedEvent) and seq in sequences and seq > after_seq:
                     return seq
             cursor = rows[-1].seq
+
+    def _approval_arguments(self, sid: str, store, state, records, event, wait) -> dict[str, Any]:
+        operation = state.operations.get(wait.get("operation_id")) if wait is not None else None
+        attempt = operation.attempts.get(wait.get("attempt")) if operation is not None and wait is not None else None
+        if attempt is None:
+            raise ValueError("trusted approval execution plan is unavailable")
+
+        source = attempt.prepared or attempt.plan
+        stored = next((row for row in records if row.record.record_id == source.record_id), None)
+        if stored is None:
+            raise ValueError("trusted approval execution plan record is unavailable")
+        request = hydrate_record_payload(stored, self._hydration(sid, store)).get("request")
+        if type(request) is not dict:
+            raise ValueError("trusted approval request must be an object")
+        if request.get("id") != event.tool_call_id or request.get("name") != event.tool_name:
+            raise ValueError("approval request identity does not match the execution plan")
+        arguments = request.get("arguments")
+        if type(arguments) is not dict:
+            raise ValueError("trusted approval arguments must be an object")
+        return dict(arguments)
 
     def _send_pending_approvals(
         self,
@@ -1057,15 +1333,14 @@ class _KernelRunAdapter(RunAdapter):
                 continue
             turn_id = event.run_id
             wait = waits.get((turn_id, request_id))
-            if replay_approvals and wait is None:
+            if wait is None:
                 continue
-            if wait is not None:
-                deadline_ms = wait.get("deadline_ms")
-                if deadline_ms is None:
-                    durable_wait = state.waits.get((wait.get("operation_id"), wait.get("attempt")))
-                    deadline_ms = durable_wait.get("deadline_ms") if durable_wait is not None else None
-                if deadline_ms is not None and now_ms is not None and now_ms >= deadline_ms:
-                    continue
+            deadline_ms = wait.get("deadline_ms")
+            if deadline_ms is None:
+                durable_wait = state.waits.get((wait.get("operation_id"), wait.get("attempt")))
+                deadline_ms = durable_wait.get("deadline_ms") if durable_wait is not None else None
+            if deadline_ms is not None and now_ms is not None and now_ms >= deadline_ms:
+                continue
             if self._approval_answered(store, sid, request_id):
                 continue
             owner = self._turn_connections.get((sid, turn_id))
@@ -1075,27 +1350,23 @@ class _KernelRunAdapter(RunAdapter):
                 continue
             if store.lease_status(sid)[2] > 0:
                 return event_seq
-            arguments: dict[str, Any] = {}
-            if wait is not None:
-                operation = state.operations.get(wait.get("operation_id"))
-                attempt = operation.attempts.get(wait.get("attempt")) if operation is not None else None
-                plan_request = attempt.plan._payload.get("request") if attempt is not None and attempt.plan is not None else None
-                raw_arguments = plan_request.get("arguments") if isinstance(plan_request, dict) else None
-                if isinstance(raw_arguments, dict):
-                    arguments = dict(raw_arguments)
+            arguments = self._approval_arguments(sid, store, state, records, event, wait)
+            request_params = ApprovalRequestParams(
+                request_id=request_id,
+                thread_id=sid,
+                turn_id=turn_id,
+                tool_call_id=event.tool_call_id,
+                tool_name=event.tool_name,
+                preview=event.message or f"Approval required for tool {event.tool_name}.",
+                arguments=arguments,
+            ).to_dict()
+            if not replay_approvals and getattr(self, "_state_manager", None) is not None:
+                self._notify_subscribers(sid, "approval/requested", request_params)
             try:
                 self._router.send_server_request(
                     owner,
                     "approval/request",
-                    ApprovalRequestParams(
-                        request_id=request_id,
-                        thread_id=sid,
-                        turn_id=turn_id,
-                        tool_call_id=event.tool_call_id,
-                        tool_name=event.tool_name,
-                        preview=event.message or f"Approval required for tool {event.tool_name}.",
-                        arguments=arguments,
-                    ).to_dict(),
+                    request_params,
                     request_id=RequestId(request_id),
                 )
             except ValueError as exc:
@@ -1190,6 +1461,16 @@ class _KernelRunAdapter(RunAdapter):
         content = (
             _prepared_content if _prepared_content is not None else _content(self, input, metadata or {}, kind, expected_turn_id)
         )
+        if kind == "start" and _start_runtime is not None:
+            self.kernel._ensure_static_worker_support(
+                level=_start_runtime.requirements_bound().level,
+                capabilities=static_worker_supports(
+                    _start_runtime.agent,
+                    _start_runtime.config,
+                    _start_runtime.resolved,
+                    extra_capabilities=self.kernel.capabilities,
+                ),
+            )
         previous_registration = None
         start_registration = None
         try:
@@ -1204,13 +1485,14 @@ class _KernelRunAdapter(RunAdapter):
                         stored = self.kernel.store.read_input(thread_id, input_id)
                         if stored:
                             retained = stored.item
-                            expected_kind = "user" if kind == "start" else kind
                             actor_payload = self._controller_actor_payload(thread_id, actor)
-                            retained_content = hydrate_input(retained, self._hydration(thread_id)).payload.get("content")
-                            if (
-                                retained.kind != expected_kind
-                                or not self._controller_actor_matches(thread_id, retained, actor_payload)
-                                or canonical_json_bytes(retained_content) != canonical_json_bytes(content)
+                            if not self._submission_matches(
+                                thread_id,
+                                retained,
+                                kind=kind,
+                                expected_turn_id=expected_turn_id,
+                                content=content,
+                                actor_payload=actor_payload,
                             ):
                                 raise SubmissionConflict("submission_conflict")
                             receipt = tx.push(thread_id, retained)
@@ -1297,14 +1579,46 @@ class _KernelRunAdapter(RunAdapter):
         actor: PrincipalInput | None = None,
     ):
         content = _content(self, input, metadata or {}, "start", expected_turn_id)
+        replayed = self._replay_submission(
+            thread_id=thread_id,
+            input_id=input_id,
+            expected_turn_id=expected_turn_id,
+            kind="start",
+            content=content,
+            actor=actor,
+        )
+        if replayed is not None:
+            turn_id = f"{thread_id}/turn/{input_id}"
+            if self._router.is_registered(connection_id):
+                key = (thread_id, turn_id)
+                owner = self._turn_connections.get(key)
+                if owner is None or not self._router.is_registered(owner):
+                    self._turn_connections[key] = connection_id
+            try:
+                self.subscribe(thread_id, connection_id, restore_errors_as_warning=True)
+                self.wake(thread_id)
+                self.recover(connection_id, thread_id)
+            except (UnsupportedFeatureLevel, ModelError, Conflict, ValueError) as error:
+                if not self._warn_turn_start_support_error(thread_id, error):
+                    raise
+            if request_id is not None:
+                self._router.send_response(connection_id, request_id, replayed)
+            return replayed
         start_runtime = None
         if self.kernel._worker.support.drive is not None:
-            start_runtime = self._prepare_turn_runtime(
-                connection_id=connection_id,
-                thread_id=thread_id,
-                input_id=input_id,
-                content=content,
-            )
+            try:
+                start_runtime = self._prepare_turn_runtime(
+                    connection_id=connection_id,
+                    thread_id=thread_id,
+                    input_id=input_id,
+                    content=content,
+                )
+            except (ModelError, UnsupportedFeatureLevel) as exc:
+                raise ValueError(str(exc)) from None
+            except Conflict as exc:
+                if type(exc) is not Conflict:
+                    raise
+                raise SubmissionConflict("submission_conflict") from exc
         payload, _submitted_content = self.submit_input(
             connection_id=connection_id,
             thread_id=thread_id,
@@ -1317,8 +1631,12 @@ class _KernelRunAdapter(RunAdapter):
             _prepared_content=content,
             _start_runtime=start_runtime,
         )
-        self.subscribe(thread_id, connection_id)
-        self.recover(connection_id, thread_id)
+        try:
+            self.subscribe(thread_id, connection_id, restore_errors_as_warning=True)
+            self.recover(connection_id, thread_id)
+        except (UnsupportedFeatureLevel, ModelError, Conflict, ValueError) as error:
+            if not self._warn_turn_start_support_error(thread_id, error):
+                raise
         if request_id is not None:
             self._router.send_response(connection_id, request_id, payload)
         return payload
@@ -1520,6 +1838,7 @@ class _KernelRunAdapter(RunAdapter):
                     {"threadId": thread_id, "turnId": turn_id, "runId": turn_id, "status": turn.status},
                 )
             return
+        self.subscribe(thread_id, connection_id)
         self._clear_provider_error_for_retry(thread_id)
         if self._state_manager.active_turn(thread_id) is not None:
             if request_id is not None:
@@ -1661,6 +1980,20 @@ class _KernelRunAdapter(RunAdapter):
         snapshot = self._store.read_thread(thread_id)
         if snapshot.thread.status in {ThreadStatus.CLOSED, ThreadStatus.ARCHIVED}:
             raise SubmissionConflict("submission_conflict")
+        requirements = None
+        if selection is not None and self.kernel._worker.support.drive is not None:
+            try:
+                requirements = static_model_selection_requirements(
+                    selection,
+                    resolve_model=self._host.resolve_model,
+                    handler_version=self.kernel.default_handler_version,
+                )
+            except ModelError:
+                pass
+            except Conflict:
+                raise
+            except ValueError:
+                pass
         try:
             self.kernel.push(
                 thread_id,
@@ -1672,6 +2005,11 @@ class _KernelRunAdapter(RunAdapter):
                 actor=actor,
                 actor_subject_id="app-server",
             )
+            if requirements is not None:
+                self.kernel._ensure_static_worker_support(
+                    level=requirements.level,
+                    capabilities=requirements.capabilities,
+                )
         except UnsupportedFeatureLevel:
             raise
         except Conflict as exc:

@@ -881,6 +881,7 @@ class PostgresStore(SQLStore):
 
         try:
             with self._connection_lock:
+                self._read_snapshot_prefix = None
                 context_tenant = self.tenant_context_id
                 with self.connection.transaction():
                     if self.connection.info.transaction_status == TransactionStatus.INTRANS:

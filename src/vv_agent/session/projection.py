@@ -50,6 +50,8 @@ from vv_agent.kernel._boundary_hydration import (
 from vv_agent.kernel._boundary_hydration import (
     fold_hydrated_records as fold_hydrated_records,
 )
+from vv_agent.kernel._content import ContentRef
+from vv_agent.kernel._hydration import HydrationError
 from vv_agent.types import ModelCallOperation, ToolExecutionResult
 
 from .children import child_handles
@@ -58,6 +60,16 @@ from .records import copy_json, digest
 from .runtime import model_usage
 from .store import StoredRecord
 from .tool_results import project_tool_result
+
+
+def _contains_content_ref(value: Any) -> bool:
+    if isinstance(value, ContentRef):
+        return True
+    if isinstance(value, dict):
+        return any(_contains_content_ref(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_contains_content_ref(item) for item in value)
+    return False
 
 
 def hydration_for_store(store: Any, *, tenant_id: str, session_id: str) -> SessionHydration:
@@ -78,7 +90,11 @@ hydrate_stored_record = hydrate_session_stored_record
 hydrate_records = hydrate_session_records
 
 
-def project_records(records: Iterable[StoredRecord], *, hydration: SessionHydration | None = None) -> list[RunEvent]:
+def project_records(
+    records: Iterable[StoredRecord],
+    *,
+    hydration: SessionHydration | None = None,
+) -> list[RunEvent]:
     """Pass a prefix including plans; callers filter emitted metadata.session_seq by cursor."""
     plans, events, turns = {}, [], {}
     delegations: dict[tuple[str, int], dict] = {}
@@ -86,6 +102,7 @@ def project_records(records: Iterable[StoredRecord], *, hydration: SessionHydrat
     compactions: dict[str, str | None] = {}
     for stored in records:
         r = stored.record
+        key = (r.session_id, stored.seq, r.record_id)
         p = hydrate_record_payload(stored, hydration)
         identity_digest = digest([r.session_id, r.record_id])
         common: dict[str, Any] = {
@@ -422,6 +439,10 @@ def project_records(records: Iterable[StoredRecord], *, hydration: SessionHydrat
                 elif r.kind == "op_parked":
                     h = p["handle"]
                     if h["kind"] == "approval":
+                        arguments = request.get("arguments")
+                        if type(arguments) is not dict or _contains_content_ref(arguments):
+                            raise HydrationError("trusted approval arguments are unavailable")
+                        common["metadata"] = common["metadata"] | {"arguments": deepcopy(arguments)}
                         event = ApprovalRequestedEvent(**common, **tool, request_id=h["request_id"], message="Approval required")
                     elif h["kind"] == "user":
                         common["metadata"]["interaction"] = user_interaction(

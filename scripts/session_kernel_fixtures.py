@@ -1793,7 +1793,8 @@ class Fixtures:
         assert self.state(sid).active_turn_id is not None
         server.router.register_transport(observer)
         request(39, "initialize", {"clientInfo": {"name": "observer-again"}})
-        server.state_manager.subscribe(sid, "observer")
+        request(None, "initialized")
+        assert request(40, "thread/resume", {"threadId": sid, "subscribe": True})["result"]["thread"]["status"] == "approval_wait"
         drain()
         self.clock = deadline
         server.run_adapter.recover("observer", sid)

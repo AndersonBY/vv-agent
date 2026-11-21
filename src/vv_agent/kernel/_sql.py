@@ -8,7 +8,7 @@ import json
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from copy import copy
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from hashlib import sha256
 from typing import Any, Protocol, cast
 
@@ -62,6 +62,7 @@ _INPUT_ADMISSION_DOMAIN = "vv-agent/S1/input"
 _CHAIN_DOMAIN = b"vv-agent/S1"
 _CHECKPOINT_DOMAIN = "vv-agent/S1/checkpoint"
 _RECORD_READ_PAGE_SIZE = 256
+_COMMIT_PARSE_CACHE_LIMIT = 1024
 _CONFIGURED_VERIFIER = object()
 
 
@@ -291,6 +292,24 @@ def stored_input_proof(stored: StoredInput) -> dict[str, Any] | None:
     }
 
 
+@dataclass(frozen=True, slots=True)
+class _ProjectionIndexes:
+    operations: dict[tuple[str, int], tuple[StoredRecord, ...]]
+    turn_starts: dict[str, StoredRecord]
+    turn_dependencies: dict[str, tuple[StoredRecord, ...]]
+    inputs_by_id: dict[str, StoredInput]
+
+
+@dataclass(frozen=True, slots=True)
+class _CommitPayload:
+    head_seq: int
+    head_chain_digest: Any
+    records: tuple[tuple[str, str], ...]
+    sequences: tuple[tuple[str, int], ...]
+    consume_input_ids: tuple[str, ...]
+    consumers: tuple[str, ...]
+
+
 @dataclass
 class _Prefix:
     tenant_id: str
@@ -300,6 +319,48 @@ class _Prefix:
     reducer: Fold
     records: tuple[StoredRecord, ...]
     stored_inputs: tuple[StoredInput, ...] = ()
+    inbox_seq: int = 0
+    chains: tuple[str, ...] = ()
+    _projection_indexes: _ProjectionIndexes | None = field(default=None, init=False, repr=False)
+
+    def projection_indexes(self) -> _ProjectionIndexes:
+        if self._projection_indexes is not None:
+            return self._projection_indexes
+        operations: dict[tuple[str, int], list[StoredRecord]] = {}
+        turn_starts: dict[str, StoredRecord] = {}
+        dependencies: dict[str, list[StoredRecord]] = {}
+        for stored in self.records:
+            record = stored.record
+            if (
+                record.operation_id is not None
+                and record.attempt is not None
+                and record.kind
+                in {
+                    "op_planned",
+                    "op_prepared",
+                    "op_parked",
+                }
+            ):
+                operations.setdefault((record.operation_id, record.attempt), []).append(stored)
+            if record.kind == "turn_started" and record.turn_id is not None:
+                turn_starts.setdefault(record.turn_id, stored)
+            if record.kind == "boundary_recorded" and record.turn_id is not None:
+                dependencies.setdefault(record.turn_id, []).append(stored)
+            elif record.kind == "input_applied" and record.turn_id is not None:
+                input_id = record._payload["input"]["input_id"]
+                if input_id.startswith("compaction/"):
+                    dependencies.setdefault(record.turn_id, []).append(stored)
+        self._projection_indexes = _ProjectionIndexes(
+            operations={key: tuple(values) for key, values in operations.items()},
+            turn_starts=turn_starts,
+            turn_dependencies={key: tuple(values) for key, values in dependencies.items()},
+            inputs_by_id={stored.item.input_id: stored for stored in self.stored_inputs},
+        )
+        return self._projection_indexes
+
+    @property
+    def head_seq(self) -> int:
+        return len(self.records)
 
 
 @dataclass(frozen=True, slots=True)
@@ -339,6 +400,7 @@ class SQLStore:
     def __init__(self, *, fold_factory: Callable[[], Fold]):
         self.fold_factory = fold_factory
         self._transaction_state = _TransactionState()
+        self._commit_parse_cache: dict[tuple[bytes, bytes], _CommitPayload] = {}
 
     @property
     def tenant_id(self) -> str:
@@ -347,6 +409,12 @@ class SQLStore:
     @property
     def worker_level(self) -> int:
         return self.worker_supports.max_level
+
+    @property
+    def max_feature_level(self) -> int:
+        """Return the durable write ceiling without changing it."""
+
+        return self._write_ceiling()
 
     @property
     def worker_supports(self) -> WorkerSupports:
@@ -417,6 +485,7 @@ class SQLStore:
         scoped._tenant_id = tenant_id
         scoped._fold_cache = None
         scoped._previous_prefix = None
+        scoped._commit_parse_cache = {}
         return scoped
 
     @property
@@ -1141,6 +1210,81 @@ class SQLStore:
             if not verifier.verify(key_id, message, bytes(signature)):
                 raise LedgerIntegrityError(f"ledger checkpoint signature is invalid at seq {seq}")
 
+    def _commit_payload(self, body: bytes, sequence_body: bytes) -> _CommitPayload:
+        """Validate immutable commit bytes once while SQL metadata is checked on every pass."""
+
+        if not isinstance(sequence_body, bytes):
+            raise LedgerIntegrityError("commit metadata is not canonical JCS")
+        key = (body, sequence_body)
+        cached = self._commit_parse_cache.get(key)
+        if cached is not None:
+            return cached
+        try:
+            manifest = json.loads(body)
+            sequences = json.loads(sequence_body)
+            canonical = canonical_json_bytes(manifest, "commit body")
+            canonical_sequences = canonical_json_bytes(sequences, "commit record_sequences")
+        except (TypeError, ValueError) as exc:
+            raise LedgerIntegrityError("commit metadata is not canonical JCS") from exc
+        if canonical != body or canonical_sequences != sequence_body:
+            raise LedgerIntegrityError("commit metadata is not canonical JCS")
+        expected_fields = {"head_seq", "head_chain_digest", "records", "consume_input_ids", "consumers"}
+        if not isinstance(manifest, dict) or set(manifest) != expected_fields:
+            raise LedgerIntegrityError("commit body has an invalid shape")
+        head_seq = manifest["head_seq"]
+        if type(head_seq) is not int or head_seq < 0:
+            raise LedgerIntegrityError("commit head_seq is invalid")
+
+        records = manifest["records"]
+        if not isinstance(records, list):
+            raise LedgerIntegrityError("commit records are invalid")
+        manifest_records: list[tuple[str, str]] = []
+        for item in records:
+            if not isinstance(item, dict) or set(item) != {"record_id", "digest"}:
+                raise LedgerIntegrityError("commit record reference is invalid")
+            record_id, record_digest = item["record_id"], item["digest"]
+            _identity(record_id)
+            _digest_bytes(record_digest, "commit record digest")
+            manifest_records.append((record_id, record_digest))
+        if len({record_id for record_id, _ in manifest_records}) != len(manifest_records):
+            raise LedgerIntegrityError("commit repeats a record identity")
+
+        if not isinstance(sequences, list) or len(sequences) != len(manifest_records):
+            raise LedgerIntegrityError("commit record sequences do not match its body")
+        ordered_sequences: list[tuple[str, int]] = []
+        for item in sequences:
+            if not isinstance(item, list) or len(item) != 2 or not isinstance(item[0], str):
+                raise LedgerIntegrityError("commit record sequence is invalid")
+            if type(item[1]) is not int or item[1] <= 0:
+                raise LedgerIntegrityError("commit record sequence is invalid")
+            ordered_sequences.append((item[0], item[1]))
+        if tuple(record_id for record_id, _ in ordered_sequences) != tuple(record_id for record_id, _ in manifest_records):
+            raise LedgerIntegrityError("commit record order does not match its body")
+
+        consume_ids = manifest["consume_input_ids"]
+        consumers = manifest["consumers"]
+        if not isinstance(consume_ids, list) or not all(isinstance(input_id, str) and input_id for input_id in consume_ids):
+            raise LedgerIntegrityError("commit identities are invalid")
+        if len(set(consume_ids)) != len(consume_ids):
+            raise LedgerIntegrityError("commit repeats a consumed input identity")
+        if not isinstance(consumers, list) or not all(isinstance(consumer, str) and consumer for consumer in consumers):
+            raise LedgerIntegrityError("commit identities are invalid")
+        if consumers != sorted(set(consumers)):
+            raise LedgerIntegrityError("commit consumers are not sorted and unique")
+
+        parsed = _CommitPayload(
+            head_seq=head_seq,
+            head_chain_digest=manifest["head_chain_digest"],
+            records=tuple(manifest_records),
+            sequences=tuple(ordered_sequences),
+            consume_input_ids=tuple(consume_ids),
+            consumers=tuple(consumers),
+        )
+        if len(self._commit_parse_cache) >= _COMMIT_PARSE_CACHE_LIMIT:
+            self._commit_parse_cache.clear()
+        self._commit_parse_cache[key] = parsed
+        return parsed
+
     def _verify_commits(
         self,
         session_id: str,
@@ -1156,6 +1300,26 @@ class SQLStore:
         if len(records_by_seq) != len(record_rows) or len(records_by_id) != len(record_rows):
             raise LedgerIntegrityError("duplicate ledger record identity")
 
+        # These append-only tables are read as one bounded inventory per pass.
+        # A commit body is still parsed only after its current SQL digest matches.
+        consumed_inputs = self._rows(
+            "SELECT input_id,consumed_seq FROM sk_inbox "
+            "WHERE tenant_id=%s AND session_id=%s AND consumed_seq IS NOT NULL ORDER BY input_id",
+            (self.tenant_id, session_id),
+        )
+        consumed_by_id: dict[str, Any] = {}
+        for input_id, consumed_seq in consumed_inputs:
+            if input_id in consumed_by_id:
+                raise LedgerIntegrityError("commit consumed input identity is duplicated")
+            consumed_by_id[input_id] = consumed_seq
+        committed_consumers = {
+            row[0]
+            for row in self._rows(
+                "SELECT consumer FROM sk_consumer WHERE tenant_id=%s AND session_id=%s ORDER BY consumer",
+                (self.tenant_id, session_id),
+            )
+        }
+
         commits = self._rows(
             "SELECT commit_id,body,digest,record_sequences,head_seq,created_ms FROM sk_commit "
             "WHERE tenant_id=%s AND session_id=%s AND head_seq<=%s ORDER BY created_ms,commit_id",
@@ -1168,53 +1332,16 @@ class SQLStore:
             _natural(created_ms, "commit created_ms")
             if not isinstance(body, bytes) or sha256(body).hexdigest() != checksum:
                 raise LedgerIntegrityError("commit body digest mismatch")
-            try:
-                manifest = json.loads(body)
-                sequences = json.loads(sequence_body)
-                canonical = canonical_json_bytes(manifest, "commit body")
-                canonical_sequences = canonical_json_bytes(sequences, "commit record_sequences")
-            except (TypeError, ValueError) as exc:
-                raise LedgerIntegrityError("commit metadata is not canonical JCS") from exc
-            if canonical != body or canonical_sequences != sequence_body:
-                raise LedgerIntegrityError("commit metadata is not canonical JCS")
-            expected_fields = {"head_seq", "head_chain_digest", "records", "consume_input_ids", "consumers"}
-            if not isinstance(manifest, dict) or set(manifest) != expected_fields:
-                raise LedgerIntegrityError("commit body has an invalid shape")
-            head_seq = manifest["head_seq"]
-            if type(head_seq) is not int or not 0 <= head_seq <= len(chains):
+            payload = self._commit_payload(body, sequence_body)
+            head_seq = payload.head_seq
+            if head_seq > len(chains):
                 raise LedgerIntegrityError("commit head_seq is invalid")
             expected_head_chain = _initial_chain_digest(self.tenant_id, session_id) if head_seq == 0 else chains[head_seq - 1]
-            if manifest["head_chain_digest"] != expected_head_chain:
+            if payload.head_chain_digest != expected_head_chain:
                 raise LedgerIntegrityError("commit head_chain_digest does not match the original head")
 
-            records = manifest["records"]
-            if not isinstance(records, list):
-                raise LedgerIntegrityError("commit records are invalid")
-            manifest_records: list[tuple[str, str]] = []
-            for item in records:
-                if not isinstance(item, dict) or set(item) != {"record_id", "digest"}:
-                    raise LedgerIntegrityError("commit record reference is invalid")
-                record_id, record_digest = item["record_id"], item["digest"]
-                _identity(record_id)
-                _digest_bytes(record_digest, "commit record digest")
-                manifest_records.append((record_id, record_digest))
-            if len({record_id for record_id, _ in manifest_records}) != len(manifest_records):
-                raise LedgerIntegrityError("commit repeats a record identity")
-
-            if not isinstance(sequences, list) or len(sequences) != len(manifest_records):
-                raise LedgerIntegrityError("commit record sequences do not match its body")
-            ordered_sequences: list[tuple[str, int]] = []
-            for item in sequences:
-                if not isinstance(item, list) or len(item) != 2 or not isinstance(item[0], str):
-                    raise LedgerIntegrityError("commit record sequence is invalid")
-                if type(item[1]) is not int or item[1] <= 0:
-                    raise LedgerIntegrityError("commit record sequence is invalid")
-                ordered_sequences.append((item[0], item[1]))
-            if tuple(record_id for record_id, _ in ordered_sequences) != tuple(record_id for record_id, _ in manifest_records):
-                raise LedgerIntegrityError("commit record order does not match its body")
-
             for position, ((record_id, record_digest), (sequence_id, seq)) in enumerate(
-                zip(manifest_records, ordered_sequences, strict=True)
+                zip(payload.records, payload.sequences, strict=True)
             ):
                 if record_id != sequence_id:
                     raise LedgerIntegrityError("commit record identity does not match its sequence")
@@ -1230,35 +1357,19 @@ class SQLStore:
                 elif (record[3], record[4]) == (commit_id, checksum):
                     raise LedgerIntegrityError("overlapping commit extends the ledger chain")
 
-            resulting_head = max([head_seq, *(seq for _, seq in ordered_sequences)])
+            resulting_head = max([head_seq, *(seq for _, seq in payload.sequences)])
             if stored_head != resulting_head:
                 raise LedgerIntegrityError("commit head_seq column does not match its body")
 
-            consume_ids = manifest["consume_input_ids"]
-            consumers = manifest["consumers"]
-            if not isinstance(consume_ids, list) or not all(isinstance(input_id, str) and input_id for input_id in consume_ids):
-                raise LedgerIntegrityError("commit identities are invalid")
-            if len(set(consume_ids)) != len(consume_ids):
-                raise LedgerIntegrityError("commit repeats a consumed input identity")
-            if not isinstance(consumers, list) or not all(isinstance(consumer, str) and consumer for consumer in consumers):
-                raise LedgerIntegrityError("commit identities are invalid")
-            if consumers != sorted(set(consumers)):
-                raise LedgerIntegrityError("commit consumers are not sorted and unique")
-            for input_id in consume_ids:
-                inbox = self._rows(
-                    "SELECT consumed_seq FROM sk_inbox WHERE tenant_id=%s AND session_id=%s AND input_id=%s",
-                    (self.tenant_id, session_id, input_id),
-                )
-                if len(inbox) != 1 or type(inbox[0][0]) is not int:
+            for input_id in payload.consume_input_ids:
+                consumed_seq = consumed_by_id.get(input_id)
+                if type(consumed_seq) is not int:
                     raise LedgerIntegrityError("commit consumed input is missing or unconsumed")
-                applied = records_by_seq.get(inbox[0][0])
+                applied = records_by_seq.get(consumed_seq)
                 if applied is None or applied[3] != commit_id:
                     raise LedgerIntegrityError("commit consumed input does not match an applied record")
-            for consumer in consumers:
-                if not self._rows(
-                    "SELECT 1 FROM sk_consumer WHERE tenant_id=%s AND session_id=%s AND consumer=%s",
-                    (self.tenant_id, session_id, consumer),
-                ):
+            for consumer in payload.consumers:
+                if consumer not in committed_consumers:
                     raise LedgerIntegrityError("commit creation consumer is missing")
 
         if set(claimed) != set(range(1, len(chains) + 1)):
@@ -1594,6 +1705,21 @@ class SQLStore:
             self._require_worker_accepts_row(row)
         if head == 0:
             raise LedgerIntegrityError("log sequence gap")
+        transaction_state = getattr(self, "_transaction_state", None)
+        if transaction_state is not None and transaction_state.depth:
+            self._read_snapshot_prefix = None
+        snapshot_prefix = getattr(self, "_read_snapshot_prefix", None)
+        if (
+            getattr(self, "_read_snapshot_active", False)
+            and snapshot_prefix is not None
+            and snapshot_prefix.tenant_id == self.tenant_id
+            and snapshot_prefix.session_id == session_id
+            and snapshot_prefix.head_seq == head
+            and snapshot_prefix.epoch == epoch
+            and snapshot_prefix.inbox_seq == row[1]
+        ):
+            self._verify_level_cache(snapshot_prefix.records, snapshot_prefix.stored_inputs, cached_level)
+            return snapshot_prefix
         stored_rows, chains = self._verified_records(session_id, head)
         stored_inputs = self._stored_inputs(session_id, row[1])
         cached = self._cached_prefix(session_id)
@@ -1618,6 +1744,8 @@ class SQLStore:
                     cached.reducer,
                     cached.records,
                     stored_inputs,
+                    row[1],
+                    cached.chains,
                 )
         through = len(cached.records) if cached else 0
         if cached is not None and through == head:
@@ -1629,9 +1757,13 @@ class SQLStore:
                 cached.reducer,
                 cached.records,
                 stored_inputs,
+                row[1],
+                chains,
             )
             self._verify_level_cache(cached.records, cached.stored_inputs, cached_level)
             self._retain_prefix(cached)
+            if getattr(self, "_read_snapshot_active", False):
+                self._read_snapshot_prefix = cached
             return cached
         records, bodies = [], []
         reducer = cached.reducer.fork() if cached else self.fold_factory()
@@ -1659,9 +1791,13 @@ class SQLStore:
             reducer,
             (cached.records if cached else ()) + tuple(records),
             stored_inputs,
+            row[1],
+            chains,
         )
         self._verify_level_cache(prefix.records, prefix.stored_inputs, cached_level)
         self._retain_prefix(prefix)
+        if getattr(self, "_read_snapshot_active", False):
+            self._read_snapshot_prefix = prefix
         return prefix
 
     def read_state(
@@ -1756,12 +1892,13 @@ class SQLStore:
                 head_seq=head,
                 chain_digest=self._chain_anchor(session_id, head),
             )
-        verified, _chains = self._verified_records(session_id, head)
         self._require_input_integrity_gate()
-        self._stored_inputs(session_id, inbox)
         boundary = min(head, through_seq) if through_seq is not None else head
-        rows = [row for row in verified if after_seq < row[1] <= boundary][:limit]
-        return ReadPage(head, inbox, tuple(self._stored(session_id, row) for row in rows))
+        if head == 0:
+            self._stored_inputs(session_id, inbox)
+            return ReadPage(head, inbox, ())
+        prefix = self._prefix(session_id, row, require_worker=False)
+        return ReadPage(head, inbox, prefix.records[after_seq:boundary][:limit])
 
     def verify_ledger(
         self,
@@ -1839,90 +1976,119 @@ class SQLStore:
         )
         return tuple(self._stored(session_id, verified_by_seq[row[1]]) for row in rows)
 
-    def projection_context(self, session_id: str, records: tuple[StoredRecord, ...]) -> tuple[StoredRecord, ...]:
-        """Indexed dependencies for a bounded event page, without folding session history."""
+    def projection_prefix(self, session_id: str) -> _Prefix:
+        """Capture one verified session prefix for caller-owned projection delivery."""
+
         row = self._require_live(session_id)
         self._require_reader_row(row)
-        through = max((stored.seq for stored in records), default=row[0])
-        if through > row[0]:
-            raise SequenceConflict("projection records cannot read beyond the captured head")
-        # A projection page can end in the middle of one commit. Verify every
-        # record in the captured committed prefix before exposing dependencies
-        # through the page boundary.
-        verified, _chains = self._verified_records(session_id, row[0])
         self._require_input_integrity_gate()
-        self._stored_inputs(session_id, row[1])
-        verified_by_seq = {stored_row[1]: stored_row for stored_row in verified}
-        if any(stored.seq not in verified_by_seq for stored in records):
-            raise LedgerIntegrityError("projection input contains a record outside the verified ledger prefix")
-        found = {stored.seq: self._stored(session_id, verified_by_seq[stored.seq]) for stored in records}
-        turns = {r.record.turn_id for r in records if r.record.turn_id}
-        seen = set()
+        return self._prefix(session_id, row, require_worker=False)
 
-        def operation(oid, attempt):
-            if (oid, attempt) in seen:
+    def _validate_projection_prefix(self, prefix: _Prefix, session_id: str, row: tuple[Any, ...]) -> None:
+        if (prefix.tenant_id, prefix.session_id) != (self.tenant_id, session_id):
+            raise LedgerIntegrityError("projection prefix belongs to another session")
+        if prefix.head_seq != len(prefix.records) or prefix.head_seq > row[0]:
+            raise LedgerIntegrityError("projection prefix does not match the captured head")
+        if prefix.head_digest != self._chain_anchor(session_id, prefix.head_seq):
+            raise LedgerIntegrityError("projection prefix chain no longer matches the stored head")
+
+    def read_projection_page(
+        self,
+        prefix: _Prefix,
+        session_id: str,
+        *,
+        after_seq: int = 0,
+        through_seq: int | None = None,
+        limit: int = 256,
+    ) -> ReadPage:
+        """Return one page from a prefix verified once by this delivery."""
+
+        _positive(limit, "limit")
+        _natural(after_seq, "after_seq")
+        if through_seq is not None:
+            _natural(through_seq, "through_seq")
+        row = self._require_live(session_id)
+        self._require_reader_row(row)
+        self._validate_projection_prefix(prefix, session_id, row)
+        boundary = min(prefix.head_seq, through_seq) if through_seq is not None else prefix.head_seq
+        return ReadPage(prefix.head_seq, prefix.inbox_seq, prefix.records[after_seq:boundary][:limit])
+
+    def projection_context(
+        self,
+        session_id: str,
+        records: tuple[StoredRecord, ...],
+        *,
+        prefix: _Prefix | None = None,
+    ) -> tuple[StoredRecord, ...]:
+        """Indexed dependencies for a bounded event page from one verified delivery prefix."""
+
+        row = self._require_live(session_id)
+        self._require_reader_row(row)
+        prefix = self.projection_prefix(session_id) if prefix is None else prefix
+        self._validate_projection_prefix(prefix, session_id, row)
+        through = max((stored.seq for stored in records), default=prefix.head_seq)
+        if through > prefix.head_seq:
+            raise SequenceConflict("projection records cannot read beyond the captured head")
+        for stored in records:
+            retained = prefix.records[stored.seq - 1] if 0 < stored.seq <= prefix.head_seq else None
+            if retained is None or retained.record.encode() != stored.record.encode():
+                raise LedgerIntegrityError("projection input does not match the verified ledger prefix")
+
+        indexes = prefix.projection_indexes()
+        found = {stored.seq: stored for stored in records}
+        seen: set[tuple[str, int]] = set()
+
+        def operation(operation_id: str, attempt: int) -> None:
+            key = (operation_id, attempt)
+            if key in seen:
                 return
-            seen.add((oid, attempt))
-            rows = self._rows(
-                "SELECT body,seq,commit_id,writer_epoch,created_ms,digest FROM sk_record "
-                "WHERE tenant_id=%s AND session_id=%s AND operation_id=%s AND attempt=%s AND seq<=%s "
-                "AND kind IN ('op_planned','op_prepared','op_parked') ORDER BY seq",
-                (self.tenant_id, session_id, oid, attempt, through),
-            )
-            for row in rows:
-                stored = self._stored(session_id, verified_by_seq[row[1]])
+            seen.add(key)
+            for stored in indexes.operations.get(key, ()):
+                if stored.seq > through:
+                    continue
                 found[stored.seq] = stored
                 if stored.record.kind == "op_planned" and stored.record._payload["op_kind"] != "model":
-                    operation(stored.record._payload["dependencies"][0], 1)
+                    dependencies = stored.record._payload["dependencies"]
+                    if dependencies:
+                        operation(dependencies[0], 1)
 
-        for r in records:
-            if r.record.operation_id:
-                operation(r.record.operation_id, r.record.attempt)
-            elif r.record.kind == "input_applied":
-                data = r.record._payload
+        for stored in records:
+            record = stored.record
+            if record.operation_id is not None and record.attempt is not None:
+                operation(record.operation_id, record.attempt)
+            elif record.kind == "input_applied":
+                data = record._payload
                 item = data["input"]
-                oid = data["target_operation_id"] or item["payload"].get("operation_id")
-                if oid:
-                    operation(oid, item["payload"].get("attempt", 1))
-        for tid in turns:
-            rows = self._rows(
-                "SELECT body,seq,commit_id,writer_epoch,created_ms,digest FROM sk_record "
-                "WHERE tenant_id=%s AND session_id=%s AND turn_id=%s AND kind='turn_started' "
-                "AND seq<=%s ORDER BY seq LIMIT 1",
-                (self.tenant_id, session_id, tid, through),
-            )
-            for row in rows:
-                stored = self._stored(session_id, verified_by_seq[row[1]])
-                found[stored.seq] = stored
-        for r in records:
-            if r.record.kind != "turn_ended":
+                operation_id = data["target_operation_id"] or item["payload"].get("operation_id")
+                if operation_id:
+                    operation(operation_id, item["payload"].get("attempt", 1))
+
+        for turn_id in {record.record.turn_id for record in records if record.record.turn_id}:
+            start = indexes.turn_starts.get(turn_id)
+            if start is not None and start.seq <= through:
+                found[start.seq] = start
+
+        for stored in records:
+            record = stored.record
+            if record.kind != "turn_ended":
                 continue
-            # Read only this turn's indexed intent and lifecycle dependencies.
-            rows = self._rows(
-                "SELECT r.body,r.seq,r.commit_id,r.writer_epoch,r.created_ms,r.digest FROM sk_record r "
-                "LEFT JOIN sk_inbox i ON i.tenant_id=r.tenant_id "
-                "AND i.session_id=r.session_id AND i.consumed_seq=r.seq "
-                "WHERE r.tenant_id=%s AND r.session_id=%s AND r.turn_id=%s AND r.seq<=%s AND "
-                "(r.kind='boundary_recorded' OR (r.kind='input_applied' AND i.input_id LIKE 'compaction/%%')) ORDER BY r.seq",
-                (self.tenant_id, session_id, r.record.turn_id, through),
-            )
-            for row in rows:
-                stored = self._stored(session_id, verified_by_seq[row[1]])
-                found[stored.seq] = stored
-            start = next(
-                row.record
-                for row in found.values()
-                if row.record.kind == "turn_started" and row.record.turn_id == r.record.turn_id
-            )
-            for key in start._payload["input_ids"]:
-                if key.startswith("compaction/"):
-                    item = self.read_input(session_id, key)
-                    if item is not None and item.consumed_seq is not None and item.consumed_seq <= through:
-                        row = self.read(
-                            session_id, after_seq=item.consumed_seq - 1, through_seq=item.consumed_seq, limit=1
-                        ).records[0]
-                        found[row.seq] = row
-        return tuple(found[k] for k in sorted(found))
+            dependencies = indexes.turn_dependencies.get(record.turn_id, ())
+            for dependency in dependencies:
+                if dependency.seq <= through:
+                    found[dependency.seq] = dependency
+            start = indexes.turn_starts.get(record.turn_id)
+            if start is None:
+                raise LedgerIntegrityError("turn projection dependency has no verified start")
+            for input_id in start.record._payload["input_ids"]:
+                if not input_id.startswith("compaction/"):
+                    continue
+                item = indexes.inputs_by_id.get(input_id)
+                if item is None or item.consumed_seq is None or item.consumed_seq > through:
+                    continue
+                applied = prefix.records[item.consumed_seq - 1] if item.consumed_seq <= prefix.head_seq else None
+                if applied is not None:
+                    found[applied.seq] = applied
+        return tuple(found[seq] for seq in sorted(found))
 
     def peek_inbox(
         self, session_id: str, *, through_input_seq: int | None = None, limit: int = 256, ready_only: bool = True
@@ -3296,6 +3462,7 @@ class SQLSessionTx:
             s._check_lease(session_id, lease, row, now)  # Validation may outlive the lease.
             commit_digest = sha256(body).hexdigest()
             previous_chain = prefix.head_digest
+            new_chains: list[str] = []
             for position, record, seq in new:
                 if record.kind == "op_started":
                     if record._payload["epoch"] != lease.epoch:
@@ -3318,6 +3485,7 @@ class SQLSessionTx:
                     body=encoded[position],
                 )
                 previous_chain = chain_digest
+                new_chains.append(chain_digest)
             for input_id, (_, seq) in applications.items():
                 s._rows(
                     "UPDATE sk_inbox SET consumed_seq=%s WHERE tenant_id=%s AND session_id=%s AND input_id=%s",
@@ -3335,6 +3503,8 @@ class SQLSessionTx:
                     reducer,
                     prefix.records + added_for_routing,
                     stored_inputs,
+                    row[1],
+                    prefix.chains + tuple(new_chains),
                 )
                 routing = s._derive_routing_cache(routing_prefix, now=now, minimum_level=required)
                 floor = s._level_floor(routing_prefix.records, stored_inputs, minimum_level=required)
@@ -3370,6 +3540,8 @@ class SQLSessionTx:
                     reducer,
                     prefix.records + added,
                     retained_inputs,
+                    row[1],
+                    prefix.chains + tuple(new_chains),
                 )
             )
             s._check_lease(session_id, lease, row, s._now())

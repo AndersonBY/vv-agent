@@ -223,6 +223,17 @@ Store the returned threadId and lineage on the new task; retry with the same
 params after a lost reply. Use thread/model/select if the clone needs a different
 model. Start its first turn with expectedTurnId=null.
 
+The database write level is a producer ceiling. At write level 1,
+thread/start and thread/fork both remain level 1, and a fork keeps the normal
+turn flow but thread/model/select fails explicitly with
+`model_selection_unavailable`. Fork does not promote an L1 session merely
+because the selected host can synchronously resolve a model. At write level 2
+or newer, a fork of a level-2 source copies the source session's immutable
+creation bootstrap and stores it on the derived session. The derived session is
+therefore level 2 and may use thread/model/select before its first turn. This
+copies static capability requirements only; inputs, actors, workspace,
+runtime definition, routing cache, turns and leases remain independent.
+
 Authorize thread/fork against source ownership, creation of the derived
 `fork/` + SHA-256(RFC8785([threadId,forkId])) identity, and the requested workspace.
 The derived ID is not an authorization token. Keep host binding metadata free of

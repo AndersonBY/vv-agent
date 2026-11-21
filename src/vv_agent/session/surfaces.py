@@ -55,6 +55,7 @@ from vv_agent.kernel._sql import (
     SQLStore,
     UnsupportedFeatureLevel,
     UnsupportedWorkerCapabilities,
+    _Prefix,
     _RoutingCache,
     _TenantSQLStore,
 )
@@ -351,6 +352,18 @@ def _tenant_bound_sql_store(store: SessionStore) -> SessionStore:
 
 
 @contextmanager
+def _snapshot_prefix_cache(concrete: SQLStore) -> Iterator[None]:
+    previous_active = getattr(concrete, "_read_snapshot_active", False)
+    concrete._read_snapshot_active = True
+    concrete._read_snapshot_prefix = None
+    try:
+        yield
+    finally:
+        concrete._read_snapshot_active = previous_active
+        concrete._read_snapshot_prefix = None
+
+
+@contextmanager
 def _read_snapshot(store: SessionStore) -> Iterator[None]:
     """Hold one read-only SQL snapshot without blocking a driving writer."""
 
@@ -361,15 +374,16 @@ def _read_snapshot(store: SessionStore) -> Iterator[None]:
             if connection.in_transaction:
                 yield
                 return
-            connection.execute("BEGIN")
-            try:
-                yield
-            except BaseException:
-                with suppress(Exception):
-                    connection.execute("ROLLBACK")
-                raise
-            else:
-                connection.execute("COMMIT")
+            with _snapshot_prefix_cache(concrete):
+                connection.execute("BEGIN")
+                try:
+                    yield
+                except BaseException:
+                    with suppress(Exception):
+                        connection.execute("ROLLBACK")
+                    raise
+                else:
+                    connection.execute("COMMIT")
         return
     if isinstance(concrete, CorePostgresStore):
         from psycopg.pq import TransactionStatus
@@ -381,7 +395,7 @@ def _read_snapshot(store: SessionStore) -> Iterator[None]:
                     _bind_tenant_context(connection, concrete.tenant_context_id)
                 yield
                 return
-            with connection.transaction():
+            with _snapshot_prefix_cache(concrete), connection.transaction():
                 connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
                 _bind_tenant_context(connection, concrete.tenant_context_id)
                 yield
@@ -415,6 +429,21 @@ def _is_runnable_in_snapshot(store: SessionStore, sid: str) -> bool:
     """Evaluate the normal worker predicate on the caller's current SQL snapshot."""
 
     return _drive_flags_in_snapshot(store, sid)[0]
+
+
+@dataclass(slots=True)
+class _ProjectionDelivery:
+    """One verified ledger prefix captured for one caller-owned page read."""
+
+    prefix: _Prefix | None
+
+
+def _projection_delivery(store: SessionStore, sid: str) -> _ProjectionDelivery:
+    """Create page-local projection state for the caller's current read snapshot."""
+
+    concrete = _tenant_bound_sql_store(store)
+    prefix = concrete.projection_prefix(sid) if isinstance(concrete, SQLStore) else None
+    return _ProjectionDelivery(prefix=prefix)
 
 
 def _read_hydrated_state(
@@ -458,16 +487,28 @@ def _capture_record_page(
     *,
     after_seq: int,
     through_seq: int | None = None,
+    delivery: _ProjectionDelivery | None = None,
 ) -> tuple[Any, tuple[Any, ...]]:
     """Capture one bounded record page and its projection context."""
 
-    page = store.read(
-        sid,
-        after_seq=after_seq,
-        through_seq=through_seq,
-        limit=_EVENT_PAGE_SIZE,
-    )
-    context = store.projection_context(sid, page.records) if page.records else ()
+    concrete = _tenant_bound_sql_store(store)
+    if delivery is not None and delivery.prefix is not None and isinstance(concrete, SQLStore):
+        page = concrete.read_projection_page(
+            delivery.prefix,
+            sid,
+            after_seq=after_seq,
+            through_seq=through_seq,
+            limit=_EVENT_PAGE_SIZE,
+        )
+        context = concrete.projection_context(sid, page.records, prefix=delivery.prefix) if page.records else ()
+    else:
+        page = store.read(
+            sid,
+            after_seq=after_seq,
+            through_seq=through_seq,
+            limit=_EVENT_PAGE_SIZE,
+        )
+        context = store.projection_context(sid, page.records) if page.records else ()
     return page, context
 
 
@@ -480,15 +521,16 @@ def _project_captured_record_page(
     through_seq: int | None = None,
     run_id: str | None = None,
 ) -> tuple[int, list[RunEvent], bool]:
-    """Hydrate and project a record page after its SQL snapshot has ended."""
+    """Hydrate and project one page through one disposable content frame."""
 
     if not page.records:
         return page.records[-1].seq if page.records else 0, [], False
     hydration = hydration_for_session_store(store, sid)
+    hydrated_context = hydrate_records(context, hydration)
     page_sequences = {stored.seq for stored in page.records}
     events = [
         event
-        for event in project_records(context, hydration=hydration)
+        for event in project_records(hydrated_context)
         if event.metadata.get("session_seq") in page_sequences and (run_id is None or event.run_id == run_id)
     ]
     boundary = page.head_seq if through_seq is None else min(page.head_seq, through_seq)
@@ -506,7 +548,14 @@ def _project_record_page(
     """Project one bounded record page from one consistent SQL snapshot."""
 
     with _read_snapshot(store):
-        page, context = _capture_record_page(store, sid, after_seq=after_seq, through_seq=through_seq)
+        selected = _projection_delivery(store, sid)
+        page, context = _capture_record_page(
+            store,
+            sid,
+            after_seq=after_seq,
+            through_seq=through_seq,
+            delivery=selected,
+        )
     if not page.records:
         return after_seq, [], False
     return _project_captured_record_page(
@@ -831,7 +880,7 @@ class SessionDriver:
 
         current = self._worker.support
         if level >= 2 and self._owns_store and isinstance(self._root_store, CoreSQLiteStore):
-            write_level = self._root_store._one("SELECT write_level FROM sk_settings WHERE singleton=1")[0]
+            write_level = self._root_store.max_feature_level
             if write_level < level:
                 self._root_store._rows(
                     "UPDATE sk_settings SET write_level=? WHERE singleton=1",
@@ -885,6 +934,7 @@ class SessionDriver:
             config,
             extra_capabilities=self.capabilities,
         )
+        supports = tuple(sorted(set(supports) | set(self._worker.support.capabilities)))
         worker_level = max(
             self._worker.support.level,
             _static_worker_requirement_level(
@@ -968,6 +1018,7 @@ class SessionDriver:
             runtime.config,
             extra_capabilities=self.capabilities,
         )
+        supports = tuple(sorted(set(supports) | set(self._worker.support.capabilities)))
         worker_level = max(
             self._worker.support.level,
             _static_worker_requirement_level(
@@ -1286,7 +1337,9 @@ class SessionDriver:
         runtime: Runtime | _ProjectionRuntime,
     ) -> None:
         with _read_snapshot(store):
-            through_seq = store.read(sid, limit=1).head_seq
+            concrete = _tenant_bound_sql_store(store)
+            prefix = concrete.projection_prefix(sid) if isinstance(concrete, SQLStore) else None
+            through_seq = prefix.head_seq if prefix is not None else store.read(sid, limit=1).head_seq
         cursor = self._observer_cursors.get(sid, 0)
         observer_config = runtime.config
         while cursor < through_seq:
@@ -2137,10 +2190,18 @@ class SessionDriver:
         after_seq: int,
         store: SessionStore | None = None,
     ) -> tuple[str, list[RunEvent], int, bool, bool, BaseException | None]:
+        """Project one page from the exact caller store without retaining iterator state."""
+
         selected_store = store or self.store
         with _read_snapshot(selected_store):
-            state, records, _ = self._read_observed_state(selected_store, sid)
-            captured_head = records[-1].seq if records else selected_store.read(sid, limit=1).head_seq
+            delivery = _projection_delivery(selected_store, sid)
+            if delivery.prefix is None:
+                state, records, _ = self._read_observed_state(selected_store, sid)
+                captured_head = records[-1].seq if records else selected_store.read(sid, limit=1).head_seq
+            else:
+                state = delivery.prefix.reducer.snapshot()
+                records = delivery.prefix.records
+                captured_head = delivery.prefix.head_seq
             tid, quiescent, error = self._snapshot_status(
                 selected_store,
                 sid,
@@ -2148,7 +2209,12 @@ class SessionDriver:
                 requested_turn_id,
                 captured_head=captured_head,
             )
-            page, context = _capture_record_page(selected_store, sid, after_seq=after_seq)
+            page, context = _capture_record_page(
+                selected_store,
+                sid,
+                after_seq=after_seq,
+                delivery=delivery,
+            )
         if page.records:
             next_seq, events, has_more = _project_captured_record_page(
                 selected_store,
@@ -2684,10 +2750,6 @@ class SessionDriver:
         )
         if item.kind == "model_selection":
             requirements = self._route_model_selection(sid, item, session_requirements, registration)
-            self._ensure_static_worker_support(
-                level=requirements.level,
-                capabilities=requirements.capabilities,
-            )
         else:
             requirements = session_requirements
         return replace(item, feature_level=2, requirements=requirements)

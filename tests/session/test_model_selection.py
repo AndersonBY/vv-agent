@@ -1280,6 +1280,53 @@ def test_bound_level_one_route_admits_model_selection_as_level_two(store, databa
 
 
 @pytest.mark.capability("model-selection")
+def test_model_selection_ingress_does_not_widen_worker_support(store, database):
+    rt, _ = routed(
+        database,
+        [LLMResponse("unused")],
+        [LLMResponse("selected")],
+        store=store,
+        worker_selections=(),
+    )
+    rt.config = replace(
+        rt.config,
+        model_provider=ScriptedModelProvider.new("scripted", "scripted", []),
+    )
+    default_requirements = rt.requirements_bound()
+    selection_requirements = _model_selection_requirements(rt, SELECTION)
+    assert selection_requirements.capabilities != default_requirements.capabilities
+    create_level_two(store, default_requirements)
+    driver = SessionDriver(
+        store=store,
+        model_resolver=rt.model_resolver,
+        content_key_provider=fixture_key_provider(),
+        worker_level=2,
+        handler_versions=(rt.handler_version,),
+        capabilities=default_requirements.capabilities,
+    )
+    try:
+        driver._register_runtime("s", rt, armed=True)
+        initial_support = driver._worker.support
+        driver.push("s", InboxItem("select", "model_selection", {"selection": SELECTION}))
+
+        stored = store.read_input("s", "select")
+        assert stored is not None
+        assert stored.item.requirements == selection_requirements.to_dict()
+        assert driver._worker.support == initial_support
+        assert (
+            store.claim_runnable(
+                owner="model-a-worker",
+                ttl_ms=10_000,
+                limit=1,
+                work_kinds=("drive",),
+            )
+            == ()
+        )
+    finally:
+        driver.close()
+
+
+@pytest.mark.capability("model-selection")
 def test_session_driver_user_uses_current_registration_after_queued_old_handler(store, database):
     rt, _ = routed(database, [LLMResponse("unused")], store=store, handler_version="handler/h3")
     rt.config = replace(rt.config, model_provider=ScriptedModelProvider.new("scripted", "scripted", []))

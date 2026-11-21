@@ -360,6 +360,7 @@ class SQLiteStore(SQLStore):
     def _transaction(self) -> Iterator[None]:
         with self._connection_lock:
             state = self._transaction_state
+            self._read_snapshot_prefix = None
             outer = state.depth == 0 and not self.connection.in_transaction
             savepoint = f"session_{state.depth}"
             if outer:

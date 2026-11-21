@@ -33,10 +33,9 @@ from vv_agent.app_server.thread_store import ThreadRecord, ThreadStore
 from vv_agent.app_server.transport import ChannelTransport
 from vv_agent.kernel._requirements import SessionRequirements
 from vv_agent.kernel._sql import UnsupportedFeatureLevel
-from vv_agent.model import ModelError
 from vv_agent.session.app_server import SubmissionConflict, TurnMismatch, _KernelRunAdapter, _KernelThreadStore
 from vv_agent.session.interactions import InteractionError
-from vv_agent.session.runtime import static_model_selection_requirements, static_session_requirements
+from vv_agent.session.runtime import static_session_requirements
 from vv_agent.session.store import Conflict
 from vv_agent.session.surfaces import _principal_payload
 
@@ -560,34 +559,17 @@ class MessageProcessor:
         self._router.send_response(connection_id, request.id, self._host.list_models(model_request).to_dict())
 
     def _static_session_bootstrap(self, agent, config, *, agent_key: str, resolved) -> SessionRequirements:
-        """Build the host-owned L2 floor and exact advertised selection capabilities."""
+        """Build the host-owned L2 floor for the initially frozen runtime."""
 
+        del agent_key
         handler_version = self._run_adapter.kernel.default_handler_version
-        base = static_session_requirements(
+        return static_session_requirements(
             agent,
             config,
             resolved,
             level=2,
             handler_version=handler_version,
             extra_capabilities=self._run_adapter.kernel.capabilities,
-        )
-        capabilities = set(base.capabilities)
-        for model in self._host.list_models(ModelListRequest(agent_key=agent_key)).models:
-            try:
-                requirements = static_model_selection_requirements(
-                    {"model": model.id, "route": {}},
-                    resolve_model=self._host.resolve_model,
-                    handler_version=handler_version,
-                )
-            except (ModelError, ValueError):
-                # Unresolvable advertised entries remain selectable commands so
-                # the holder can record the stable rejection in the ledger.
-                continue
-            capabilities.update(requirements.capabilities)
-        return SessionRequirements.normalized(
-            level=max(2, base.level),
-            handler_version=handler_version,
-            capabilities=capabilities,
         )
 
     def _handle_thread_start(
@@ -634,6 +616,8 @@ class MessageProcessor:
                         agent_key=agent_key,
                         resolved=runtime.resolved,
                     )
+                    if not self._store.prepare_static_session(bootstrap):
+                        bootstrap = None
                     task = runtime.compile("", input_id + "/context", control=True)
                     context = runtime._definition(task)
             payload = self._store.create_thread_receipt(
@@ -673,6 +657,13 @@ class MessageProcessor:
             return
         except SubmissionConflict:
             raise
+        except UnsupportedFeatureLevel as exc:
+            self._router.send_error(
+                connection_id,
+                request.id,
+                AppServerError.invalid_params(str(exc), {"reason": "model_selection_unavailable"}),
+            )
+            return
         except ValueError as exc:
             self._router.send_error(connection_id, request.id, AppServerError.invalid_params(str(exc)))
             return

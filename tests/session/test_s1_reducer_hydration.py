@@ -262,9 +262,9 @@ def test_logical_scope_exit_does_not_rehydrate_discarded_commit_state(tmp_path: 
         with driver._logical_state_scope():
             assert calls == 1
             driver.commit([boundary])
-            assert calls == 1
+            assert calls == 2
 
-        assert calls == 1
+        assert calls == 2
         assert driver.state is driver.fold.state
         assert sessions.store.release(lease)
 

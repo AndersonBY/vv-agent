@@ -102,11 +102,35 @@ an upgrade means for stored sessions.
 
 Host-bound runs use `SessionDriver(..., runtime_factory=...)`. Its callable has
 the signature `runtime_factory(store, agent, config, task, session_id)` and must
-return a `Runtime`. `SessionDriver` calls it after a worker claim, passing the
-exact tenant-bound drive store. The factory must rebuild everything the drive
-uses: the exact model and client, tools and providers, workspace, child
-factories, host bindings, callbacks and handler version. A callback that keeps a
-different store or raw connection is not bound to this drive.
+return a fresh `Runtime` for each call. `SessionDriver` can call it while
+preparing a worker claim and always passes the exact tenant-bound drive store.
+
+For a configured child claim, the agent, configuration, task and `session_id`
+passed by the factory identify the registered root even when the physical claim
+is the child. That call rebuilds the root template against the child claim's
+store. `SessionDriver` then reconstructs the child from its durable
+`child_admission`; it does not build the child from root agent/config/task
+values. The child retains the admitted agent, prompt, policy, budget and
+workspace, while inheriting the root runtime's tools and providers, child
+factories, host bindings and lifecycle controls. The store, content reader,
+heartbeat binding and final stream/hook are rebound to the child drive. Host
+callbacks must take the active session from their operation context instead of
+capturing the factory's root `session_id` as a child identity.
+
+A custom `Runtime.children` child has no durable `child_admission`. Its
+workspace is recorded on the child session, while its agent and configuration
+come from the inherited root runtime. After rebuilding the root template,
+`SessionDriver` calls the factory again with the child `session_id`, the child
+workspace, and the inherited root agent/configuration to construct that derived
+runtime. This second call must preserve the root host bindings and must bind its
+callbacks, content reader and heartbeat store to the child claim.
+
+The factory must rebuild the exact model and client, tools and providers,
+workspace, child factories, host bindings, callbacks and handler version needed
+by the root template. A callback that keeps a different store or raw connection
+is not bound to this drive. A reconstructed child must never be exposed to the
+factory as a root definition, and its child store must not be paired with the
+root `session_id` as if that were the configured child runtime.
 
 A resumed turn runs on the definition it retained when it started. The factory
 must reproduce the retained logical model, tools, handler behavior and host
@@ -773,6 +797,11 @@ payload, when a selection takes effect, the resolver contract and rejection.
 `PostgresStore` and `SQLiteStore` implement the `SessionStore` protocol in
 `vv_agent/session/store.py`. A custom store must also implement these
 scheduling methods with the same semantics.
+
+`max_feature_level` reports the highest session feature level the store can
+durably write. It must be a positive integer and must not change the store's
+write ceiling. App Server uses it before creating an L2 bootstrap and rejects
+model selection when the store cannot persist level 2.
 
 `next_drive_delay_ms(session_id, *, lease=None) -> int | None` returns `None`
 when nothing is scheduled, `0` when the session is due, or the remaining

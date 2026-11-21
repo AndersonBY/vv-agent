@@ -2,10 +2,12 @@
 
 from dataclasses import replace
 from hashlib import sha256
+from time import monotonic, sleep
 
 from vv_agent import Agent, RunConfig, ScriptedModelProvider, ThreadForkParams
 from vv_agent.app_server import AppServer, AppServerClient, ChannelTransport, DefaultAppServerHost
 from vv_agent.kernel._content import Principal
+from vv_agent.kernel._requirements import SessionRequirements
 from vv_agent.memory import MemoryManager
 from vv_agent.model import ModelRef
 from vv_agent.session.content_runtime import SESSION_PRINCIPAL_ATTRIBUTES, SessionContentWriter
@@ -20,6 +22,8 @@ from vv_agent.session.projection import (
     hydration_for_session_store,
 )
 from vv_agent.session.reducer import _fold_factory_for
+from vv_agent.session.runtime import static_model_selection_requirements
+from vv_agent.session.surfaces import _verified_routing_cache
 from vv_agent.types import LLMResponse, Message, ToolArtifactRef, ToolCall
 from vv_agent.workspace.local import LocalWorkspaceBackend
 
@@ -27,10 +31,15 @@ from .helpers import create_fixture_session, wrap_fixture_store
 from .test_compaction import SUMMARY, tool_history
 
 
-def send(server, identity, method, params):
+def request(server, identity, method, params):
     server.processor.process_message("test", {"jsonrpc": "2.0", "id": identity, "method": method, "params": params})
     while (wire := server.transport.receive_outbound(timeout=5)).get("id") != identity:
         pass
+    return wire
+
+
+def send(server, identity, method, params):
+    wire = request(server, identity, method, params)
     assert "result" in wire, wire
     return wire["result"]
 
@@ -54,7 +63,41 @@ def run_turn(server, sid, identity, expected=None):
         {"threadId": sid, "inputId": identity, "expectedTurnId": expected, "input": [{"type": "text", "text": identity}]},
     )
     server.run_adapter.join()
-    return result["turnId"]
+    turn_id = result["turnId"]
+    deadline = monotonic() + 5
+    while monotonic() < deadline:
+        server.kernel._worker.wake(sid)
+        server.run_adapter.join()
+        state, records, _ = server.kernel.store.read_state(sid)
+        if state.active_turn_id is None and any(
+            row.record.kind == "turn_ended" and row.record.turn_id == turn_id for row in records
+        ):
+            return turn_id
+        sleep(0.01)
+    state, records, _ = server.kernel.store.read_state(sid)
+    detail = [
+        (
+            row.record.kind,
+            row.record.operation_id,
+            row.record._payload.get("status"),
+            row.record._payload.get("error"),
+            row.record._payload.get("reason"),
+            row.record._payload.get("result"),
+        )
+        for row in records
+        if row.record.kind in {"input_applied", "turn_started", "op_completed", "turn_ended"}
+    ]
+    raise AssertionError(
+        f"Turn did not finish: {turn_id}; active={state.active_turn_id}; "
+        f"phase={state.phase}; next_drive_delay={server.kernel.store.next_drive_delay_ms(sid)}; "
+        f"lease={server.kernel.store.lease_status(sid)}; "
+        f"worker_error={server.kernel._worker.last_error!r}; "
+        f"records={detail}"
+    )
+
+
+def set_write_level(store, level):
+    store._rows("UPDATE sk_settings SET write_level=%s WHERE singleton=1", (level,))
 
 
 def test_selected_model_settings_limits_and_clear_are_frozen_default(store, tmp_path, monkeypatch):
@@ -69,9 +112,12 @@ def test_selected_model_settings_limits_and_clear_are_frozen_default(store, tmp_
     monkeypatch.setattr(
         host, "resolve_model", lambda req: (selected.llm, selected_config) if req["model"] == "small" else original(req)
     )
+    set_write_level(store, 2)
     a = server_for(store, host, tmp_path / "selected-model-keys.sqlite3")
     try:
         send(a, "create", "thread/start", {"inputId": "source"})
+        source_creation = store.read_state("source")[1][0].record
+        assert source_creation.feature_level == 2
         send(
             a,
             "select",
@@ -84,9 +130,34 @@ def test_selected_model_settings_limits_and_clear_are_frozen_default(store, tmp_
         )
         first = run_turn(a, "source", "first")
         original_records = store.read_state("source")[1]
+        source_routing, _ = _verified_routing_cache(store, "source")
+        selected_requirements = static_model_selection_requirements(
+            {"model": "small", "route": {"opaque": "route"}},
+            resolve_model=host.resolve_model,
+            handler_version=source_routing.requirements.handler_version,
+        )
+        initial_requirements = static_model_selection_requirements(
+            {"model": "base", "route": {}},
+            resolve_model=host.resolve_model,
+            handler_version=source_routing.requirements.handler_version,
+        )
+        expected_bootstrap = SessionRequirements.normalized(
+            level=2,
+            handler_version=source_routing.requirements.handler_version,
+            capabilities={
+                capability for capability in source_routing.requirements.capabilities if not capability.startswith("model:")
+            }
+            | set(selected_requirements.capabilities),
+        )
         client = AppServerClient(server=a, transport=a.transport)
         fork = client.fork_thread(ThreadForkParams("source", "copy", through_turn_id=first, workspace={"root": "prepared"}))
         sid = fork["threadId"]
+        fork_creation = store.read_state(sid)[1][0].record
+        assert fork_creation.feature_level == 2
+        fork_bootstrap = SessionRequirements.from_dict(fork_creation._payload["bootstrap"])
+        assert fork_bootstrap == expected_bootstrap
+        assert set(selected_requirements.capabilities) <= set(fork_bootstrap.capabilities)
+        assert set(initial_requirements.capabilities).isdisjoint(fork_bootstrap.capabilities)
         assert context_view(store, sid)["limits"] == context_view(store, "source")["limits"]
         assert context_view(store, sid)["limits"]["outputReserve"] == 1000
         t1 = run_turn(a, sid, "new")
@@ -115,6 +186,104 @@ def test_selected_model_settings_limits_and_clear_are_frozen_default(store, tmp_
         assert store.read_state("source")[1] == original_records
     finally:
         a.kernel.close()
+
+
+def test_level_two_fork_can_select_model_before_first_turn(store, tmp_path, monkeypatch):
+    calls = []
+    base = ScriptedModelProvider.from_callback("test", "base", lambda r: calls.append(r) or LLMResponse("base"))
+    selected = ScriptedModelProvider.from_callback(
+        "test", "small", lambda r: calls.append(r) or LLMResponse("small")
+    ).with_token_limits(64000, 8000)
+    selected_config = selected.resolve(ModelRef.named("small"))
+    host = DefaultAppServerHost(agent=Agent("test", "Be precise."), run_config=RunConfig(model_provider=base))
+    original = host.resolve_model
+    monkeypatch.setattr(
+        host, "resolve_model", lambda req: (selected.llm, selected_config) if req["model"] == "small" else original(req)
+    )
+    set_write_level(store, 2)
+    server = server_for(store, host, tmp_path / "fork-before-turn-keys.sqlite3")
+    try:
+        send(server, "create", "thread/start", {"inputId": "source"})
+        source_creation = store.read_state("source")[1][0].record
+        fork = send(server, "fork", "thread/fork", {"threadId": "source", "forkId": "copy"})
+        sid = fork["threadId"]
+        fork_creation = store.read_state(sid)[1][0].record
+        assert source_creation.feature_level == 2
+        assert fork_creation.feature_level == 2
+        assert fork_creation._payload["bootstrap"] == source_creation._payload["bootstrap"]
+
+        send(
+            server,
+            "select",
+            "thread/model/select",
+            {"threadId": sid, "inputId": "select", "selection": {"model": "small", "route": {}}},
+        )
+        run_turn(server, sid, "fork-turn")
+
+        assert calls[-1].model == "small"
+        assert not store.read_state("source")[0].turns
+        assert not store.read_state(sid)[0].active_turn_id
+    finally:
+        server.kernel.close()
+
+
+def test_level_one_fork_stays_level_one_and_keeps_turn_flow(store, tmp_path):
+    calls = []
+    provider = ScriptedModelProvider.from_callback("test", "m", lambda r: calls.append(r) or LLMResponse("done"))
+    host = DefaultAppServerHost(agent=Agent("test", "Answer."), run_config=RunConfig(model_provider=provider))
+    set_write_level(store, 1)
+    server = server_for(store, host, tmp_path / "fork-level-one-keys.sqlite3")
+    try:
+        send(server, "create", "thread/start", {"inputId": "source"})
+        fork = send(server, "fork", "thread/fork", {"threadId": "source", "forkId": "copy"})
+        sid = fork["threadId"]
+        source_creation = store.read_state("source")[1][0].record
+        fork_creation = store.read_state(sid)[1][0].record
+        assert source_creation.feature_level == 1
+        assert fork_creation.feature_level == 1
+        assert "bootstrap" not in source_creation._payload
+        assert "bootstrap" not in fork_creation._payload
+        assert store._one("SELECT write_level FROM sk_settings WHERE singleton=1")[0] == 1
+
+        rejected = request(
+            server,
+            "select",
+            "thread/model/select",
+            {"threadId": sid, "inputId": "select", "selection": {"model": "m", "route": {}}},
+        )
+
+        assert rejected["error"]["code"] == -32602
+        assert rejected["error"]["data"]["reason"] == "model_selection_unavailable"
+        assert not store.peek_inbox(sid)
+        run_turn(server, sid, "fork-turn")
+        assert calls[-1].model == "m"
+        assert not store.read_state("source")[0].turns
+        assert not store.read_state(sid)[0].active_turn_id
+    finally:
+        server.kernel.close()
+
+
+def test_level_two_fork_rejects_level_one_target_with_typed_reason(store, tmp_path):
+    provider = ScriptedModelProvider.new("test", "m", [])
+    host = DefaultAppServerHost(agent=Agent("test", "Answer."), run_config=RunConfig(model_provider=provider))
+    set_write_level(store, 2)
+    server = server_for(store, host, tmp_path / "fork-ceiling-keys.sqlite3")
+    try:
+        send(server, "create", "thread/start", {"inputId": "source"})
+        assert store.read_state("source")[1][0].record.feature_level == 2
+        set_write_level(store, 1)
+
+        rejected = request(
+            server,
+            "fork",
+            "thread/fork",
+            {"threadId": "source", "forkId": "copy"},
+        )
+
+        assert rejected["error"]["code"] == -32602
+        assert rejected["error"]["data"] == {"reason": "model_selection_unavailable"}
+    finally:
+        server.kernel.close()
 
 
 def test_direct_fork_copies_persisted_principal_attributes_once(store, tmp_path):
