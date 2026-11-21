@@ -479,26 +479,26 @@ def test_runner_start_returns_and_first_cursor_event_arrives_before_soft_budget(
 def test_events_use_bounded_after_seq_pages(monkeypatch) -> None:
     read_pages: list[tuple[int, int, int]] = []
     projection_pages: list[int] = []
-    original_read = CoreSQLiteStore.read
+    original_read_projection_page = CoreSQLiteStore.read_projection_page
     original_projection_context = CoreSQLiteStore.projection_context
 
-    def read(store, session_id, *, after_seq=0, through_seq=None, limit=1024, expected_head=None):
+    def read_projection_page(store, prefix, session_id, *, after_seq=0, through_seq=None, limit=256):
         if after_seq > 0:
             read_pages.append((after_seq, limit, through_seq or 0))
-        return original_read(
+        return original_read_projection_page(
             store,
+            prefix,
             session_id,
             after_seq=after_seq,
             through_seq=through_seq,
             limit=limit,
-            expected_head=expected_head,
         )
 
-    def projection_context(store, session_id, records):
+    def projection_context(store, session_id, records, *, prefix=None):
         projection_pages.append(len(records))
-        return original_projection_context(store, session_id, records)
+        return original_projection_context(store, session_id, records, prefix=prefix)
 
-    monkeypatch.setattr(CoreSQLiteStore, "read", read)
+    monkeypatch.setattr(CoreSQLiteStore, "read_projection_page", read_projection_page)
     monkeypatch.setattr(CoreSQLiteStore, "projection_context", projection_context)
 
     provider = ScriptedModelProvider.new("scripted", "m", [LLMResponse("done")])
