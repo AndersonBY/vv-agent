@@ -204,6 +204,10 @@
       "key_base64": "SExB125W/ehgTDRrGC+Ek0zeHIojvKM/WhN50a4u544="
     },
     {
+      "key_id": "key/a7df602fc9010676",
+      "key_base64": "vAGWs8R0rW3QLP1GtDuicP9jzhbM4xGe4FV0faKtCfs="
+    },
+    {
       "key_id": "key/b01f79c53cda6fc4",
       "key_base64": "jQHkmxnL3AIrv8gT9D4Rr3XzCtwbjZvTBNtVdL4+BPg="
     },
@@ -8137,6 +8141,12 @@
         "role": "user"
       }
     },
+    "content/5f889240e7dea3b9a38817e1": {
+      "session_id": "inbox/provider-evidence-1",
+      "key_id": "key/a7df602fc9010676",
+      "boundary": "principal_attributes",
+      "value": {}
+    },
     "content/5f89f3be1c7657845a8c489b": {
       "session_id": "inbox/evidence",
       "key_id": "key/15d5d6282e82d7bc",
@@ -10025,6 +10035,52 @@
         "max_uncached_input_tokens": null,
         "max_wall_time_ms": null,
         "unavailable_metric_policy": "continue_and_mark"
+      }
+    },
+    "content/732f5692bfc42a604b7eef07": {
+      "session_id": "inbox/provider-evidence-1",
+      "key_id": "key/a7df602fc9010676",
+      "boundary": "provider_lookup",
+      "value": {
+        "schema_version": "vv-agent.provider-lookup.v1",
+        "status": "running",
+        "binding": {
+          "tenant_id": "tenant-a",
+          "session_id": "sess-1",
+          "operation_id": "op-bg-1",
+          "attempt": 1,
+          "request_digest": "5555555555555555555555555555555555555555555555555555555555555555",
+          "idempotency_key": "sess-1/op-bg-1",
+          "execution_id": "1a80b8b1f02b7de88c875ad1c6d49ffe13e11a919fbcb7d04faa93ba9b4b511f",
+          "command_digest": "deeca65af1fe1caceba1cf85d1a4bb731112db4394d43b4d22db08afa08f967c",
+          "environment_id": "env-remote-1",
+          "generation": 7,
+          "provider_id": "provider-remote-1"
+        },
+        "outcome": {
+          "kind": "Accepted",
+          "yield_on_steer": false,
+          "handle": {
+            "kind": "provider",
+            "provider": "provider-remote-1",
+            "job_id": "job-remote-1",
+            "operation_id": "op-bg-1",
+            "attempt": 1,
+            "request_digest": "5555555555555555555555555555555555555555555555555555555555555555",
+            "execution_id": "1a80b8b1f02b7de88c875ad1c6d49ffe13e11a919fbcb7d04faa93ba9b4b511f",
+            "command_digest": "deeca65af1fe1caceba1cf85d1a4bb731112db4394d43b4d22db08afa08f967c",
+            "environment_id": "env-remote-1",
+            "generation": 7,
+            "evidence": [
+              "provider-registry:running"
+            ],
+            "query_ref": null,
+            "cancel_ref": null
+          }
+        },
+        "evidence": [
+          "provider-registry:running"
+        ]
       }
     },
     "content/7387465aa7eb53f03385a048": {

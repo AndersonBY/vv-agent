@@ -252,6 +252,78 @@
           }
         }
       ]
+    },
+    {
+      "allOf": [
+        {
+          "$ref": "#/$defs/RecordEnvelopeLevel2"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "session_created"
+            },
+            "payload": {
+              "$ref": "#/$defs/SessionCreatedPayloadLevel2"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "allOf": [
+        {
+          "$ref": "#/$defs/RecordEnvelopeLevel3"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "turn_started"
+            },
+            "payload": {
+              "$ref": "#/$defs/TurnStartedPayloadLevel3"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "allOf": [
+        {
+          "$ref": "#/$defs/RecordEnvelopeLevel3"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "op_planned"
+            },
+            "payload": {
+              "$ref": "#/$defs/OpPlannedPayloadLevel3"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "allOf": [
+        {
+          "$ref": "#/$defs/RecordEnvelopeLevel3"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "op_prepared"
+            },
+            "payload": {
+              "$ref": "#/$defs/OpPreparedPayloadLevel3"
+            }
+          }
+        }
+      ]
     }
   ],
   "$defs": {
@@ -783,7 +855,7 @@
         "budget"
       ]
     },
-    "Requirements": {
+    "SessionRequirements": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
@@ -893,6 +965,752 @@
         {
           "type": "null"
         }
+      ]
+    },
+    "ExecutionEnvironmentBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "descriptor": {
+          "$ref": "#/$defs/ContentRef"
+        },
+        "environment_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "isolation": {
+          "type": "string",
+          "enum": [
+            "none",
+            "container",
+            "microvm"
+          ]
+        },
+        "network": {
+          "type": "string",
+          "enum": [
+            "open",
+            "allowlist",
+            "none"
+          ]
+        },
+        "enforces_network_policy": {
+          "type": "boolean"
+        },
+        "enforces_resource_limits": {
+          "type": "boolean"
+        },
+        "persistent": {
+          "type": "boolean"
+        },
+        "environment_capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        },
+        "capabilities_digest": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$",
+              "maxLength": 64
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "network_policy_ref_digest": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$",
+              "maxLength": 64
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "isolation_policy_ref_digest": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$",
+              "maxLength": 64
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "operational_policy": {
+          "$ref": "#/$defs/ContentRef"
+        }
+      },
+      "required": [
+        "descriptor",
+        "environment_id",
+        "generation",
+        "isolation",
+        "network",
+        "enforces_network_policy",
+        "enforces_resource_limits",
+        "persistent",
+        "environment_capabilities",
+        "capabilities_digest",
+        "network_policy_ref_digest",
+        "isolation_policy_ref_digest",
+        "operational_policy"
+      ]
+    },
+    "ExecutionIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "operation_key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tenant_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "environment_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "operation_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "execution_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "maxLength": 64
+        }
+      },
+      "required": [
+        "operation_key",
+        "tenant_id",
+        "environment_id",
+        "session_id",
+        "operation_id",
+        "execution_id"
+      ]
+    },
+    "ProviderExecutionHandle": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "provider",
+          "type": "string"
+        },
+        "provider": {
+          "type": "string",
+          "minLength": 1
+        },
+        "job_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "operation_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "request_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "maxLength": 64
+        },
+        "execution_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "maxLength": 64
+        },
+        "command_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "maxLength": 64
+        },
+        "environment_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "query_ref": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cancel_ref": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "provider",
+        "job_id",
+        "operation_id",
+        "attempt",
+        "request_digest",
+        "execution_id",
+        "command_digest",
+        "environment_id",
+        "generation",
+        "evidence",
+        "query_ref",
+        "cancel_ref"
+      ]
+    },
+    "ProviderLookupBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "tenant_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "operation_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "request_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "maxLength": 64
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "execution_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "maxLength": 64
+        },
+        "command_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "maxLength": 64
+        },
+        "environment_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "provider_id": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "tenant_id",
+        "session_id",
+        "operation_id",
+        "attempt",
+        "request_digest",
+        "idempotency_key",
+        "execution_id",
+        "command_digest",
+        "environment_id",
+        "generation",
+        "provider_id"
+      ]
+    },
+    "ProviderLookupAcceptedOutcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "Accepted",
+          "type": "string"
+        },
+        "handle": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "provider",
+              "type": "string"
+            },
+            "provider": {
+              "type": "string",
+              "minLength": 1
+            },
+            "job_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "operation_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "attempt": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "request_digest": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$",
+              "maxLength": 64
+            },
+            "execution_id": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$",
+              "maxLength": 64
+            },
+            "command_digest": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$",
+              "maxLength": 64
+            },
+            "environment_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "generation": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "evidence": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "query_ref": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "cancel_ref": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "provider",
+            "job_id",
+            "operation_id",
+            "attempt",
+            "request_digest",
+            "execution_id",
+            "command_digest",
+            "environment_id",
+            "generation",
+            "evidence",
+            "query_ref",
+            "cancel_ref"
+          ]
+        },
+        "yield_on_steer": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "kind",
+        "handle",
+        "yield_on_steer"
+      ]
+    },
+    "ProviderLookupDefinitiveOutcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "Definitive",
+          "type": "string"
+        },
+        "result": {
+          "type": "object"
+        },
+        "usage": {
+          "type": "object"
+        },
+        "shared_state": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "required": [
+        "kind",
+        "result",
+        "usage",
+        "shared_state",
+        "evidence"
+      ]
+    },
+    "ProviderLookupUnknownOutcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "Unknown",
+          "type": "string"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "kind",
+        "reason"
+      ]
+    },
+    "ProviderLookupResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "vv-agent.provider-lookup.v1",
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "not_started",
+            "running",
+            "exited",
+            "unknown"
+          ]
+        },
+        "binding": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "tenant_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "session_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "operation_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "attempt": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "request_digest": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$",
+              "maxLength": 64
+            },
+            "idempotency_key": {
+              "type": "string",
+              "minLength": 1
+            },
+            "execution_id": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$",
+              "maxLength": 64
+            },
+            "command_digest": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$",
+              "maxLength": 64
+            },
+            "environment_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "generation": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "provider_id": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "tenant_id",
+            "session_id",
+            "operation_id",
+            "attempt",
+            "request_digest",
+            "idempotency_key",
+            "execution_id",
+            "command_digest",
+            "environment_id",
+            "generation",
+            "provider_id"
+          ]
+        },
+        "outcome": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "Accepted",
+                  "type": "string"
+                },
+                "handle": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "kind": {
+                      "const": "provider",
+                      "type": "string"
+                    },
+                    "provider": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "job_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "operation_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "attempt": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "request_digest": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$",
+                      "maxLength": 64
+                    },
+                    "execution_id": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$",
+                      "maxLength": 64
+                    },
+                    "command_digest": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$",
+                      "maxLength": 64
+                    },
+                    "environment_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "generation": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "evidence": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "query_ref": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "cancel_ref": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "provider",
+                    "job_id",
+                    "operation_id",
+                    "attempt",
+                    "request_digest",
+                    "execution_id",
+                    "command_digest",
+                    "environment_id",
+                    "generation",
+                    "evidence",
+                    "query_ref",
+                    "cancel_ref"
+                  ]
+                },
+                "yield_on_steer": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "kind",
+                "handle",
+                "yield_on_steer"
+              ]
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "Definitive",
+                  "type": "string"
+                },
+                "result": {
+                  "type": "object"
+                },
+                "usage": {
+                  "type": "object"
+                },
+                "shared_state": {
+                  "anyOf": [
+                    {
+                      "type": "object"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "evidence": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              },
+              "required": [
+                "kind",
+                "result",
+                "usage",
+                "shared_state",
+                "evidence"
+              ]
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "Unknown",
+                  "type": "string"
+                },
+                "reason": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "required": [
+                "kind",
+                "reason"
+              ]
+            }
+          ]
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "required": [
+        "schema_version",
+        "status",
+        "binding",
+        "outcome",
+        "evidence"
       ]
     },
     "ResultId": {
@@ -1469,6 +2287,34 @@
         "handle"
       ]
     },
+    "ProviderEvidencePayloadLevel3": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "operation_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "request_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "maxLength": 64
+        },
+        "provider_lookup": {
+          "$ref": "#/$defs/ContentRef"
+        }
+      },
+      "required": [
+        "operation_id",
+        "attempt",
+        "request_digest",
+        "provider_lookup"
+      ]
+    },
     "BeforeMemoryData": {
       "type": "object",
       "additionalProperties": false,
@@ -1521,7 +2367,12 @@
               "properties": {
                 "code": {
                   "type": "string",
-                  "minLength": 1
+                  "enum": [
+                    "host.policy_stop",
+                    "host_stop",
+                    "hook_stop",
+                    "stopped"
+                  ]
                 },
                 "message": {
                   "$ref": "#/$defs/ContentRef"
@@ -1758,6 +2609,54 @@
         "attributes"
       ]
     },
+    "SessionCreatedPayloadLevel2": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "principal": {
+          "$ref": "#/$defs/Principal"
+        },
+        "workspace": {
+          "$ref": "#/$defs/ContentRef"
+        },
+        "parent_session_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "parent_operation_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "attributes": {
+          "$ref": "#/$defs/ContentRef"
+        },
+        "bootstrap": {
+          "$ref": "#/$defs/SessionRequirements"
+        }
+      },
+      "required": [
+        "principal",
+        "workspace",
+        "parent_session_id",
+        "parent_operation_id",
+        "attributes",
+        "bootstrap"
+      ]
+    },
     "TurnStartedPayload": {
       "type": "object",
       "additionalProperties": false,
@@ -1812,13 +2711,90 @@
           ]
         },
         "requirements": {
-          "$ref": "#/$defs/Requirements"
+          "$ref": "#/$defs/SessionRequirements"
         },
         "tokenizer_binding": {
           "$ref": "#/$defs/TokenizerBinding"
         },
         "environment": {
           "$ref": "#/$defs/EnvironmentBinding"
+        }
+      },
+      "required": [
+        "input_ids",
+        "definition",
+        "definition_digest",
+        "handler_version",
+        "budget",
+        "binding",
+        "generation",
+        "policy_digest",
+        "requirements",
+        "tokenizer_binding",
+        "environment"
+      ]
+    },
+    "TurnStartedPayloadLevel3": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "input_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "definition": {
+          "$ref": "#/$defs/ContentRef"
+        },
+        "definition_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "maxLength": 64
+        },
+        "handler_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "budget": {
+          "$ref": "#/$defs/ContentRef"
+        },
+        "binding": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "policy_digest": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$",
+              "maxLength": 64
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "requirements": {
+          "$ref": "#/$defs/SessionRequirements"
+        },
+        "tokenizer_binding": {
+          "$ref": "#/$defs/TokenizerBinding"
+        },
+        "environment": {
+          "$ref": "#/$defs/ExecutionEnvironmentBinding"
         }
       },
       "required": [
@@ -2027,6 +3003,197 @@
         "provider_binding",
         "consumed_unknowns",
         "policy_decision"
+      ]
+    },
+    "OpPlannedPayloadLevel3": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "op_kind": {
+          "type": "string",
+          "enum": [
+            "model",
+            "tool",
+            "interaction"
+          ]
+        },
+        "purpose": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "primary",
+                "compaction",
+                "session_memory",
+                "output_repair"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "request": {
+          "$ref": "#/$defs/ContentRef"
+        },
+        "request_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "maxLength": 64
+        },
+        "context_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "tool": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContentRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "idempotency_key": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "budget_admission": {
+          "$ref": "#/$defs/ContentRef"
+        },
+        "not_before_ms": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "provider_binding": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "consumed_unknowns": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ResultId"
+          }
+        },
+        "policy_decision": {
+          "$ref": "#/$defs/PolicyDecision"
+        },
+        "execution_identity": {
+          "$ref": "#/$defs/ExecutionIdentity"
+        },
+        "command_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "maxLength": 64
+        }
+      },
+      "required": [
+        "op_kind",
+        "purpose",
+        "request",
+        "request_digest",
+        "context_version",
+        "dependencies",
+        "tool",
+        "idempotency_key",
+        "budget_admission",
+        "not_before_ms",
+        "provider_binding",
+        "consumed_unknowns",
+        "policy_decision",
+        "execution_identity",
+        "command_digest"
+      ]
+    },
+    "OpPreparedPayloadLevel3": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "request": {
+          "$ref": "#/$defs/ContentRef"
+        },
+        "request_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "maxLength": 64
+        },
+        "op_kind": {
+          "const": "tool",
+          "type": "string"
+        },
+        "tool": {
+          "$ref": "#/$defs/ContentRef"
+        },
+        "provider_binding": {
+          "type": "string",
+          "minLength": 1
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "hook_result": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContentRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "shared_state": {
+          "$ref": "#/$defs/ContentRef"
+        },
+        "policy_decision": {
+          "$ref": "#/$defs/PolicyDecision"
+        },
+        "command_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "maxLength": 64
+        }
+      },
+      "required": [
+        "request",
+        "request_digest",
+        "op_kind",
+        "tool",
+        "provider_binding",
+        "idempotency_key",
+        "hook_result",
+        "shared_state",
+        "policy_decision",
+        "command_digest"
       ]
     },
     "OpPreparedPayload": {
@@ -3028,7 +4195,7 @@
         "payload"
       ]
     },
-    "InboxEnvelope": {
+    "RecordEnvelopeLevel2": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
@@ -3037,8 +4204,152 @@
           "type": "string"
         },
         "feature_level": {
+          "const": 2,
+          "type": "integer"
+        },
+        "record_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "turn_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "operation_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "attempt": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "payload": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "schema_version",
+        "feature_level",
+        "record_id",
+        "kind",
+        "session_id",
+        "turn_id",
+        "operation_id",
+        "attempt",
+        "payload"
+      ]
+    },
+    "RecordEnvelopeLevel3": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "S1",
+          "type": "string"
+        },
+        "feature_level": {
+          "const": 3,
+          "type": "integer"
+        },
+        "record_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "turn_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "operation_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "attempt": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "payload": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "schema_version",
+        "feature_level",
+        "record_id",
+        "kind",
+        "session_id",
+        "turn_id",
+        "operation_id",
+        "attempt",
+        "payload"
+      ]
+    },
+    "InboxEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "feature_level": {
           "const": 1,
           "type": "integer"
+        },
+        "schema_version": {
+          "const": "S1",
+          "type": "string"
         },
         "actor": {
           "$ref": "#/$defs/Principal"
@@ -3084,8 +4395,148 @@
         }
       },
       "required": [
-        "schema_version",
         "feature_level",
+        "schema_version",
+        "actor",
+        "admission_proof",
+        "input_id",
+        "kind",
+        "target_turn_id",
+        "generation",
+        "available_ms",
+        "payload"
+      ]
+    },
+    "InboxEnvelopeLevel2": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "feature_level": {
+          "const": 2,
+          "type": "integer"
+        },
+        "schema_version": {
+          "const": "S1",
+          "type": "string"
+        },
+        "actor": {
+          "$ref": "#/$defs/Principal"
+        },
+        "admission_proof": {
+          "$ref": "#/$defs/AdmissionProof"
+        },
+        "input_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "type": "string"
+        },
+        "target_turn_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "generation": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "available_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "payload": {
+          "type": "object"
+        },
+        "requirements": {
+          "$ref": "#/$defs/SessionRequirements"
+        }
+      },
+      "required": [
+        "feature_level",
+        "schema_version",
+        "actor",
+        "admission_proof",
+        "input_id",
+        "kind",
+        "target_turn_id",
+        "generation",
+        "available_ms",
+        "payload",
+        "requirements"
+      ]
+    },
+    "InboxEnvelopeLevel3": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "feature_level": {
+          "const": 3,
+          "type": "integer"
+        },
+        "schema_version": {
+          "const": "S1",
+          "type": "string"
+        },
+        "actor": {
+          "$ref": "#/$defs/Principal"
+        },
+        "admission_proof": {
+          "$ref": "#/$defs/AdmissionProof"
+        },
+        "input_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "type": "string"
+        },
+        "target_turn_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "generation": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "available_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "payload": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "feature_level",
+        "schema_version",
         "actor",
         "admission_proof",
         "input_id",
@@ -3101,72 +4552,7 @@
         {
           "allOf": [
             {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "schema_version": {
-                  "const": "S1",
-                  "type": "string"
-                },
-                "feature_level": {
-                  "const": 1,
-                  "type": "integer"
-                },
-                "actor": {
-                  "$ref": "#/$defs/Principal"
-                },
-                "admission_proof": {
-                  "$ref": "#/$defs/AdmissionProof"
-                },
-                "input_id": {
-                  "type": "string",
-                  "minLength": 1
-                },
-                "kind": {
-                  "type": "string"
-                },
-                "target_turn_id": {
-                  "anyOf": [
-                    {
-                      "type": "string",
-                      "minLength": 1
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "generation": {
-                  "anyOf": [
-                    {
-                      "type": "integer",
-                      "minimum": 0
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "available_ms": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "payload": {
-                  "type": "object"
-                }
-              },
-              "required": [
-                "schema_version",
-                "feature_level",
-                "actor",
-                "admission_proof",
-                "input_id",
-                "kind",
-                "target_turn_id",
-                "generation",
-                "available_ms",
-                "payload"
-              ]
+              "$ref": "#/$defs/InboxEnvelope"
             },
             {
               "type": "object",
@@ -3184,72 +4570,7 @@
         {
           "allOf": [
             {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "schema_version": {
-                  "const": "S1",
-                  "type": "string"
-                },
-                "feature_level": {
-                  "const": 1,
-                  "type": "integer"
-                },
-                "actor": {
-                  "$ref": "#/$defs/Principal"
-                },
-                "admission_proof": {
-                  "$ref": "#/$defs/AdmissionProof"
-                },
-                "input_id": {
-                  "type": "string",
-                  "minLength": 1
-                },
-                "kind": {
-                  "type": "string"
-                },
-                "target_turn_id": {
-                  "anyOf": [
-                    {
-                      "type": "string",
-                      "minLength": 1
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "generation": {
-                  "anyOf": [
-                    {
-                      "type": "integer",
-                      "minimum": 0
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "available_ms": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "payload": {
-                  "type": "object"
-                }
-              },
-              "required": [
-                "schema_version",
-                "feature_level",
-                "actor",
-                "admission_proof",
-                "input_id",
-                "kind",
-                "target_turn_id",
-                "generation",
-                "available_ms",
-                "payload"
-              ]
+              "$ref": "#/$defs/InboxEnvelope"
             },
             {
               "type": "object",
@@ -3267,72 +4588,7 @@
         {
           "allOf": [
             {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "schema_version": {
-                  "const": "S1",
-                  "type": "string"
-                },
-                "feature_level": {
-                  "const": 1,
-                  "type": "integer"
-                },
-                "actor": {
-                  "$ref": "#/$defs/Principal"
-                },
-                "admission_proof": {
-                  "$ref": "#/$defs/AdmissionProof"
-                },
-                "input_id": {
-                  "type": "string",
-                  "minLength": 1
-                },
-                "kind": {
-                  "type": "string"
-                },
-                "target_turn_id": {
-                  "anyOf": [
-                    {
-                      "type": "string",
-                      "minLength": 1
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "generation": {
-                  "anyOf": [
-                    {
-                      "type": "integer",
-                      "minimum": 0
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "available_ms": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "payload": {
-                  "type": "object"
-                }
-              },
-              "required": [
-                "schema_version",
-                "feature_level",
-                "actor",
-                "admission_proof",
-                "input_id",
-                "kind",
-                "target_turn_id",
-                "generation",
-                "available_ms",
-                "payload"
-              ]
+              "$ref": "#/$defs/InboxEnvelope"
             },
             {
               "type": "object",
@@ -3350,72 +4606,7 @@
         {
           "allOf": [
             {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "schema_version": {
-                  "const": "S1",
-                  "type": "string"
-                },
-                "feature_level": {
-                  "const": 1,
-                  "type": "integer"
-                },
-                "actor": {
-                  "$ref": "#/$defs/Principal"
-                },
-                "admission_proof": {
-                  "$ref": "#/$defs/AdmissionProof"
-                },
-                "input_id": {
-                  "type": "string",
-                  "minLength": 1
-                },
-                "kind": {
-                  "type": "string"
-                },
-                "target_turn_id": {
-                  "anyOf": [
-                    {
-                      "type": "string",
-                      "minLength": 1
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "generation": {
-                  "anyOf": [
-                    {
-                      "type": "integer",
-                      "minimum": 0
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "available_ms": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "payload": {
-                  "type": "object"
-                }
-              },
-              "required": [
-                "schema_version",
-                "feature_level",
-                "actor",
-                "admission_proof",
-                "input_id",
-                "kind",
-                "target_turn_id",
-                "generation",
-                "available_ms",
-                "payload"
-              ]
+              "$ref": "#/$defs/InboxEnvelope"
             },
             {
               "type": "object",
@@ -3433,72 +4624,7 @@
         {
           "allOf": [
             {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "schema_version": {
-                  "const": "S1",
-                  "type": "string"
-                },
-                "feature_level": {
-                  "const": 1,
-                  "type": "integer"
-                },
-                "actor": {
-                  "$ref": "#/$defs/Principal"
-                },
-                "admission_proof": {
-                  "$ref": "#/$defs/AdmissionProof"
-                },
-                "input_id": {
-                  "type": "string",
-                  "minLength": 1
-                },
-                "kind": {
-                  "type": "string"
-                },
-                "target_turn_id": {
-                  "anyOf": [
-                    {
-                      "type": "string",
-                      "minLength": 1
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "generation": {
-                  "anyOf": [
-                    {
-                      "type": "integer",
-                      "minimum": 0
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "available_ms": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "payload": {
-                  "type": "object"
-                }
-              },
-              "required": [
-                "schema_version",
-                "feature_level",
-                "actor",
-                "admission_proof",
-                "input_id",
-                "kind",
-                "target_turn_id",
-                "generation",
-                "available_ms",
-                "payload"
-              ]
+              "$ref": "#/$defs/InboxEnvelope"
             },
             {
               "type": "object",
@@ -3516,72 +4642,7 @@
         {
           "allOf": [
             {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "schema_version": {
-                  "const": "S1",
-                  "type": "string"
-                },
-                "feature_level": {
-                  "const": 1,
-                  "type": "integer"
-                },
-                "actor": {
-                  "$ref": "#/$defs/Principal"
-                },
-                "admission_proof": {
-                  "$ref": "#/$defs/AdmissionProof"
-                },
-                "input_id": {
-                  "type": "string",
-                  "minLength": 1
-                },
-                "kind": {
-                  "type": "string"
-                },
-                "target_turn_id": {
-                  "anyOf": [
-                    {
-                      "type": "string",
-                      "minLength": 1
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "generation": {
-                  "anyOf": [
-                    {
-                      "type": "integer",
-                      "minimum": 0
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "available_ms": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "payload": {
-                  "type": "object"
-                }
-              },
-              "required": [
-                "schema_version",
-                "feature_level",
-                "actor",
-                "admission_proof",
-                "input_id",
-                "kind",
-                "target_turn_id",
-                "generation",
-                "available_ms",
-                "payload"
-              ]
+              "$ref": "#/$defs/InboxEnvelope"
             },
             {
               "type": "object",
@@ -3599,72 +4660,7 @@
         {
           "allOf": [
             {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "schema_version": {
-                  "const": "S1",
-                  "type": "string"
-                },
-                "feature_level": {
-                  "const": 1,
-                  "type": "integer"
-                },
-                "actor": {
-                  "$ref": "#/$defs/Principal"
-                },
-                "admission_proof": {
-                  "$ref": "#/$defs/AdmissionProof"
-                },
-                "input_id": {
-                  "type": "string",
-                  "minLength": 1
-                },
-                "kind": {
-                  "type": "string"
-                },
-                "target_turn_id": {
-                  "anyOf": [
-                    {
-                      "type": "string",
-                      "minLength": 1
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "generation": {
-                  "anyOf": [
-                    {
-                      "type": "integer",
-                      "minimum": 0
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "available_ms": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "payload": {
-                  "type": "object"
-                }
-              },
-              "required": [
-                "schema_version",
-                "feature_level",
-                "actor",
-                "admission_proof",
-                "input_id",
-                "kind",
-                "target_turn_id",
-                "generation",
-                "available_ms",
-                "payload"
-              ]
+              "$ref": "#/$defs/InboxEnvelope"
             },
             {
               "type": "object",
@@ -3682,72 +4678,7 @@
         {
           "allOf": [
             {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "schema_version": {
-                  "const": "S1",
-                  "type": "string"
-                },
-                "feature_level": {
-                  "const": 1,
-                  "type": "integer"
-                },
-                "actor": {
-                  "$ref": "#/$defs/Principal"
-                },
-                "admission_proof": {
-                  "$ref": "#/$defs/AdmissionProof"
-                },
-                "input_id": {
-                  "type": "string",
-                  "minLength": 1
-                },
-                "kind": {
-                  "type": "string"
-                },
-                "target_turn_id": {
-                  "anyOf": [
-                    {
-                      "type": "string",
-                      "minLength": 1
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "generation": {
-                  "anyOf": [
-                    {
-                      "type": "integer",
-                      "minimum": 0
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "available_ms": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "payload": {
-                  "type": "object"
-                }
-              },
-              "required": [
-                "schema_version",
-                "feature_level",
-                "actor",
-                "admission_proof",
-                "input_id",
-                "kind",
-                "target_turn_id",
-                "generation",
-                "available_ms",
-                "payload"
-              ]
+              "$ref": "#/$defs/InboxEnvelope"
             },
             {
               "type": "object",
@@ -3765,72 +4696,7 @@
         {
           "allOf": [
             {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "schema_version": {
-                  "const": "S1",
-                  "type": "string"
-                },
-                "feature_level": {
-                  "const": 1,
-                  "type": "integer"
-                },
-                "actor": {
-                  "$ref": "#/$defs/Principal"
-                },
-                "admission_proof": {
-                  "$ref": "#/$defs/AdmissionProof"
-                },
-                "input_id": {
-                  "type": "string",
-                  "minLength": 1
-                },
-                "kind": {
-                  "type": "string"
-                },
-                "target_turn_id": {
-                  "anyOf": [
-                    {
-                      "type": "string",
-                      "minLength": 1
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "generation": {
-                  "anyOf": [
-                    {
-                      "type": "integer",
-                      "minimum": 0
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "available_ms": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "payload": {
-                  "type": "object"
-                }
-              },
-              "required": [
-                "schema_version",
-                "feature_level",
-                "actor",
-                "admission_proof",
-                "input_id",
-                "kind",
-                "target_turn_id",
-                "generation",
-                "available_ms",
-                "payload"
-              ]
+              "$ref": "#/$defs/InboxEnvelope"
             },
             {
               "type": "object",
@@ -3840,6 +4706,78 @@
                 },
                 "payload": {
                   "$ref": "#/$defs/ModelSelectionPayload"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/InboxEnvelopeLevel2"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "user"
+                },
+                "payload": {
+                  "$ref": "#/$defs/ContentPayload"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/InboxEnvelopeLevel2"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "follow_up"
+                },
+                "payload": {
+                  "$ref": "#/$defs/ContentPayload"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/InboxEnvelopeLevel2"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "model_selection"
+                },
+                "payload": {
+                  "$ref": "#/$defs/ModelSelectionPayload"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/InboxEnvelopeLevel3"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "provider_evidence"
+                },
+                "payload": {
+                  "$ref": "#/$defs/ProviderEvidencePayloadLevel3"
                 }
               }
             }

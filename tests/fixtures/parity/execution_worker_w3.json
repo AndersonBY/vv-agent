@@ -1,0 +1,776 @@
+{
+  "schema_version": "vv-agent.execution-worker-w3.v1",
+  "contract_version": "41.0.0",
+  "status": "contract-allocation-only",
+  "feature_level": 3,
+  "provenance": {
+    "producer_capture": false,
+    "capture": "none",
+    "adoption_evidence": false,
+    "note": "Synthetic W3 allocation vectors only; Python producer capture and adoption evidence remain pending."
+  },
+  "framing": {
+    "execution_id": {
+      "domain": "vv-agent/S1/execution-identity",
+      "framing_version": 1,
+      "preimage_fields": [
+        "domain",
+        "framing_version",
+        "operation_key",
+        "tenant_id",
+        "environment_id"
+      ],
+      "canonicalization": "RFC8785_JCS",
+      "preimage": "JCS({domain,framing_version,operation_key,tenant_id,environment_id})",
+      "digest": "SHA256(preimage)",
+      "excluded_fields": [
+        "attempt",
+        "request_digest",
+        "dispatch_id",
+        "clock_ms"
+      ]
+    },
+    "capabilities_digest": {
+      "preimage": "JCS({environment_id,generation,isolation,network,enforces_network_policy,enforces_resource_limits,persistent,environment_capabilities,network_policy_ref_digest,isolation_policy_ref_digest})",
+      "digest": "SHA256(preimage)"
+    },
+    "command_digest": {
+      "domain": "vv-agent/S1/command-digest",
+      "framing_version": 1,
+      "purpose": "stable-command",
+      "canonicalization": "RFC8785_JCS",
+      "preimage": "JCS({domain,framing_version,purpose,tenant_id,session_id,command_spec,environment,operational_policy})",
+      "digest": "HMAC-SHA256(session_data_key,preimage)",
+      "excluded_fields": [
+        "attempt",
+        "request_digest",
+        "dispatch_id",
+        "clock_ms",
+        "transport_credentials"
+      ]
+    }
+  },
+  "idempotency": {
+    "key_format": "{session_id}/{operation_id}",
+    "deduplication_scope": "tenant_id,environment_id,idempotency_key",
+    "stable_across_attempts": true
+  },
+  "provider_outcomes": {
+    "not_started": null,
+    "running": "Accepted",
+    "exited": "Definitive",
+    "unknown": "Unknown"
+  },
+  "environment": {
+    "environment_id": "env-remote-1",
+    "generation": 7,
+    "isolation": "container",
+    "network": "none",
+    "enforces_network_policy": true,
+    "enforces_resource_limits": true,
+    "persistent": true,
+    "environment_capabilities": [
+      "command.execute",
+      "filesystem.workspace",
+      "network.deny"
+    ],
+    "capabilities_digest": "2f0781fe638d8fb003934e2fb79cc11f1fa189bf74cac16bee05debca3c52b23",
+    "network_policy_ref_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+    "isolation_policy_ref_digest": "2222222222222222222222222222222222222222222222222222222222222222"
+  },
+  "operational_policy": {
+    "network_policy_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+    "isolation_policy_digest": "4444444444444444444444444444444444444444444444444444444444444444"
+  },
+  "identity_vectors": [
+    {
+      "name": "stable_execution_identity_excludes_attempt_request_dispatch_and_clock",
+      "identity": {
+        "operation_key": "sess-1/op-bg-1",
+        "tenant_id": "tenant-a",
+        "environment_id": "env-remote-1",
+        "session_id": "sess-1",
+        "operation_id": "op-bg-1",
+        "execution_id": "1a80b8b1f02b7de88c875ad1c6d49ffe13e11a919fbcb7d04faa93ba9b4b511f"
+      },
+      "canonical_json_base64": "eyJkb21haW4iOiJ2di1hZ2VudC9TMS9leGVjdXRpb24taWRlbnRpdHkiLCJlbnZpcm9ubWVudF9pZCI6ImVudi1yZW1vdGUtMSIsImZyYW1pbmdfdmVyc2lvbiI6MSwib3BlcmF0aW9uX2tleSI6InNlc3MtMS9vcC1iZy0xIiwidGVuYW50X2lkIjoidGVuYW50LWEifQ==",
+      "canonical_json_utf8_bytes": 151,
+      "preimage_base64": "eyJkb21haW4iOiJ2di1hZ2VudC9TMS9leGVjdXRpb24taWRlbnRpdHkiLCJlbnZpcm9ubWVudF9pZCI6ImVudi1yZW1vdGUtMSIsImZyYW1pbmdfdmVyc2lvbiI6MSwib3BlcmF0aW9uX2tleSI6InNlc3MtMS9vcC1iZy0xIiwidGVuYW50X2lkIjoidGVuYW50LWEifQ==",
+      "execution_id": "1a80b8b1f02b7de88c875ad1c6d49ffe13e11a919fbcb7d04faa93ba9b4b511f",
+      "excluded_context_variants": [
+        {
+          "attempt": 1,
+          "request_digest": "5555555555555555555555555555555555555555555555555555555555555555",
+          "dispatch_id": "dispatch-1",
+          "clock_ms": 1763510400000
+        },
+        {
+          "attempt": 2,
+          "request_digest": "6666666666666666666666666666666666666666666666666666666666666666",
+          "dispatch_id": "dispatch-2",
+          "clock_ms": 1763510401000
+        }
+      ]
+    }
+  ],
+  "command_digest_vectors": [
+    {
+      "name": "session_keyed_command_digest_binds_command_and_environment_policy",
+      "tenant_id": "tenant-a",
+      "session_id": "sess-1",
+      "session_data_key_id": "key-session-a",
+      "session_data_key_base64": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+      "command_spec": {
+        "command_text": "printf 'hello\\n'",
+        "argv": [],
+        "cwd": "/workspace",
+        "stdin_base64": null,
+        "stdin_mode": "none",
+        "secret_ref_names": [
+          "MODEL_API_KEY"
+        ],
+        "limits": {
+          "wall_time_ms": 30000,
+          "output_bytes": 65536
+        }
+      },
+      "environment": {
+        "environment_id": "env-remote-1",
+        "generation": 7,
+        "isolation": "container",
+        "network": "none",
+        "enforces_network_policy": true,
+        "enforces_resource_limits": true,
+        "persistent": true,
+        "environment_capabilities": [
+          "command.execute",
+          "filesystem.workspace",
+          "network.deny"
+        ],
+        "capabilities_digest": "2f0781fe638d8fb003934e2fb79cc11f1fa189bf74cac16bee05debca3c52b23",
+        "network_policy_ref_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+        "isolation_policy_ref_digest": "2222222222222222222222222222222222222222222222222222222222222222"
+      },
+      "operational_policy": {
+        "network_policy_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+        "isolation_policy_digest": "4444444444444444444444444444444444444444444444444444444444444444"
+      },
+      "canonical_json_base64": "eyJjb21tYW5kX3NwZWMiOnsiYXJndiI6W10sImNvbW1hbmRfdGV4dCI6InByaW50ZiAnaGVsbG9cXG4nIiwiY3dkIjoiL3dvcmtzcGFjZSIsImxpbWl0cyI6eyJvdXRwdXRfYnl0ZXMiOjY1NTM2LCJ3YWxsX3RpbWVfbXMiOjMwMDAwfSwic2VjcmV0X3JlZl9uYW1lcyI6WyJNT0RFTF9BUElfS0VZIl0sInN0ZGluX2Jhc2U2NCI6bnVsbCwic3RkaW5fbW9kZSI6Im5vbmUifSwiZG9tYWluIjoidnYtYWdlbnQvUzEvY29tbWFuZC1kaWdlc3QiLCJlbnZpcm9ubWVudCI6eyJjYXBhYmlsaXRpZXNfZGlnZXN0IjoiMmYwNzgxZmU2MzhkOGZiMDAzOTM0ZTJmYjc5Y2MxMWYxZmExODliZjc0Y2FjMTZiZWUwNWRlYmNhM2M1MmIyMyIsImVuZm9yY2VzX25ldHdvcmtfcG9saWN5Ijp0cnVlLCJlbmZvcmNlc19yZXNvdXJjZV9saW1pdHMiOnRydWUsImVudmlyb25tZW50X2NhcGFiaWxpdGllcyI6WyJjb21tYW5kLmV4ZWN1dGUiLCJmaWxlc3lzdGVtLndvcmtzcGFjZSIsIm5ldHdvcmsuZGVueSJdLCJlbnZpcm9ubWVudF9pZCI6ImVudi1yZW1vdGUtMSIsImdlbmVyYXRpb24iOjcsImlzb2xhdGlvbiI6ImNvbnRhaW5lciIsImlzb2xhdGlvbl9wb2xpY3lfcmVmX2RpZ2VzdCI6IjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIiLCJuZXR3b3JrIjoibm9uZSIsIm5ldHdvcmtfcG9saWN5X3JlZl9kaWdlc3QiOiIxMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExIiwicGVyc2lzdGVudCI6dHJ1ZX0sImZyYW1pbmdfdmVyc2lvbiI6MSwib3BlcmF0aW9uYWxfcG9saWN5Ijp7Imlzb2xhdGlvbl9wb2xpY3lfZGlnZXN0IjoiNDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NCIsIm5ldHdvcmtfcG9saWN5X2RpZ2VzdCI6IjMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMifSwicHVycG9zZSI6InN0YWJsZS1jb21tYW5kIiwic2Vzc2lvbl9pZCI6InNlc3MtMSIsInRlbmFudF9pZCI6InRlbmFudC1hIn0=",
+      "canonical_json_utf8_bytes": 1100,
+      "preimage_base64": "eyJjb21tYW5kX3NwZWMiOnsiYXJndiI6W10sImNvbW1hbmRfdGV4dCI6InByaW50ZiAnaGVsbG9cXG4nIiwiY3dkIjoiL3dvcmtzcGFjZSIsImxpbWl0cyI6eyJvdXRwdXRfYnl0ZXMiOjY1NTM2LCJ3YWxsX3RpbWVfbXMiOjMwMDAwfSwic2VjcmV0X3JlZl9uYW1lcyI6WyJNT0RFTF9BUElfS0VZIl0sInN0ZGluX2Jhc2U2NCI6bnVsbCwic3RkaW5fbW9kZSI6Im5vbmUifSwiZG9tYWluIjoidnYtYWdlbnQvUzEvY29tbWFuZC1kaWdlc3QiLCJlbnZpcm9ubWVudCI6eyJjYXBhYmlsaXRpZXNfZGlnZXN0IjoiMmYwNzgxZmU2MzhkOGZiMDAzOTM0ZTJmYjc5Y2MxMWYxZmExODliZjc0Y2FjMTZiZWUwNWRlYmNhM2M1MmIyMyIsImVuZm9yY2VzX25ldHdvcmtfcG9saWN5Ijp0cnVlLCJlbmZvcmNlc19yZXNvdXJjZV9saW1pdHMiOnRydWUsImVudmlyb25tZW50X2NhcGFiaWxpdGllcyI6WyJjb21tYW5kLmV4ZWN1dGUiLCJmaWxlc3lzdGVtLndvcmtzcGFjZSIsIm5ldHdvcmsuZGVueSJdLCJlbnZpcm9ubWVudF9pZCI6ImVudi1yZW1vdGUtMSIsImdlbmVyYXRpb24iOjcsImlzb2xhdGlvbiI6ImNvbnRhaW5lciIsImlzb2xhdGlvbl9wb2xpY3lfcmVmX2RpZ2VzdCI6IjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIiLCJuZXR3b3JrIjoibm9uZSIsIm5ldHdvcmtfcG9saWN5X3JlZl9kaWdlc3QiOiIxMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExIiwicGVyc2lzdGVudCI6dHJ1ZX0sImZyYW1pbmdfdmVyc2lvbiI6MSwib3BlcmF0aW9uYWxfcG9saWN5Ijp7Imlzb2xhdGlvbl9wb2xpY3lfZGlnZXN0IjoiNDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NCIsIm5ldHdvcmtfcG9saWN5X2RpZ2VzdCI6IjMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMifSwicHVycG9zZSI6InN0YWJsZS1jb21tYW5kIiwic2Vzc2lvbl9pZCI6InNlc3MtMSIsInRlbmFudF9pZCI6InRlbmFudC1hIn0=",
+      "command_digest": "deeca65af1fe1caceba1cf85d1a4bb731112db4394d43b4d22db08afa08f967c"
+    }
+  ],
+  "preparation_binding": {
+    "execution_identity_source": "op_planned",
+    "proposal_command_digest": "deeca65af1fe1caceba1cf85d1a4bb731112db4394d43b4d22db08afa08f967c",
+    "prepared_request_digest": "7777777777777777777777777777777777777777777777777777777777777777",
+    "hook_patched_command_spec": {
+      "command_text": "printf 'hook-patched\\n'",
+      "argv": [],
+      "cwd": "/workspace",
+      "stdin_base64": null,
+      "stdin_mode": "none",
+      "secret_ref_names": [
+        "MODEL_API_KEY"
+      ],
+      "limits": {
+        "wall_time_ms": 30000,
+        "output_bytes": 65536
+      }
+    },
+    "prepared_command_digest": "69eb63da38e5ad3391bde16283b52bfa3b59d37c1ac3493d4c4e71b1b350714c",
+    "retry_source": "first_op_prepared_request_digest_command_digest",
+    "retry_runs_before_tool_hooks": false,
+    "inherit_from_plan": [
+      "turn_id",
+      "operation_id",
+      "attempt",
+      "idempotency_key",
+      "provider_binding",
+      "execution_identity"
+    ]
+  },
+  "lookup_binding": {
+    "tenant_id": "tenant-a",
+    "session_id": "sess-1",
+    "operation_id": "op-bg-1",
+    "attempt": 1,
+    "request_digest": "5555555555555555555555555555555555555555555555555555555555555555",
+    "idempotency_key": "sess-1/op-bg-1",
+    "execution_id": "1a80b8b1f02b7de88c875ad1c6d49ffe13e11a919fbcb7d04faa93ba9b4b511f",
+    "command_digest": "deeca65af1fe1caceba1cf85d1a4bb731112db4394d43b4d22db08afa08f967c",
+    "environment_id": "env-remote-1",
+    "generation": 7,
+    "provider_id": "provider-remote-1"
+  },
+  "lookup_results": [
+    {
+      "name": "not_started_proves_absence_and_allows_one_retry",
+      "transport_available": true,
+      "authenticated": true,
+      "result": {
+        "schema_version": "vv-agent.provider-lookup.v1",
+        "status": "not_started",
+        "binding": {
+          "tenant_id": "tenant-a",
+          "session_id": "sess-1",
+          "operation_id": "op-bg-1",
+          "attempt": 1,
+          "request_digest": "5555555555555555555555555555555555555555555555555555555555555555",
+          "idempotency_key": "sess-1/op-bg-1",
+          "execution_id": "1a80b8b1f02b7de88c875ad1c6d49ffe13e11a919fbcb7d04faa93ba9b4b511f",
+          "command_digest": "deeca65af1fe1caceba1cf85d1a4bb731112db4394d43b4d22db08afa08f967c",
+          "environment_id": "env-remote-1",
+          "generation": 7,
+          "provider_id": "provider-remote-1"
+        },
+        "outcome": null,
+        "evidence": [
+          "provider-registry:not-started"
+        ]
+      },
+      "expected_disposition": "no_effects_and_retry_once",
+      "retry_allowed": true
+    },
+    {
+      "name": "running_reuses_original_execution",
+      "transport_available": true,
+      "authenticated": true,
+      "result": {
+        "schema_version": "vv-agent.provider-lookup.v1",
+        "status": "running",
+        "binding": {
+          "tenant_id": "tenant-a",
+          "session_id": "sess-1",
+          "operation_id": "op-bg-1",
+          "attempt": 1,
+          "request_digest": "5555555555555555555555555555555555555555555555555555555555555555",
+          "idempotency_key": "sess-1/op-bg-1",
+          "execution_id": "1a80b8b1f02b7de88c875ad1c6d49ffe13e11a919fbcb7d04faa93ba9b4b511f",
+          "command_digest": "deeca65af1fe1caceba1cf85d1a4bb731112db4394d43b4d22db08afa08f967c",
+          "environment_id": "env-remote-1",
+          "generation": 7,
+          "provider_id": "provider-remote-1"
+        },
+        "outcome": {
+          "kind": "Accepted",
+          "yield_on_steer": false,
+          "handle": {
+            "kind": "provider",
+            "provider": "provider-remote-1",
+            "job_id": "job-remote-1",
+            "operation_id": "op-bg-1",
+            "attempt": 1,
+            "request_digest": "5555555555555555555555555555555555555555555555555555555555555555",
+            "execution_id": "1a80b8b1f02b7de88c875ad1c6d49ffe13e11a919fbcb7d04faa93ba9b4b511f",
+            "command_digest": "deeca65af1fe1caceba1cf85d1a4bb731112db4394d43b4d22db08afa08f967c",
+            "environment_id": "env-remote-1",
+            "generation": 7,
+            "evidence": [
+              "provider-registry:running"
+            ],
+            "query_ref": null,
+            "cancel_ref": null
+          }
+        },
+        "evidence": [
+          "provider-registry:running"
+        ]
+      },
+      "expected_disposition": "reuse_running_execution",
+      "retry_allowed": false
+    },
+    {
+      "name": "exited_reconciles_original_terminal_result",
+      "transport_available": true,
+      "authenticated": true,
+      "result": {
+        "schema_version": "vv-agent.provider-lookup.v1",
+        "status": "exited",
+        "binding": {
+          "tenant_id": "tenant-a",
+          "session_id": "sess-1",
+          "operation_id": "op-bg-1",
+          "attempt": 1,
+          "request_digest": "5555555555555555555555555555555555555555555555555555555555555555",
+          "idempotency_key": "sess-1/op-bg-1",
+          "execution_id": "1a80b8b1f02b7de88c875ad1c6d49ffe13e11a919fbcb7d04faa93ba9b4b511f",
+          "command_digest": "deeca65af1fe1caceba1cf85d1a4bb731112db4394d43b4d22db08afa08f967c",
+          "environment_id": "env-remote-1",
+          "generation": 7,
+          "provider_id": "provider-remote-1"
+        },
+        "outcome": {
+          "kind": "Definitive",
+          "result": {
+            "tool_call_id": "call-1",
+            "content": "hello\n",
+            "status_code": "SUCCESS"
+          },
+          "usage": {},
+          "shared_state": null,
+          "evidence": [
+            "provider-process:exited",
+            "provider-result:call-1"
+          ]
+        },
+        "evidence": [
+          "provider-process:exited",
+          "provider-result:call-1"
+        ]
+      },
+      "expected_disposition": "reconcile_terminal_execution",
+      "retry_allowed": false
+    },
+    {
+      "name": "unknown_transport_or_registry_preserves_unknown",
+      "transport_available": false,
+      "authenticated": false,
+      "result": {
+        "schema_version": "vv-agent.provider-lookup.v1",
+        "status": "unknown",
+        "binding": {
+          "tenant_id": "tenant-a",
+          "session_id": "sess-1",
+          "operation_id": "op-bg-1",
+          "attempt": 1,
+          "request_digest": "5555555555555555555555555555555555555555555555555555555555555555",
+          "idempotency_key": "sess-1/op-bg-1",
+          "execution_id": "1a80b8b1f02b7de88c875ad1c6d49ffe13e11a919fbcb7d04faa93ba9b4b511f",
+          "command_digest": "deeca65af1fe1caceba1cf85d1a4bb731112db4394d43b4d22db08afa08f967c",
+          "environment_id": "env-remote-1",
+          "generation": 7,
+          "provider_id": "provider-remote-1"
+        },
+        "outcome": {
+          "kind": "Unknown",
+          "reason": "provider registry is unavailable; execution state is unproved"
+        },
+        "evidence": [
+          "transport-or-registry:unavailable"
+        ]
+      },
+      "expected_disposition": "preserve_unknown",
+      "retry_allowed": false
+    }
+  ],
+  "lookup_storage_boundary": {
+    "logical_source": "lookup_results[].result",
+    "content_owner": {
+      "kind": "inbox",
+      "input_id": "provider-evidence-1",
+      "tenant_id": "tenant-a",
+      "session_id": "sess-1"
+    },
+    "content_slot": "provider_lookup",
+    "read_order": [
+      "content_owner",
+      "content_slot",
+      "decrypt_and_verify_typed_content",
+      "provider_lookup_result",
+      "outer_binding_and_plan"
+    ],
+    "retained_evidence": {
+      "schema_version": "S1",
+      "feature_level": 3,
+      "actor": {
+        "tenant_id": "tenant-a",
+        "subject_id": "provider-remote-1",
+        "subject_kind": "service",
+        "attributes": {
+          "content_id": "content/5f889240e7dea3b9a38817e1",
+          "mac": "632ff99e0f7219a59916509970d473d2ff3270da08477250b3cde7611fb35c68",
+          "size": 2,
+          "key_id": "key/a7df602fc9010676",
+          "labels": {
+            "source": [],
+            "classification": "internal"
+          }
+        }
+      },
+      "admission_proof": null,
+      "input_id": "provider-evidence-1",
+      "kind": "provider_evidence",
+      "target_turn_id": "turn-1",
+      "generation": 1,
+      "available_ms": 0,
+      "payload": {
+        "operation_id": "op-bg-1",
+        "attempt": 1,
+        "request_digest": "5555555555555555555555555555555555555555555555555555555555555555",
+        "provider_lookup": {
+          "content_id": "content/732f5692bfc42a604b7eef07",
+          "mac": "498a20d1062d6e6f26b8b15bd8f7033ae4a74d6bc09df6f639c9c6f029c9a9f1",
+          "size": 1115,
+          "key_id": "key/a7df602fc9010676",
+          "labels": {
+            "source": [],
+            "classification": "internal"
+          }
+        }
+      }
+    },
+    "content": {
+      "logical_result": {
+        "schema_version": "vv-agent.provider-lookup.v1",
+        "status": "running",
+        "binding": {
+          "tenant_id": "tenant-a",
+          "session_id": "sess-1",
+          "operation_id": "op-bg-1",
+          "attempt": 1,
+          "request_digest": "5555555555555555555555555555555555555555555555555555555555555555",
+          "idempotency_key": "sess-1/op-bg-1",
+          "execution_id": "1a80b8b1f02b7de88c875ad1c6d49ffe13e11a919fbcb7d04faa93ba9b4b511f",
+          "command_digest": "deeca65af1fe1caceba1cf85d1a4bb731112db4394d43b4d22db08afa08f967c",
+          "environment_id": "env-remote-1",
+          "generation": 7,
+          "provider_id": "provider-remote-1"
+        },
+        "outcome": {
+          "kind": "Accepted",
+          "yield_on_steer": false,
+          "handle": {
+            "kind": "provider",
+            "provider": "provider-remote-1",
+            "job_id": "job-remote-1",
+            "operation_id": "op-bg-1",
+            "attempt": 1,
+            "request_digest": "5555555555555555555555555555555555555555555555555555555555555555",
+            "execution_id": "1a80b8b1f02b7de88c875ad1c6d49ffe13e11a919fbcb7d04faa93ba9b4b511f",
+            "command_digest": "deeca65af1fe1caceba1cf85d1a4bb731112db4394d43b4d22db08afa08f967c",
+            "environment_id": "env-remote-1",
+            "generation": 7,
+            "evidence": [
+              "provider-registry:running"
+            ],
+            "query_ref": null,
+            "cancel_ref": null
+          }
+        },
+        "evidence": [
+          "provider-registry:running"
+        ]
+      },
+      "canonical_json_sha256": "6f9130840741c82034e236689f7d156fc3cfd79bfc7f641e54f3a29c0c207e28"
+    },
+    "op_parked_projection": {
+      "handle_fields": [
+        "kind",
+        "provider",
+        "job_id",
+        "operation_id",
+        "attempt",
+        "request_digest",
+        "evidence",
+        "query_ref",
+        "cancel_ref"
+      ],
+      "content_fields": [
+        "job_id",
+        "evidence",
+        "query_ref",
+        "cancel_ref"
+      ],
+      "identity_restored_from": [
+        "op_planned.execution_identity",
+        "turn_started.environment"
+      ]
+    },
+    "immediate_recovery_slots": {
+      "running": [
+        "op_parked.handle.evidence"
+      ],
+      "exited": [
+        "op_completed.result",
+        "op_completed.usage",
+        "op_completed.evidence"
+      ],
+      "unknown": [
+        "op_unknown.reason",
+        "op_unknown.dispatch_evidence",
+        "op_unknown.observation"
+      ]
+    },
+    "retry_guard": {
+      "not_started_evidence_persisted_before_retry": true,
+      "external_callback_required": false,
+      "invalid_cases": [
+        {
+          "name": "plaintext_lookup_never_enters_storage",
+          "expected_code": "provider_lookup_not_content_ref"
+        },
+        {
+          "name": "foreign_owner_rejected_before_use",
+          "expected_code": "content_owner_mismatch"
+        },
+        {
+          "name": "wrong_slot_rejected_before_use",
+          "expected_code": "content_slot_mismatch"
+        },
+        {
+          "name": "logical_binding_mismatch_rejected_before_effect",
+          "expected_code": "binding_mismatch"
+        },
+        {
+          "name": "unpersisted_not_started_never_retries",
+          "expected_code": "not_started_evidence_not_persisted"
+        }
+      ]
+    }
+  },
+  "invalid_lookup_cases": [
+    {
+      "name": "binding_tenant_tamper",
+      "base_lookup": "running_reuses_original_execution",
+      "patch_target": "lookup",
+      "patch": [
+        {
+          "path": [
+            "binding",
+            "tenant_id"
+          ],
+          "set": "tenant-b"
+        }
+      ],
+      "authenticated": true,
+      "transport_available": true,
+      "expected_code": "binding_mismatch"
+    },
+    {
+      "name": "bindings_returned_environment_identity_tamper",
+      "base_lookup": "running_reuses_original_execution",
+      "patch_target": "lookup",
+      "patch": [
+        {
+          "path": [
+            "binding",
+            "environment_id"
+          ],
+          "set": "env-other"
+        }
+      ],
+      "authenticated": true,
+      "transport_available": true,
+      "expected_code": "binding_mismatch"
+    },
+    {
+      "name": "environment_id_tamper",
+      "base_lookup": "running_reuses_original_execution",
+      "patch_target": "environment",
+      "patch": [
+        {
+          "path": [
+            "environment_id"
+          ],
+          "set": "env-remote-2"
+        }
+      ],
+      "authenticated": true,
+      "transport_available": true,
+      "expected_code": "environment_mismatch"
+    },
+    {
+      "name": "generation_tamper",
+      "base_lookup": "running_reuses_original_execution",
+      "patch_target": "environment",
+      "patch": [
+        {
+          "path": [
+            "generation"
+          ],
+          "set": 8
+        }
+      ],
+      "authenticated": true,
+      "transport_available": true,
+      "expected_code": "generation_mismatch"
+    },
+    {
+      "name": "command_digest_tamper",
+      "base_lookup": "running_reuses_original_execution",
+      "patch_target": "lookup",
+      "patch": [
+        {
+          "path": [
+            "binding",
+            "command_digest"
+          ],
+          "set": "7777777777777777777777777777777777777777777777777777777777777777"
+        }
+      ],
+      "authenticated": true,
+      "transport_available": true,
+      "expected_code": "command_mismatch"
+    },
+    {
+      "name": "isolation_downgrade",
+      "base_lookup": "running_reuses_original_execution",
+      "patch_target": "environment",
+      "patch": [
+        {
+          "path": [
+            "isolation"
+          ],
+          "set": "none"
+        }
+      ],
+      "authenticated": true,
+      "transport_available": true,
+      "expected_code": "isolation_downgrade"
+    },
+    {
+      "name": "network_scope_widening",
+      "base_lookup": "running_reuses_original_execution",
+      "patch_target": "environment",
+      "patch": [
+        {
+          "path": [
+            "network"
+          ],
+          "set": "allowlist"
+        }
+      ],
+      "authenticated": true,
+      "transport_available": true,
+      "expected_code": "network_policy_widening"
+    },
+    {
+      "name": "network_enforcement_downgrade",
+      "base_lookup": "running_reuses_original_execution",
+      "patch_target": "environment",
+      "patch": [
+        {
+          "path": [
+            "enforces_network_policy"
+          ],
+          "set": false
+        }
+      ],
+      "authenticated": true,
+      "transport_available": true,
+      "expected_code": "enforcement_downgrade"
+    },
+    {
+      "name": "capability_digest_mismatch",
+      "base_lookup": "running_reuses_original_execution",
+      "patch_target": "environment",
+      "patch": [
+        {
+          "path": [
+            "capabilities_digest"
+          ],
+          "set": "8888888888888888888888888888888888888888888888888888888888888888"
+        }
+      ],
+      "authenticated": true,
+      "transport_available": true,
+      "expected_code": "capability_digest_mismatch"
+    },
+    {
+      "name": "policy_reference_digest_mismatch",
+      "base_lookup": "running_reuses_original_execution",
+      "patch_target": "environment",
+      "patch": [
+        {
+          "path": [
+            "network_policy_ref_digest"
+          ],
+          "set": "9999999999999999999999999999999999999999999999999999999999999999"
+        }
+      ],
+      "authenticated": true,
+      "transport_available": true,
+      "expected_code": "policy_digest_mismatch"
+    },
+    {
+      "name": "operational_policy_digest_mismatch",
+      "base_lookup": "running_reuses_original_execution",
+      "patch_target": "operational_policy",
+      "patch": [
+        {
+          "path": [
+            "network_policy_digest"
+          ],
+          "set": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ],
+      "authenticated": true,
+      "transport_available": true,
+      "expected_code": "policy_digest_mismatch"
+    },
+    {
+      "name": "authorization_mismatch",
+      "base_lookup": "running_reuses_original_execution",
+      "patch_target": "lookup",
+      "patch": [],
+      "authenticated": false,
+      "transport_available": true,
+      "expected_code": "authorization_mismatch"
+    },
+    {
+      "name": "malformed_provider_result",
+      "base_lookup": "running_reuses_original_execution",
+      "patch_target": "lookup",
+      "patch": [
+        {
+          "path": [
+            "status"
+          ],
+          "set": "maybe"
+        }
+      ],
+      "authenticated": true,
+      "transport_available": true,
+      "expected_code": "provider_result_invalid"
+    }
+  ],
+  "recovery_cases": [
+    {
+      "name": "authenticated_not_started_allows_one_new_attempt",
+      "lookup_status": "not_started",
+      "submitted_attempts": 1,
+      "expected_disposition": "start_new_attempt",
+      "expected_next_attempt": 2,
+      "reuse_idempotency_key": true,
+      "reuse_execution_id": true
+    },
+    {
+      "name": "after_second_submission_not_started_is_query_only",
+      "lookup_status": "not_started",
+      "submitted_attempts": 2,
+      "expected_disposition": "query_or_evidence",
+      "expected_next_attempt": null,
+      "reuse_idempotency_key": true,
+      "reuse_execution_id": true
+    },
+    {
+      "name": "running_never_starts_again",
+      "lookup_status": "running",
+      "submitted_attempts": 1,
+      "expected_disposition": "query_or_evidence",
+      "expected_next_attempt": null,
+      "reuse_idempotency_key": true,
+      "reuse_execution_id": true
+    },
+    {
+      "name": "exited_never_starts_again",
+      "lookup_status": "exited",
+      "submitted_attempts": 1,
+      "expected_disposition": "query_or_evidence",
+      "expected_next_attempt": null,
+      "reuse_idempotency_key": true,
+      "reuse_execution_id": true
+    },
+    {
+      "name": "unknown_never_starts_again",
+      "lookup_status": "unknown",
+      "submitted_attempts": 1,
+      "expected_disposition": "query_or_evidence",
+      "expected_next_attempt": null,
+      "reuse_idempotency_key": true,
+      "reuse_execution_id": true
+    }
+  ]
+}

@@ -1,0 +1,1118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "vv-agent.worker-compatibility.v1"
+    },
+    "contract_version": {
+      "const": "41.0.0"
+    },
+    "status": {
+      "const": "contract-allocation-only"
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "producer_capture": {
+          "const": false,
+          "type": "boolean"
+        },
+        "capture": {
+          "const": "none",
+          "type": "string"
+        },
+        "adoption_evidence": {
+          "const": false,
+          "type": "boolean"
+        },
+        "note": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "producer_capture",
+        "capture",
+        "adoption_evidence",
+        "note"
+      ]
+    },
+    "allocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "bootstrap_source": {
+          "const": "trusted-session-creation",
+          "type": "string"
+        },
+        "tool_requirements": {
+          "const": "trusted-static-conservative-bound",
+          "type": "string"
+        },
+        "turn_started_requirements": {
+          "const": "compiled-definition-exact-visible-subset",
+          "type": "string"
+        },
+        "tool_supports": {
+          "const": "trusted-complete-catalog",
+          "type": "string"
+        },
+        "model_source": {
+          "const": "trusted-resolved-model-binding",
+          "type": "string"
+        },
+        "cache": {
+          "const": "format-floor-plus-active-turn-or-combined-idle-admission-order",
+          "type": "string"
+        },
+        "cache_verification": {
+          "const": "complete-proof-projection-then-locked-now-before-epoch",
+          "type": "string"
+        },
+        "w3_execution": {
+          "const": "feature-level-3-command-identity-and-authenticated-lookup",
+          "type": "string"
+        }
+      },
+      "required": [
+        "bootstrap_source",
+        "tool_requirements",
+        "turn_started_requirements",
+        "tool_supports",
+        "model_source",
+        "cache",
+        "cache_verification",
+        "w3_execution"
+      ]
+    },
+    "tagging": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "tool_fields": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "name",
+              "schema",
+              "metadata"
+            ]
+          },
+          "uniqueItems": true
+        },
+        "tool_identity": {
+          "const": "SHA256(JCS({name,schema,metadata}))",
+          "type": "string"
+        },
+        "model_fields": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "backend",
+              "model",
+              "context_length",
+              "max_output_tokens"
+            ]
+          },
+          "uniqueItems": true
+        },
+        "model_excluded_fields": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "endpoints",
+              "internal",
+              "route",
+              "credentials"
+            ]
+          },
+          "uniqueItems": true
+        },
+        "model_identity": {
+          "const": "SHA256(JCS({backend,model,context_length,max_output_tokens}))",
+          "type": "string"
+        },
+        "tool_prefix": {
+          "const": "tool:",
+          "type": "string"
+        },
+        "model_prefix": {
+          "const": "model:",
+          "type": "string"
+        }
+      },
+      "required": [
+        "tool_fields",
+        "tool_identity",
+        "model_fields",
+        "model_excluded_fields",
+        "model_identity",
+        "tool_prefix",
+        "model_prefix"
+      ]
+    },
+    "trusted_catalog": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "schema": {
+                "$ref": "#/$defs/ToolSchema"
+              },
+              "metadata": {
+                "type": "object"
+              },
+              "tag": {
+                "type": "string",
+                "pattern": "^tool:[0-9a-f]{64}$"
+              }
+            },
+            "required": [
+              "name",
+              "schema",
+              "metadata",
+              "tag"
+            ]
+          }
+        },
+        "models": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "identity": {
+                "$ref": "#/$defs/ModelIdentity"
+              },
+              "tag": {
+                "type": "string",
+                "pattern": "^model:[0-9a-f]{64}$"
+              }
+            },
+            "required": [
+              "identity",
+              "tag"
+            ]
+          }
+        }
+      },
+      "required": [
+        "tools",
+        "models"
+      ]
+    },
+    "cases": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "tool_visible_subset",
+              "tool_tag_mismatch",
+              "active_model_union",
+              "active_unsupported_model",
+              "active_supported_model",
+              "bootstrap_family",
+              "selection_handler_mismatch",
+              "cache_understatement"
+            ]
+          },
+          "phase": {
+            "type": "string",
+            "enum": [
+              "bootstrap",
+              "idle",
+              "active"
+            ]
+          },
+          "active_handler_version": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "input_handler_version": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "bootstrap_handler_version": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "active_requirements": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/SessionRequirements"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "input_requirements": {
+            "$ref": "#/$defs/SessionRequirements"
+          },
+          "supports": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
+          },
+          "cache_before": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RoutingCache"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "expected_cache": {
+            "$ref": "#/$defs/RoutingCache"
+          },
+          "expected_action": {
+            "type": "string",
+            "enum": [
+              "grant_lease",
+              "reject_unroutable",
+              "reject_publication",
+              "reject_ledger_integrity"
+            ]
+          },
+          "expected_compatible": {
+            "type": "boolean"
+          },
+          "content_hydrated": {
+            "type": "boolean"
+          },
+          "epoch_granted": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "kind",
+          "phase",
+          "active_handler_version",
+          "input_handler_version",
+          "bootstrap_handler_version",
+          "active_requirements",
+          "input_requirements",
+          "supports",
+          "cache_before",
+          "expected_cache",
+          "expected_action",
+          "expected_compatible",
+          "content_hydrated",
+          "epoch_granted"
+        ]
+      }
+    },
+    "admission_order_cases": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "queued_inputs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "input_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "user",
+                    "follow_up",
+                    "model_selection"
+                  ]
+                },
+                "input_seq": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "ready": {
+                  "type": "boolean"
+                },
+                "target_turn_id": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "requirements": {
+                  "$ref": "#/$defs/SessionRequirements"
+                }
+              },
+              "required": [
+                "input_id",
+                "kind",
+                "input_seq",
+                "ready",
+                "target_turn_id",
+                "requirements"
+              ]
+            }
+          },
+          "ready_pending_inputs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "input_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "user",
+                    "follow_up",
+                    "model_selection"
+                  ]
+                },
+                "input_seq": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "ready": {
+                  "type": "boolean"
+                },
+                "target_turn_id": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "requirements": {
+                  "$ref": "#/$defs/SessionRequirements"
+                }
+              },
+              "required": [
+                "input_id",
+                "kind",
+                "input_seq",
+                "ready",
+                "target_turn_id",
+                "requirements"
+              ]
+            }
+          },
+          "expected_apply_order": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "expected_turn_start_order": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "current_worker_supports": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
+          },
+          "expected_cache": {
+            "$ref": "#/$defs/RoutingCache"
+          },
+          "expected_worker_disposition": {
+            "type": "string",
+            "enum": [
+              "defer_to_compatible_worker"
+            ]
+          },
+          "content_hydrated": {
+            "const": false,
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "queued_inputs",
+          "ready_pending_inputs",
+          "expected_apply_order",
+          "expected_turn_start_order",
+          "current_worker_supports",
+          "expected_cache",
+          "expected_worker_disposition",
+          "content_hydrated"
+        ]
+      }
+    },
+    "format_floor_cases": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "boundary": {
+            "type": "string",
+            "enum": [
+              "turn_end_idle",
+              "idle_before_first_turn"
+            ]
+          },
+          "bootstrap_container_feature_level": {
+            "const": 2,
+            "type": "integer"
+          },
+          "stored_record_feature_levels": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "enum": [
+                1,
+                2
+              ]
+            },
+            "minItems": 1
+          },
+          "activated_inbox_feature_levels": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "enum": [
+                1,
+                2
+              ]
+            },
+            "uniqueItems": true
+          },
+          "bootstrap_requirements": {
+            "$ref": "#/$defs/SessionRequirements"
+          },
+          "current_routing_requirements": {
+            "$ref": "#/$defs/SessionRequirements"
+          },
+          "expected_cache": {
+            "$ref": "#/$defs/RoutingCache"
+          },
+          "level1_executor_accepted": {
+            "type": "boolean"
+          },
+          "level2_executor_accepted": {
+            "type": "boolean"
+          },
+          "level1_reader_accepted": {
+            "type": "boolean"
+          },
+          "level2_reader_without_execution_supports_accepted": {
+            "type": "boolean"
+          },
+          "content_hydrated": {
+            "const": false,
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "boundary",
+          "bootstrap_container_feature_level",
+          "stored_record_feature_levels",
+          "activated_inbox_feature_levels",
+          "bootstrap_requirements",
+          "current_routing_requirements",
+          "expected_cache",
+          "level1_executor_accepted",
+          "level2_executor_accepted",
+          "level1_reader_accepted",
+          "level2_reader_without_execution_supports_accepted",
+          "content_hydrated"
+        ]
+      }
+    },
+    "level_three_cases": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "session_bootstrap_feature_level": {
+            "const": 2,
+            "type": "integer"
+          },
+          "execution_record_feature_level": {
+            "const": 3,
+            "type": "integer"
+          },
+          "routing_requirements": {
+            "$ref": "#/$defs/SessionRequirements"
+          },
+          "expected_cache": {
+            "$ref": "#/$defs/RoutingCache"
+          },
+          "level2_worker_accepted": {
+            "const": false,
+            "type": "boolean"
+          },
+          "level3_worker_accepted": {
+            "const": true,
+            "type": "boolean"
+          },
+          "level2_reader_accepted": {
+            "const": false,
+            "type": "boolean"
+          },
+          "level3_reader_without_execution_supports_accepted": {
+            "const": true,
+            "type": "boolean"
+          },
+          "body_decoded": {
+            "const": false,
+            "type": "boolean"
+          },
+          "epoch_granted": {
+            "const": false,
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "session_bootstrap_feature_level",
+          "execution_record_feature_level",
+          "routing_requirements",
+          "expected_cache",
+          "level2_worker_accepted",
+          "level3_worker_accepted",
+          "level2_reader_accepted",
+          "level3_reader_without_execution_supports_accepted",
+          "body_decoded",
+          "epoch_granted"
+        ]
+      }
+    },
+    "capability_bound_cases": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "input_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "trusted_static_sources": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "handler",
+                "model",
+                "base-tools",
+                "dynamic-potential-tools",
+                "custom-factory-declaration"
+              ]
+            },
+            "uniqueItems": true
+          },
+          "pre_admission_requirements": {
+            "$ref": "#/$defs/SessionRequirements"
+          },
+          "actual_turn_started_requirements": {
+            "$ref": "#/$defs/SessionRequirements"
+          },
+          "pre_admission_work": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "compile_invocations": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "guardrail_invocations": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "instruction_resolution_invocations": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "context_provider_invocations": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "compile_invocations",
+              "guardrail_invocations",
+              "instruction_resolution_invocations",
+              "context_provider_invocations"
+            ]
+          },
+          "turn_start_work": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "compile_invocations": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "guardrail_invocations": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "instruction_resolution_invocations": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "context_provider_invocations": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "compile_invocations",
+              "guardrail_invocations",
+              "instruction_resolution_invocations",
+              "context_provider_invocations"
+            ]
+          },
+          "expected_capability_relation": {
+            "type": "string",
+            "enum": [
+              "subset",
+              "exceeds"
+            ]
+          },
+          "expected_action": {
+            "type": "string",
+            "enum": [
+              "route_after_turn_start",
+              "fail_unsatisfiable_bound_configuration"
+            ]
+          },
+          "dispatch_started": {
+            "type": "boolean"
+          },
+          "terminal_recorded": {
+            "type": "boolean"
+          },
+          "input_bytes_mutated": {
+            "type": "boolean"
+          },
+          "opaque_content_used_as_control": {
+            "type": "boolean"
+          },
+          "bound_failure": {
+            "anyOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "configuration_error_exposed": {
+                    "type": "boolean"
+                  },
+                  "input_already_queued": {
+                    "type": "boolean"
+                  },
+                  "safe_discard_available": {
+                    "type": "boolean"
+                  },
+                  "requires_new_session": {
+                    "type": "boolean"
+                  },
+                  "replacement_input_published": {
+                    "type": "boolean"
+                  },
+                  "cancel_or_supersede_protocol_added": {
+                    "type": "boolean"
+                  },
+                  "automatic_retry_started": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "configuration_error_exposed",
+                  "input_already_queued",
+                  "safe_discard_available",
+                  "requires_new_session",
+                  "replacement_input_published",
+                  "cancel_or_supersede_protocol_added",
+                  "automatic_retry_started"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "input_id",
+          "trusted_static_sources",
+          "pre_admission_requirements",
+          "actual_turn_started_requirements",
+          "pre_admission_work",
+          "turn_start_work",
+          "expected_capability_relation",
+          "expected_action",
+          "dispatch_started",
+          "terminal_recorded",
+          "input_bytes_mutated",
+          "opaque_content_used_as_control",
+          "bound_failure"
+        ]
+      }
+    },
+    "model_tag_cases": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "bindings": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "purpose": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "binding": {
+                  "$ref": "#/$defs/ModelBindingForTag"
+                }
+              },
+              "required": [
+                "purpose",
+                "binding"
+              ]
+            }
+          },
+          "expected_tags": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^model:[0-9a-f]{64}$"
+            }
+          }
+        },
+        "required": [
+          "name",
+          "bindings",
+          "expected_tags"
+        ]
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "contract_version",
+    "status",
+    "provenance",
+    "allocation",
+    "tagging",
+    "trusted_catalog",
+    "cases",
+    "admission_order_cases",
+    "format_floor_cases",
+    "level_three_cases",
+    "capability_bound_cases",
+    "model_tag_cases"
+  ],
+  "$defs": {
+    "SessionRequirements": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "level": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "handler_version": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "level",
+        "handler_version",
+        "capabilities"
+      ]
+    },
+    "RoutingCache": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "level": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "handler_version": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "required_capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        },
+        "active_turn_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "level",
+        "handler_version",
+        "required_capabilities",
+        "active_turn_id"
+      ]
+    },
+    "ToolSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "function",
+          "type": "string"
+        },
+        "function": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": {
+              "type": "string",
+              "minLength": 1
+            },
+            "parameters": {
+              "type": "object"
+            },
+            "strict": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "name",
+            "description",
+            "parameters",
+            "strict"
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "function"
+      ]
+    },
+    "ModelIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "backend": {
+          "type": "string",
+          "minLength": 1
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "context_length": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "max_output_tokens": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "backend",
+        "model",
+        "context_length",
+        "max_output_tokens"
+      ]
+    },
+    "ModelBindingForTag": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "backend": {
+          "type": "string",
+          "minLength": 1
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "context_length": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "max_output_tokens": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "endpoints": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "backend",
+        "model",
+        "context_length",
+        "max_output_tokens",
+        "endpoints"
+      ]
+    }
+  }
+}
