@@ -244,6 +244,26 @@
     "schema_version": "vv-agent.after-cycle-control.v1",
     "survives_session_resume": true
   },
+  "persistence": {
+    "error_slot": "ContentRef",
+    "error_template": "{original_code}: {message}",
+    "generic_host_code": "host_stop",
+    "host_defined_example": {
+      "hook_code": "host.private_policy",
+      "hook_message": "Private host policy details remain diagnosable.",
+      "persisted_error": "host.private_policy: Private host policy details remain diagnosable.",
+      "persisted_stop_code": "host_stop"
+    },
+    "raw_host_code_in_stop_code": false,
+    "registered_code_persistence": "unchanged",
+    "registered_stop_codes": [
+      "host.policy_stop",
+      "host_stop",
+      "hook_stop",
+      "stopped"
+    ],
+    "stop_message_slot": "ContentRef"
+  },
   "runner_cases": [
     {
       "cycles": [
@@ -568,7 +588,7 @@
       }
     }
   ],
-  "schema_version": "vv-agent.after-cycle-hook.v2",
+  "schema_version": "vv-agent.after-cycle-hook.v3",
   "snapshot": {
     "copy_semantics": "hook_mutation_cannot_mutate_runtime_messages_cycle_or_shared_state",
     "cumulative_token_usage": {

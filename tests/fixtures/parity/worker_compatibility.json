@@ -1,0 +1,929 @@
+{
+  "schema_version": "vv-agent.worker-compatibility.v1",
+  "contract_version": "41.0.0",
+  "status": "contract-allocation-only",
+  "provenance": {
+    "producer_capture": false,
+    "capture": "none",
+    "adoption_evidence": false,
+    "note": "Synthetic allocation cases only; the Python producer capture is pending and these cases do not count as implementation adoption."
+  },
+  "allocation": {
+    "bootstrap_source": "trusted-session-creation",
+    "tool_requirements": "trusted-static-conservative-bound",
+    "turn_started_requirements": "compiled-definition-exact-visible-subset",
+    "tool_supports": "trusted-complete-catalog",
+    "model_source": "trusted-resolved-model-binding",
+    "cache": "format-floor-plus-active-turn-or-combined-idle-admission-order",
+    "cache_verification": "complete-proof-projection-then-locked-now-before-epoch",
+    "w3_execution": "feature-level-3-command-identity-and-authenticated-lookup"
+  },
+  "tagging": {
+    "tool_fields": [
+      "name",
+      "schema",
+      "metadata"
+    ],
+    "tool_identity": "SHA256(JCS({name,schema,metadata}))",
+    "model_identity": "SHA256(JCS({backend,model,context_length,max_output_tokens}))",
+    "tool_prefix": "tool:",
+    "model_prefix": "model:",
+    "model_fields": [
+      "backend",
+      "model",
+      "context_length",
+      "max_output_tokens"
+    ],
+    "model_excluded_fields": [
+      "endpoints",
+      "internal",
+      "route",
+      "credentials"
+    ]
+  },
+  "trusted_catalog": {
+    "tools": [
+      {
+        "name": "x",
+        "schema": {
+          "type": "function",
+          "function": {
+            "name": "x",
+            "description": "Read one query result.",
+            "parameters": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "query": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "query"
+              ]
+            },
+            "strict": true
+          }
+        },
+        "metadata": {
+          "side_effect": "read",
+          "idempotency": "supported",
+          "terminal": false,
+          "result_retention": "archive",
+          "capability_tags": [
+            "read"
+          ],
+          "cost_dimensions": []
+        },
+        "tag": "tool:7a6d12a4fba729cddaedb154b126c4f1be55e7d25221f59cb5e3eb4a04fb8bde"
+      },
+      {
+        "name": "x",
+        "schema": {
+          "type": "function",
+          "function": {
+            "name": "x",
+            "description": "Read one query result.",
+            "parameters": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "query": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "query"
+              ]
+            },
+            "strict": true
+          }
+        },
+        "metadata": {
+          "side_effect": "network",
+          "idempotency": "supported",
+          "terminal": false,
+          "result_retention": "archive",
+          "capability_tags": [
+            "read"
+          ],
+          "cost_dimensions": []
+        },
+        "tag": "tool:96ccd4a2fdb0cb55e82888f3c4e09f49a67ac87114ab81413544b1ca8bfc2d49"
+      },
+      {
+        "name": "y",
+        "schema": {
+          "type": "function",
+          "function": {
+            "name": "y",
+            "description": "Read one workspace path.",
+            "parameters": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "path": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path"
+              ]
+            },
+            "strict": true
+          }
+        },
+        "metadata": {},
+        "tag": "tool:8ed1725114261ed264b3eb6c277a3b62a9c38464360ef3e0ee4e1d558c46679f"
+      },
+      {
+        "name": "z",
+        "schema": {
+          "type": "function",
+          "function": {
+            "name": "z",
+            "description": "Run a zero-argument probe.",
+            "parameters": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {},
+              "required": []
+            },
+            "strict": true
+          }
+        },
+        "metadata": {},
+        "tag": "tool:d99977aa8413892d06a3fa50eced292c110fddf6fc47c114ef9b6e90ef58cc3e"
+      }
+    ],
+    "models": [
+      {
+        "identity": {
+          "backend": "demo",
+          "model": "model-a",
+          "context_length": 8192,
+          "max_output_tokens": 2048
+        },
+        "tag": "model:de3fbafa21b50ba6dc277435acda3e8c203fc229cf309ea0efc071c8e77ea73a"
+      },
+      {
+        "identity": {
+          "backend": "demo",
+          "model": "model-b",
+          "context_length": null,
+          "max_output_tokens": null
+        },
+        "tag": "model:408f4351a22e68ac299d430eb97b20efc22e13b3ca873950faccd34ebcaade81"
+      }
+    ]
+  },
+  "cases": [
+    {
+      "name": "visible_subset_with_complete_catalog_superset",
+      "kind": "tool_visible_subset",
+      "phase": "idle",
+      "active_handler_version": null,
+      "input_handler_version": "handler-h1",
+      "bootstrap_handler_version": null,
+      "active_requirements": null,
+      "input_requirements": {
+        "level": 2,
+        "handler_version": "handler-h1",
+        "capabilities": [
+          "tool:7a6d12a4fba729cddaedb154b126c4f1be55e7d25221f59cb5e3eb4a04fb8bde",
+          "tool:8ed1725114261ed264b3eb6c277a3b62a9c38464360ef3e0ee4e1d558c46679f"
+        ]
+      },
+      "supports": [
+        "tool:7a6d12a4fba729cddaedb154b126c4f1be55e7d25221f59cb5e3eb4a04fb8bde",
+        "tool:8ed1725114261ed264b3eb6c277a3b62a9c38464360ef3e0ee4e1d558c46679f",
+        "tool:d99977aa8413892d06a3fa50eced292c110fddf6fc47c114ef9b6e90ef58cc3e"
+      ],
+      "cache_before": null,
+      "expected_cache": {
+        "level": 2,
+        "handler_version": "handler-h1",
+        "required_capabilities": [
+          "tool:7a6d12a4fba729cddaedb154b126c4f1be55e7d25221f59cb5e3eb4a04fb8bde",
+          "tool:8ed1725114261ed264b3eb6c277a3b62a9c38464360ef3e0ee4e1d558c46679f"
+        ],
+        "active_turn_id": null
+      },
+      "expected_action": "grant_lease",
+      "expected_compatible": true,
+      "content_hydrated": false,
+      "epoch_granted": true
+    },
+    {
+      "name": "tool_schema_or_metadata_mismatch",
+      "kind": "tool_tag_mismatch",
+      "phase": "idle",
+      "active_handler_version": null,
+      "input_handler_version": "handler-h1",
+      "bootstrap_handler_version": null,
+      "active_requirements": null,
+      "input_requirements": {
+        "level": 2,
+        "handler_version": "handler-h1",
+        "capabilities": [
+          "tool:7a6d12a4fba729cddaedb154b126c4f1be55e7d25221f59cb5e3eb4a04fb8bde"
+        ]
+      },
+      "supports": [
+        "tool:96ccd4a2fdb0cb55e82888f3c4e09f49a67ac87114ab81413544b1ca8bfc2d49"
+      ],
+      "cache_before": null,
+      "expected_cache": {
+        "level": 2,
+        "handler_version": "handler-h1",
+        "required_capabilities": [
+          "tool:7a6d12a4fba729cddaedb154b126c4f1be55e7d25221f59cb5e3eb4a04fb8bde"
+        ],
+        "active_turn_id": null
+      },
+      "expected_action": "reject_unroutable",
+      "expected_compatible": false,
+      "content_hydrated": false,
+      "epoch_granted": false
+    },
+    {
+      "name": "active_model_union_retains_old_model",
+      "kind": "active_model_union",
+      "phase": "active",
+      "active_handler_version": "handler-h1",
+      "input_handler_version": "handler-h1",
+      "bootstrap_handler_version": null,
+      "active_requirements": {
+        "level": 2,
+        "handler_version": "handler-h1",
+        "capabilities": [
+          "model:de3fbafa21b50ba6dc277435acda3e8c203fc229cf309ea0efc071c8e77ea73a"
+        ]
+      },
+      "input_requirements": {
+        "level": 2,
+        "handler_version": "handler-h1",
+        "capabilities": [
+          "model:408f4351a22e68ac299d430eb97b20efc22e13b3ca873950faccd34ebcaade81"
+        ]
+      },
+      "supports": [
+        "model:408f4351a22e68ac299d430eb97b20efc22e13b3ca873950faccd34ebcaade81",
+        "model:de3fbafa21b50ba6dc277435acda3e8c203fc229cf309ea0efc071c8e77ea73a"
+      ],
+      "cache_before": {
+        "level": 2,
+        "handler_version": "handler-h1",
+        "required_capabilities": [
+          "model:de3fbafa21b50ba6dc277435acda3e8c203fc229cf309ea0efc071c8e77ea73a"
+        ],
+        "active_turn_id": "turn-active"
+      },
+      "expected_cache": {
+        "level": 2,
+        "handler_version": "handler-h1",
+        "required_capabilities": [
+          "model:408f4351a22e68ac299d430eb97b20efc22e13b3ca873950faccd34ebcaade81",
+          "model:de3fbafa21b50ba6dc277435acda3e8c203fc229cf309ea0efc071c8e77ea73a"
+        ],
+        "active_turn_id": "turn-active"
+      },
+      "expected_action": "grant_lease",
+      "expected_compatible": true,
+      "content_hydrated": false,
+      "epoch_granted": true
+    },
+    {
+      "name": "old_model_only_worker_excluded_after_selection",
+      "kind": "active_unsupported_model",
+      "phase": "active",
+      "active_handler_version": "handler-h1",
+      "input_handler_version": "handler-h1",
+      "bootstrap_handler_version": null,
+      "active_requirements": {
+        "level": 2,
+        "handler_version": "handler-h1",
+        "capabilities": [
+          "model:de3fbafa21b50ba6dc277435acda3e8c203fc229cf309ea0efc071c8e77ea73a"
+        ]
+      },
+      "input_requirements": {
+        "level": 2,
+        "handler_version": "handler-h1",
+        "capabilities": [
+          "model:408f4351a22e68ac299d430eb97b20efc22e13b3ca873950faccd34ebcaade81"
+        ]
+      },
+      "supports": [
+        "model:de3fbafa21b50ba6dc277435acda3e8c203fc229cf309ea0efc071c8e77ea73a"
+      ],
+      "cache_before": {
+        "level": 2,
+        "handler_version": "handler-h1",
+        "required_capabilities": [
+          "model:de3fbafa21b50ba6dc277435acda3e8c203fc229cf309ea0efc071c8e77ea73a"
+        ],
+        "active_turn_id": "turn-active"
+      },
+      "expected_cache": {
+        "level": 2,
+        "handler_version": "handler-h1",
+        "required_capabilities": [
+          "model:408f4351a22e68ac299d430eb97b20efc22e13b3ca873950faccd34ebcaade81",
+          "model:de3fbafa21b50ba6dc277435acda3e8c203fc229cf309ea0efc071c8e77ea73a"
+        ],
+        "active_turn_id": "turn-active"
+      },
+      "expected_action": "reject_unroutable",
+      "expected_compatible": false,
+      "content_hydrated": false,
+      "epoch_granted": false
+    },
+    {
+      "name": "old_and_new_model_worker_continues_active_batch",
+      "kind": "active_supported_model",
+      "phase": "active",
+      "active_handler_version": "handler-h1",
+      "input_handler_version": "handler-h1",
+      "bootstrap_handler_version": null,
+      "active_requirements": {
+        "level": 2,
+        "handler_version": "handler-h1",
+        "capabilities": [
+          "model:de3fbafa21b50ba6dc277435acda3e8c203fc229cf309ea0efc071c8e77ea73a"
+        ]
+      },
+      "input_requirements": {
+        "level": 2,
+        "handler_version": "handler-h1",
+        "capabilities": [
+          "model:408f4351a22e68ac299d430eb97b20efc22e13b3ca873950faccd34ebcaade81"
+        ]
+      },
+      "supports": [
+        "model:408f4351a22e68ac299d430eb97b20efc22e13b3ca873950faccd34ebcaade81",
+        "model:de3fbafa21b50ba6dc277435acda3e8c203fc229cf309ea0efc071c8e77ea73a"
+      ],
+      "cache_before": {
+        "level": 2,
+        "handler_version": "handler-h1",
+        "required_capabilities": [
+          "model:de3fbafa21b50ba6dc277435acda3e8c203fc229cf309ea0efc071c8e77ea73a"
+        ],
+        "active_turn_id": "turn-active"
+      },
+      "expected_cache": {
+        "level": 2,
+        "handler_version": "handler-h1",
+        "required_capabilities": [
+          "model:408f4351a22e68ac299d430eb97b20efc22e13b3ca873950faccd34ebcaade81",
+          "model:de3fbafa21b50ba6dc277435acda3e8c203fc229cf309ea0efc071c8e77ea73a"
+        ],
+        "active_turn_id": "turn-active"
+      },
+      "expected_action": "grant_lease",
+      "expected_compatible": true,
+      "content_hydrated": false,
+      "epoch_granted": true
+    },
+    {
+      "name": "null_bootstrap_handler_requires_explicit_family",
+      "kind": "bootstrap_family",
+      "phase": "bootstrap",
+      "active_handler_version": null,
+      "input_handler_version": null,
+      "bootstrap_handler_version": null,
+      "active_requirements": null,
+      "input_requirements": {
+        "level": 2,
+        "handler_version": null,
+        "capabilities": [
+          "handler-family:demo"
+        ]
+      },
+      "supports": [
+        "handler-family:demo"
+      ],
+      "cache_before": null,
+      "expected_cache": {
+        "level": 2,
+        "handler_version": null,
+        "required_capabilities": [
+          "handler-family:demo"
+        ],
+        "active_turn_id": null
+      },
+      "expected_action": "grant_lease",
+      "expected_compatible": true,
+      "content_hydrated": false,
+      "epoch_granted": true
+    },
+    {
+      "name": "model_selection_handler_mismatch_rejected_at_publication",
+      "kind": "selection_handler_mismatch",
+      "phase": "active",
+      "active_handler_version": "handler-h1",
+      "input_handler_version": "handler-h2",
+      "bootstrap_handler_version": null,
+      "active_requirements": {
+        "level": 2,
+        "handler_version": "handler-h1",
+        "capabilities": [
+          "model:de3fbafa21b50ba6dc277435acda3e8c203fc229cf309ea0efc071c8e77ea73a"
+        ]
+      },
+      "input_requirements": {
+        "level": 2,
+        "handler_version": "handler-h2",
+        "capabilities": [
+          "model:408f4351a22e68ac299d430eb97b20efc22e13b3ca873950faccd34ebcaade81"
+        ]
+      },
+      "supports": [
+        "model:408f4351a22e68ac299d430eb97b20efc22e13b3ca873950faccd34ebcaade81",
+        "model:de3fbafa21b50ba6dc277435acda3e8c203fc229cf309ea0efc071c8e77ea73a"
+      ],
+      "cache_before": {
+        "level": 2,
+        "handler_version": "handler-h1",
+        "required_capabilities": [
+          "model:de3fbafa21b50ba6dc277435acda3e8c203fc229cf309ea0efc071c8e77ea73a"
+        ],
+        "active_turn_id": "turn-active"
+      },
+      "expected_cache": {
+        "level": 2,
+        "handler_version": "handler-h1",
+        "required_capabilities": [
+          "model:de3fbafa21b50ba6dc277435acda3e8c203fc229cf309ea0efc071c8e77ea73a"
+        ],
+        "active_turn_id": "turn-active"
+      },
+      "expected_action": "reject_publication",
+      "expected_compatible": false,
+      "content_hydrated": false,
+      "epoch_granted": false
+    },
+    {
+      "name": "understated_cache_rejected_before_epoch_grant",
+      "kind": "cache_understatement",
+      "phase": "active",
+      "active_handler_version": "handler-h1",
+      "input_handler_version": "handler-h1",
+      "bootstrap_handler_version": null,
+      "active_requirements": {
+        "level": 2,
+        "handler_version": "handler-h1",
+        "capabilities": [
+          "model:de3fbafa21b50ba6dc277435acda3e8c203fc229cf309ea0efc071c8e77ea73a"
+        ]
+      },
+      "input_requirements": {
+        "level": 2,
+        "handler_version": "handler-h1",
+        "capabilities": [
+          "model:408f4351a22e68ac299d430eb97b20efc22e13b3ca873950faccd34ebcaade81"
+        ]
+      },
+      "supports": [
+        "model:408f4351a22e68ac299d430eb97b20efc22e13b3ca873950faccd34ebcaade81",
+        "model:de3fbafa21b50ba6dc277435acda3e8c203fc229cf309ea0efc071c8e77ea73a"
+      ],
+      "cache_before": {
+        "level": 2,
+        "handler_version": "handler-h1",
+        "required_capabilities": [
+          "model:de3fbafa21b50ba6dc277435acda3e8c203fc229cf309ea0efc071c8e77ea73a"
+        ],
+        "active_turn_id": "turn-active"
+      },
+      "expected_cache": {
+        "level": 2,
+        "handler_version": "handler-h1",
+        "required_capabilities": [
+          "model:408f4351a22e68ac299d430eb97b20efc22e13b3ca873950faccd34ebcaade81",
+          "model:de3fbafa21b50ba6dc277435acda3e8c203fc229cf309ea0efc071c8e77ea73a"
+        ],
+        "active_turn_id": "turn-active"
+      },
+      "expected_action": "reject_ledger_integrity",
+      "expected_compatible": true,
+      "content_hydrated": false,
+      "epoch_granted": false
+    }
+  ],
+  "admission_order_cases": [
+    {
+      "name": "later_ready_user_precedes_existing_queued_follow_up",
+      "queued_inputs": [
+        {
+          "input_id": "follow-up-h2",
+          "kind": "follow_up",
+          "input_seq": 1,
+          "ready": true,
+          "target_turn_id": null,
+          "requirements": {
+            "level": 2,
+            "handler_version": "handler-h2",
+            "capabilities": [
+              "tool:7a6d12a4fba729cddaedb154b126c4f1be55e7d25221f59cb5e3eb4a04fb8bde"
+            ]
+          }
+        }
+      ],
+      "ready_pending_inputs": [
+        {
+          "input_id": "user-h3",
+          "kind": "user",
+          "input_seq": 2,
+          "ready": true,
+          "target_turn_id": null,
+          "requirements": {
+            "level": 2,
+            "handler_version": "handler-h3",
+            "capabilities": [
+              "tool:7a6d12a4fba729cddaedb154b126c4f1be55e7d25221f59cb5e3eb4a04fb8bde",
+              "tool:8ed1725114261ed264b3eb6c277a3b62a9c38464360ef3e0ee4e1d558c46679f"
+            ]
+          }
+        }
+      ],
+      "expected_apply_order": [
+        "user-h3"
+      ],
+      "expected_turn_start_order": [
+        "user-h3",
+        "follow-up-h2"
+      ],
+      "current_worker_supports": [
+        "tool:7a6d12a4fba729cddaedb154b126c4f1be55e7d25221f59cb5e3eb4a04fb8bde"
+      ],
+      "expected_cache": {
+        "level": 2,
+        "handler_version": "handler-h3",
+        "required_capabilities": [
+          "tool:7a6d12a4fba729cddaedb154b126c4f1be55e7d25221f59cb5e3eb4a04fb8bde",
+          "tool:8ed1725114261ed264b3eb6c277a3b62a9c38464360ef3e0ee4e1d558c46679f"
+        ],
+        "active_turn_id": null
+      },
+      "expected_worker_disposition": "defer_to_compatible_worker",
+      "content_hydrated": false
+    }
+  ],
+  "format_floor_cases": [
+    {
+      "name": "l2_bootstrap_inner_level_one_preserves_format_floor_after_turn_end",
+      "boundary": "turn_end_idle",
+      "bootstrap_container_feature_level": 2,
+      "stored_record_feature_levels": [
+        2,
+        1,
+        1
+      ],
+      "activated_inbox_feature_levels": [
+        2
+      ],
+      "bootstrap_requirements": {
+        "level": 1,
+        "handler_version": "handler-h1",
+        "capabilities": []
+      },
+      "current_routing_requirements": {
+        "level": 1,
+        "handler_version": "handler-h1",
+        "capabilities": []
+      },
+      "expected_cache": {
+        "level": 2,
+        "handler_version": "handler-h1",
+        "required_capabilities": [],
+        "active_turn_id": null
+      },
+      "level1_executor_accepted": false,
+      "level2_executor_accepted": true,
+      "level1_reader_accepted": false,
+      "level2_reader_without_execution_supports_accepted": true,
+      "content_hydrated": false
+    },
+    {
+      "name": "l2_bootstrap_with_level_one_user_keeps_format_and_bootstrap_routing",
+      "boundary": "idle_before_first_turn",
+      "bootstrap_container_feature_level": 2,
+      "stored_record_feature_levels": [
+        2
+      ],
+      "activated_inbox_feature_levels": [
+        1
+      ],
+      "bootstrap_requirements": {
+        "level": 2,
+        "handler_version": "handler-h2",
+        "capabilities": [
+          "tool:7a6d12a4fba729cddaedb154b126c4f1be55e7d25221f59cb5e3eb4a04fb8bde"
+        ]
+      },
+      "current_routing_requirements": {
+        "level": 2,
+        "handler_version": "handler-h2",
+        "capabilities": [
+          "tool:7a6d12a4fba729cddaedb154b126c4f1be55e7d25221f59cb5e3eb4a04fb8bde"
+        ]
+      },
+      "expected_cache": {
+        "level": 2,
+        "handler_version": "handler-h2",
+        "required_capabilities": [
+          "tool:7a6d12a4fba729cddaedb154b126c4f1be55e7d25221f59cb5e3eb4a04fb8bde"
+        ],
+        "active_turn_id": null
+      },
+      "level1_executor_accepted": false,
+      "level2_executor_accepted": true,
+      "level1_reader_accepted": false,
+      "level2_reader_without_execution_supports_accepted": true,
+      "content_hydrated": false
+    },
+    {
+      "name": "unconsumed_future_l2_input_contributes_format_floor_not_ready_route",
+      "boundary": "idle_before_first_turn",
+      "bootstrap_container_feature_level": 2,
+      "stored_record_feature_levels": [
+        2
+      ],
+      "activated_inbox_feature_levels": [
+        2
+      ],
+      "bootstrap_requirements": {
+        "level": 1,
+        "handler_version": "handler-h1",
+        "capabilities": []
+      },
+      "current_routing_requirements": {
+        "level": 1,
+        "handler_version": "handler-h1",
+        "capabilities": []
+      },
+      "expected_cache": {
+        "level": 2,
+        "handler_version": "handler-h1",
+        "required_capabilities": [],
+        "active_turn_id": null
+      },
+      "level1_executor_accepted": false,
+      "level2_executor_accepted": true,
+      "level1_reader_accepted": false,
+      "level2_reader_without_execution_supports_accepted": true,
+      "content_hydrated": false
+    }
+  ],
+  "level_three_cases": [
+    {
+      "name": "level_two_worker_never_claims_level_three_execution_record",
+      "session_bootstrap_feature_level": 2,
+      "execution_record_feature_level": 3,
+      "routing_requirements": {
+        "level": 3,
+        "handler_version": "handler-h3",
+        "capabilities": [
+          "env:remote"
+        ]
+      },
+      "expected_cache": {
+        "level": 3,
+        "handler_version": "handler-h3",
+        "required_capabilities": [
+          "env:remote"
+        ],
+        "active_turn_id": null
+      },
+      "level2_worker_accepted": false,
+      "level3_worker_accepted": true,
+      "level2_reader_accepted": false,
+      "level3_reader_without_execution_supports_accepted": true,
+      "body_decoded": false,
+      "epoch_granted": false
+    }
+  ],
+  "capability_bound_cases": [
+    {
+      "name": "static_bound_allows_unused_candidate_without_precompile",
+      "input_id": "user-bound-ok",
+      "trusted_static_sources": [
+        "base-tools",
+        "custom-factory-declaration",
+        "dynamic-potential-tools",
+        "handler",
+        "model"
+      ],
+      "pre_admission_requirements": {
+        "level": 2,
+        "handler_version": "handler-h1",
+        "capabilities": [
+          "tool:7a6d12a4fba729cddaedb154b126c4f1be55e7d25221f59cb5e3eb4a04fb8bde",
+          "tool:8ed1725114261ed264b3eb6c277a3b62a9c38464360ef3e0ee4e1d558c46679f"
+        ]
+      },
+      "actual_turn_started_requirements": {
+        "level": 2,
+        "handler_version": "handler-h1",
+        "capabilities": [
+          "tool:7a6d12a4fba729cddaedb154b126c4f1be55e7d25221f59cb5e3eb4a04fb8bde"
+        ]
+      },
+      "pre_admission_work": {
+        "compile_invocations": 0,
+        "guardrail_invocations": 0,
+        "instruction_resolution_invocations": 0,
+        "context_provider_invocations": 0
+      },
+      "turn_start_work": {
+        "compile_invocations": 1,
+        "guardrail_invocations": 1,
+        "instruction_resolution_invocations": 1,
+        "context_provider_invocations": 1
+      },
+      "expected_capability_relation": "subset",
+      "expected_action": "route_after_turn_start",
+      "dispatch_started": true,
+      "terminal_recorded": false,
+      "input_bytes_mutated": false,
+      "opaque_content_used_as_control": false,
+      "bound_failure": null
+    },
+    {
+      "name": "actual_exceeds_static_bound_fails_configuration",
+      "input_id": "user-bound-overflow",
+      "trusted_static_sources": [
+        "base-tools",
+        "custom-factory-declaration",
+        "dynamic-potential-tools",
+        "handler",
+        "model"
+      ],
+      "pre_admission_requirements": {
+        "level": 2,
+        "handler_version": "handler-h1",
+        "capabilities": [
+          "tool:7a6d12a4fba729cddaedb154b126c4f1be55e7d25221f59cb5e3eb4a04fb8bde",
+          "tool:8ed1725114261ed264b3eb6c277a3b62a9c38464360ef3e0ee4e1d558c46679f"
+        ]
+      },
+      "actual_turn_started_requirements": {
+        "level": 2,
+        "handler_version": "handler-h1",
+        "capabilities": [
+          "tool:7a6d12a4fba729cddaedb154b126c4f1be55e7d25221f59cb5e3eb4a04fb8bde",
+          "tool:d99977aa8413892d06a3fa50eced292c110fddf6fc47c114ef9b6e90ef58cc3e"
+        ]
+      },
+      "pre_admission_work": {
+        "compile_invocations": 0,
+        "guardrail_invocations": 0,
+        "instruction_resolution_invocations": 0,
+        "context_provider_invocations": 0
+      },
+      "turn_start_work": {
+        "compile_invocations": 1,
+        "guardrail_invocations": 1,
+        "instruction_resolution_invocations": 1,
+        "context_provider_invocations": 1
+      },
+      "expected_capability_relation": "exceeds",
+      "expected_action": "fail_unsatisfiable_bound_configuration",
+      "dispatch_started": false,
+      "terminal_recorded": false,
+      "input_bytes_mutated": false,
+      "opaque_content_used_as_control": false,
+      "bound_failure": {
+        "configuration_error_exposed": true,
+        "input_already_queued": true,
+        "safe_discard_available": false,
+        "requires_new_session": true,
+        "replacement_input_published": false,
+        "cancel_or_supersede_protocol_added": false,
+        "automatic_retry_started": false
+      }
+    }
+  ],
+  "model_tag_cases": [
+    {
+      "name": "endpoint_order_does_not_change_tag",
+      "bindings": [
+        {
+          "purpose": "primary_endpoint_order_1",
+          "binding": {
+            "backend": "demo",
+            "model": "model-a",
+            "context_length": 8192,
+            "max_output_tokens": 2048,
+            "endpoints": [
+              "endpoint-a",
+              "endpoint-b"
+            ]
+          }
+        },
+        {
+          "purpose": "primary_endpoint_order_2",
+          "binding": {
+            "backend": "demo",
+            "model": "model-a",
+            "context_length": 8192,
+            "max_output_tokens": 2048,
+            "endpoints": [
+              "endpoint-b",
+              "endpoint-a"
+            ]
+          }
+        }
+      ],
+      "expected_tags": [
+        "model:de3fbafa21b50ba6dc277435acda3e8c203fc229cf309ea0efc071c8e77ea73a",
+        "model:de3fbafa21b50ba6dc277435acda3e8c203fc229cf309ea0efc071c8e77ea73a"
+      ]
+    },
+    {
+      "name": "capacity_change_changes_tag",
+      "bindings": [
+        {
+          "purpose": "primary",
+          "binding": {
+            "backend": "demo",
+            "model": "model-a",
+            "context_length": 8192,
+            "max_output_tokens": 2048,
+            "endpoints": [
+              "endpoint-a",
+              "endpoint-b"
+            ]
+          }
+        },
+        {
+          "purpose": "capacity_changed",
+          "binding": {
+            "backend": "demo",
+            "model": "model-a",
+            "context_length": 16384,
+            "max_output_tokens": 2048,
+            "endpoints": [
+              "endpoint-a",
+              "endpoint-b"
+            ]
+          }
+        }
+      ],
+      "expected_tags": [
+        "model:de3fbafa21b50ba6dc277435acda3e8c203fc229cf309ea0efc071c8e77ea73a",
+        "model:e9bdc89104e6b8c1fe5a54edec7594497eb572afe9fe5a1883bb8ef52fa4ae12"
+      ]
+    },
+    {
+      "name": "internal_reuse_emits_unique_atomic_tags",
+      "bindings": [
+        {
+          "purpose": "primary",
+          "binding": {
+            "backend": "demo",
+            "model": "model-a",
+            "context_length": 8192,
+            "max_output_tokens": 2048,
+            "endpoints": [
+              "endpoint-a",
+              "endpoint-b"
+            ]
+          }
+        },
+        {
+          "purpose": "internal.memory",
+          "binding": {
+            "backend": "demo",
+            "model": "model-a",
+            "context_length": 8192,
+            "max_output_tokens": 2048,
+            "endpoints": [
+              "endpoint-b",
+              "endpoint-a"
+            ]
+          }
+        },
+        {
+          "purpose": "internal.summary",
+          "binding": {
+            "backend": "demo",
+            "model": "model-b",
+            "context_length": null,
+            "max_output_tokens": null,
+            "endpoints": [
+              "endpoint-b"
+            ]
+          }
+        }
+      ],
+      "expected_tags": [
+        "model:de3fbafa21b50ba6dc277435acda3e8c203fc229cf309ea0efc071c8e77ea73a",
+        "model:de3fbafa21b50ba6dc277435acda3e8c203fc229cf309ea0efc071c8e77ea73a",
+        "model:408f4351a22e68ac299d430eb97b20efc22e13b3ca873950faccd34ebcaade81"
+      ]
+    }
+  ]
+}

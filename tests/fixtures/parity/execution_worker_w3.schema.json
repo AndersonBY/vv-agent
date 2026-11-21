@@ -1,0 +1,1717 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "vv-agent.execution-worker-w3.v1"
+    },
+    "contract_version": {
+      "const": "41.0.0"
+    },
+    "status": {
+      "const": "contract-allocation-only"
+    },
+    "feature_level": {
+      "const": 3,
+      "type": "integer"
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "producer_capture": {
+          "const": false,
+          "type": "boolean"
+        },
+        "capture": {
+          "const": "none",
+          "type": "string"
+        },
+        "adoption_evidence": {
+          "const": false,
+          "type": "boolean"
+        },
+        "note": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "producer_capture",
+        "capture",
+        "adoption_evidence",
+        "note"
+      ]
+    },
+    "framing": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "execution_id": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "domain": {
+              "const": "vv-agent/S1/execution-identity"
+            },
+            "framing_version": {
+              "const": 1,
+              "type": "integer"
+            },
+            "preimage_fields": {
+              "const": [
+                "domain",
+                "framing_version",
+                "operation_key",
+                "tenant_id",
+                "environment_id"
+              ]
+            },
+            "canonicalization": {
+              "const": "RFC8785_JCS"
+            },
+            "preimage": {
+              "const": "JCS({domain,framing_version,operation_key,tenant_id,environment_id})"
+            },
+            "digest": {
+              "const": "SHA256(preimage)"
+            },
+            "excluded_fields": {
+              "const": [
+                "attempt",
+                "request_digest",
+                "dispatch_id",
+                "clock_ms"
+              ]
+            }
+          },
+          "required": [
+            "domain",
+            "framing_version",
+            "preimage_fields",
+            "canonicalization",
+            "preimage",
+            "digest",
+            "excluded_fields"
+          ]
+        },
+        "capabilities_digest": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "preimage": {
+              "const": "JCS({environment_id,generation,isolation,network,enforces_network_policy,enforces_resource_limits,persistent,environment_capabilities,network_policy_ref_digest,isolation_policy_ref_digest})"
+            },
+            "digest": {
+              "const": "SHA256(preimage)"
+            }
+          },
+          "required": [
+            "preimage",
+            "digest"
+          ]
+        },
+        "command_digest": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "domain": {
+              "const": "vv-agent/S1/command-digest"
+            },
+            "framing_version": {
+              "const": 1,
+              "type": "integer"
+            },
+            "purpose": {
+              "const": "stable-command"
+            },
+            "canonicalization": {
+              "const": "RFC8785_JCS"
+            },
+            "preimage": {
+              "const": "JCS({domain,framing_version,purpose,tenant_id,session_id,command_spec,environment,operational_policy})"
+            },
+            "digest": {
+              "const": "HMAC-SHA256(session_data_key,preimage)"
+            },
+            "excluded_fields": {
+              "const": [
+                "attempt",
+                "request_digest",
+                "dispatch_id",
+                "clock_ms",
+                "transport_credentials"
+              ]
+            }
+          },
+          "required": [
+            "domain",
+            "framing_version",
+            "purpose",
+            "canonicalization",
+            "preimage",
+            "digest",
+            "excluded_fields"
+          ]
+        }
+      },
+      "required": [
+        "execution_id",
+        "capabilities_digest",
+        "command_digest"
+      ]
+    },
+    "idempotency": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "key_format": {
+          "const": "{session_id}/{operation_id}"
+        },
+        "deduplication_scope": {
+          "const": "tenant_id,environment_id,idempotency_key"
+        },
+        "stable_across_attempts": {
+          "const": true,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "key_format",
+        "deduplication_scope",
+        "stable_across_attempts"
+      ]
+    },
+    "provider_outcomes": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "not_started": {
+          "type": "null"
+        },
+        "running": {
+          "const": "Accepted",
+          "type": "string"
+        },
+        "exited": {
+          "const": "Definitive",
+          "type": "string"
+        },
+        "unknown": {
+          "const": "Unknown",
+          "type": "string"
+        }
+      },
+      "required": [
+        "not_started",
+        "running",
+        "exited",
+        "unknown"
+      ]
+    },
+    "environment": {
+      "$ref": "#/$defs/EnvironmentCapabilityBinding"
+    },
+    "operational_policy": {
+      "$ref": "#/$defs/OperationalPolicy"
+    },
+    "identity_vectors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "identity": {
+            "$ref": "#/$defs/ExecutionIdentity"
+          },
+          "canonical_json_base64": {
+            "type": "string"
+          },
+          "canonical_json_utf8_bytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "preimage_base64": {
+            "type": "string"
+          },
+          "execution_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "maxLength": 64
+          },
+          "excluded_context_variants": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "attempt": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "request_digest": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$",
+                  "maxLength": 64
+                },
+                "dispatch_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "clock_ms": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "attempt",
+                "request_digest",
+                "dispatch_id",
+                "clock_ms"
+              ]
+            }
+          }
+        },
+        "required": [
+          "name",
+          "identity",
+          "canonical_json_base64",
+          "canonical_json_utf8_bytes",
+          "preimage_base64",
+          "execution_id",
+          "excluded_context_variants"
+        ]
+      }
+    },
+    "command_digest_vectors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "tenant_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "session_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "session_data_key_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "session_data_key_base64": {
+            "type": "string"
+          },
+          "command_spec": {
+            "$ref": "#/$defs/CommandSpec"
+          },
+          "environment": {
+            "$ref": "#/$defs/EnvironmentCapabilityBinding"
+          },
+          "operational_policy": {
+            "$ref": "#/$defs/OperationalPolicy"
+          },
+          "canonical_json_base64": {
+            "type": "string"
+          },
+          "canonical_json_utf8_bytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "preimage_base64": {
+            "type": "string"
+          },
+          "command_digest": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "maxLength": 64
+          }
+        },
+        "required": [
+          "name",
+          "tenant_id",
+          "session_id",
+          "session_data_key_id",
+          "session_data_key_base64",
+          "command_spec",
+          "environment",
+          "operational_policy",
+          "canonical_json_base64",
+          "canonical_json_utf8_bytes",
+          "preimage_base64",
+          "command_digest"
+        ]
+      }
+    },
+    "preparation_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "execution_identity_source": {
+          "const": "op_planned"
+        },
+        "proposal_command_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "maxLength": 64
+        },
+        "prepared_request_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "maxLength": 64
+        },
+        "hook_patched_command_spec": {
+          "$ref": "#/$defs/CommandSpec"
+        },
+        "prepared_command_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "maxLength": 64
+        },
+        "retry_source": {
+          "const": "first_op_prepared_request_digest_command_digest"
+        },
+        "retry_runs_before_tool_hooks": {
+          "const": false,
+          "type": "boolean"
+        },
+        "inherit_from_plan": {
+          "const": [
+            "turn_id",
+            "operation_id",
+            "attempt",
+            "idempotency_key",
+            "provider_binding",
+            "execution_identity"
+          ]
+        }
+      },
+      "required": [
+        "execution_identity_source",
+        "proposal_command_digest",
+        "prepared_request_digest",
+        "hook_patched_command_spec",
+        "prepared_command_digest",
+        "retry_source",
+        "retry_runs_before_tool_hooks",
+        "inherit_from_plan"
+      ]
+    },
+    "lookup_binding": {
+      "$ref": "#/$defs/ProviderLookupBinding"
+    },
+    "lookup_results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "transport_available": {
+            "type": "boolean"
+          },
+          "authenticated": {
+            "type": "boolean"
+          },
+          "result": {
+            "$ref": "#/$defs/ProviderLookupResult"
+          },
+          "expected_disposition": {
+            "type": "string",
+            "enum": [
+              "no_effects_and_retry_once",
+              "reuse_running_execution",
+              "reconcile_terminal_execution",
+              "preserve_unknown"
+            ]
+          },
+          "retry_allowed": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "transport_available",
+          "authenticated",
+          "result",
+          "expected_disposition",
+          "retry_allowed"
+        ]
+      }
+    },
+    "lookup_storage_boundary": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "logical_source": {
+          "const": "lookup_results[].result"
+        },
+        "content_owner": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "inbox"
+            },
+            "input_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "tenant_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "session_id": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "kind",
+            "input_id",
+            "tenant_id",
+            "session_id"
+          ]
+        },
+        "content_slot": {
+          "const": "provider_lookup"
+        },
+        "read_order": {
+          "const": [
+            "content_owner",
+            "content_slot",
+            "decrypt_and_verify_typed_content",
+            "provider_lookup_result",
+            "outer_binding_and_plan"
+          ]
+        },
+        "retained_evidence": {
+          "type": "object"
+        },
+        "content": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "logical_result": {
+              "$ref": "#/$defs/ProviderLookupResult"
+            },
+            "canonical_json_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$",
+              "maxLength": 64
+            }
+          },
+          "required": [
+            "logical_result",
+            "canonical_json_sha256"
+          ]
+        },
+        "op_parked_projection": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "handle_fields": {
+              "const": [
+                "kind",
+                "provider",
+                "job_id",
+                "operation_id",
+                "attempt",
+                "request_digest",
+                "evidence",
+                "query_ref",
+                "cancel_ref"
+              ]
+            },
+            "content_fields": {
+              "const": [
+                "job_id",
+                "evidence",
+                "query_ref",
+                "cancel_ref"
+              ]
+            },
+            "identity_restored_from": {
+              "const": [
+                "op_planned.execution_identity",
+                "turn_started.environment"
+              ]
+            }
+          },
+          "required": [
+            "handle_fields",
+            "content_fields",
+            "identity_restored_from"
+          ]
+        },
+        "immediate_recovery_slots": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "running": {
+              "const": [
+                "op_parked.handle.evidence"
+              ]
+            },
+            "exited": {
+              "const": [
+                "op_completed.result",
+                "op_completed.usage",
+                "op_completed.evidence"
+              ]
+            },
+            "unknown": {
+              "const": [
+                "op_unknown.reason",
+                "op_unknown.dispatch_evidence",
+                "op_unknown.observation"
+              ]
+            }
+          },
+          "required": [
+            "running",
+            "exited",
+            "unknown"
+          ]
+        },
+        "retry_guard": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "not_started_evidence_persisted_before_retry": {
+              "const": true,
+              "type": "boolean"
+            },
+            "external_callback_required": {
+              "const": false,
+              "type": "boolean"
+            },
+            "invalid_cases": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "expected_code": {
+                    "type": "string",
+                    "enum": [
+                      "content_owner_mismatch",
+                      "content_slot_mismatch",
+                      "binding_mismatch",
+                      "provider_lookup_not_content_ref",
+                      "not_started_evidence_not_persisted"
+                    ]
+                  }
+                },
+                "required": [
+                  "name",
+                  "expected_code"
+                ]
+              }
+            }
+          },
+          "required": [
+            "not_started_evidence_persisted_before_retry",
+            "external_callback_required",
+            "invalid_cases"
+          ]
+        }
+      },
+      "required": [
+        "logical_source",
+        "content_owner",
+        "content_slot",
+        "read_order",
+        "retained_evidence",
+        "content",
+        "op_parked_projection",
+        "immediate_recovery_slots",
+        "retry_guard"
+      ]
+    },
+    "invalid_lookup_cases": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "base_lookup": {
+            "type": "string",
+            "minLength": 1
+          },
+          "patch_target": {
+            "type": "string",
+            "enum": [
+              "lookup",
+              "environment",
+              "operational_policy"
+            ]
+          },
+          "patch": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "path": {
+                  "type": "array",
+                  "items": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      {
+                        "type": "integer",
+                        "minimum": 0
+                      }
+                    ]
+                  }
+                },
+                "set": {},
+                "delete": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "path",
+                "set"
+              ]
+            }
+          },
+          "authenticated": {
+            "type": "boolean"
+          },
+          "transport_available": {
+            "type": "boolean"
+          },
+          "expected_code": {
+            "type": "string",
+            "enum": [
+              "binding_mismatch",
+              "authorization_mismatch",
+              "environment_mismatch",
+              "generation_mismatch",
+              "isolation_downgrade",
+              "network_policy_widening",
+              "enforcement_downgrade",
+              "capability_digest_mismatch",
+              "policy_digest_mismatch",
+              "command_mismatch",
+              "provider_result_invalid"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "base_lookup",
+          "patch_target",
+          "patch",
+          "authenticated",
+          "transport_available",
+          "expected_code"
+        ]
+      }
+    },
+    "recovery_cases": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "lookup_status": {
+            "type": "string",
+            "enum": [
+              "not_started",
+              "running",
+              "exited",
+              "unknown"
+            ]
+          },
+          "submitted_attempts": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "expected_disposition": {
+            "type": "string",
+            "enum": [
+              "start_new_attempt",
+              "query_or_evidence"
+            ]
+          },
+          "expected_next_attempt": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reuse_idempotency_key": {
+            "type": "boolean"
+          },
+          "reuse_execution_id": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "lookup_status",
+          "submitted_attempts",
+          "expected_disposition",
+          "expected_next_attempt",
+          "reuse_idempotency_key",
+          "reuse_execution_id"
+        ]
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "contract_version",
+    "status",
+    "feature_level",
+    "provenance",
+    "framing",
+    "idempotency",
+    "provider_outcomes",
+    "environment",
+    "operational_policy",
+    "identity_vectors",
+    "command_digest_vectors",
+    "preparation_binding",
+    "lookup_binding",
+    "lookup_results",
+    "lookup_storage_boundary",
+    "invalid_lookup_cases",
+    "recovery_cases"
+  ],
+  "$defs": {
+    "ExecutionIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "operation_key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tenant_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "environment_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "operation_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "execution_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "maxLength": 64
+        }
+      },
+      "required": [
+        "operation_key",
+        "tenant_id",
+        "environment_id",
+        "session_id",
+        "operation_id",
+        "execution_id"
+      ]
+    },
+    "EnvironmentCapabilityBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "environment_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "isolation": {
+          "type": "string",
+          "enum": [
+            "none",
+            "container",
+            "microvm"
+          ]
+        },
+        "network": {
+          "type": "string",
+          "enum": [
+            "open",
+            "allowlist",
+            "none"
+          ]
+        },
+        "enforces_network_policy": {
+          "type": "boolean"
+        },
+        "enforces_resource_limits": {
+          "type": "boolean"
+        },
+        "persistent": {
+          "type": "boolean"
+        },
+        "environment_capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        },
+        "capabilities_digest": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$",
+              "maxLength": 64
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "network_policy_ref_digest": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$",
+              "maxLength": 64
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "isolation_policy_ref_digest": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$",
+              "maxLength": 64
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "environment_id",
+        "generation",
+        "isolation",
+        "network",
+        "enforces_network_policy",
+        "enforces_resource_limits",
+        "persistent",
+        "environment_capabilities",
+        "capabilities_digest",
+        "network_policy_ref_digest",
+        "isolation_policy_ref_digest"
+      ]
+    },
+    "CommandSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "command_text": {
+          "type": "string",
+          "minLength": 1
+        },
+        "argv": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "cwd": {
+          "type": "string",
+          "minLength": 1
+        },
+        "stdin_base64": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "stdin_mode": {
+          "type": "string",
+          "enum": [
+            "none",
+            "provided",
+            "pipe"
+          ]
+        },
+        "secret_ref_names": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        },
+        "limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "wall_time_ms": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "output_bytes": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "required": [
+            "wall_time_ms",
+            "output_bytes"
+          ]
+        }
+      },
+      "required": [
+        "command_text",
+        "argv",
+        "cwd",
+        "stdin_base64",
+        "stdin_mode",
+        "secret_ref_names",
+        "limits"
+      ]
+    },
+    "OperationalPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "network_policy_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "maxLength": 64
+        },
+        "isolation_policy_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "maxLength": 64
+        }
+      },
+      "required": [
+        "network_policy_digest",
+        "isolation_policy_digest"
+      ]
+    },
+    "ContentRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "content_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "mac": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "maxLength": 64
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "key_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "labels": {
+          "$ref": "#/$defs/ContentLabels"
+        }
+      },
+      "required": [
+        "content_id",
+        "mac",
+        "size",
+        "key_id",
+        "labels"
+      ]
+    },
+    "ContentLabels": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "system",
+              "user",
+              "internal",
+              "untrusted"
+            ]
+          },
+          "uniqueItems": true
+        },
+        "classification": {
+          "type": "string",
+          "enum": [
+            "public",
+            "internal",
+            "confidential",
+            "restricted"
+          ]
+        }
+      },
+      "required": [
+        "source",
+        "classification"
+      ]
+    },
+    "ProviderExecutionHandle": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "provider",
+          "type": "string"
+        },
+        "provider": {
+          "type": "string",
+          "minLength": 1
+        },
+        "job_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "operation_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "request_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "maxLength": 64
+        },
+        "execution_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "maxLength": 64
+        },
+        "command_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "maxLength": 64
+        },
+        "environment_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "query_ref": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cancel_ref": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "provider",
+        "job_id",
+        "operation_id",
+        "attempt",
+        "request_digest",
+        "execution_id",
+        "command_digest",
+        "environment_id",
+        "generation",
+        "evidence",
+        "query_ref",
+        "cancel_ref"
+      ]
+    },
+    "ProviderLookupBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "tenant_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "operation_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "request_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "maxLength": 64
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "execution_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "maxLength": 64
+        },
+        "command_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "maxLength": 64
+        },
+        "environment_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "provider_id": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "tenant_id",
+        "session_id",
+        "operation_id",
+        "attempt",
+        "request_digest",
+        "idempotency_key",
+        "execution_id",
+        "command_digest",
+        "environment_id",
+        "generation",
+        "provider_id"
+      ]
+    },
+    "ProviderLookupAcceptedOutcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "Accepted",
+          "type": "string"
+        },
+        "handle": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "provider",
+              "type": "string"
+            },
+            "provider": {
+              "type": "string",
+              "minLength": 1
+            },
+            "job_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "operation_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "attempt": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "request_digest": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$",
+              "maxLength": 64
+            },
+            "execution_id": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$",
+              "maxLength": 64
+            },
+            "command_digest": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$",
+              "maxLength": 64
+            },
+            "environment_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "generation": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "evidence": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "query_ref": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "cancel_ref": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "provider",
+            "job_id",
+            "operation_id",
+            "attempt",
+            "request_digest",
+            "execution_id",
+            "command_digest",
+            "environment_id",
+            "generation",
+            "evidence",
+            "query_ref",
+            "cancel_ref"
+          ]
+        },
+        "yield_on_steer": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "kind",
+        "handle",
+        "yield_on_steer"
+      ]
+    },
+    "ProviderLookupDefinitiveOutcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "Definitive",
+          "type": "string"
+        },
+        "result": {
+          "type": "object"
+        },
+        "usage": {
+          "type": "object"
+        },
+        "shared_state": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "required": [
+        "kind",
+        "result",
+        "usage",
+        "shared_state",
+        "evidence"
+      ]
+    },
+    "ProviderLookupUnknownOutcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "Unknown",
+          "type": "string"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "kind",
+        "reason"
+      ]
+    },
+    "ProviderLookupResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "vv-agent.provider-lookup.v1",
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "not_started",
+            "running",
+            "exited",
+            "unknown"
+          ]
+        },
+        "binding": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "tenant_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "session_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "operation_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "attempt": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "request_digest": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$",
+              "maxLength": 64
+            },
+            "idempotency_key": {
+              "type": "string",
+              "minLength": 1
+            },
+            "execution_id": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$",
+              "maxLength": 64
+            },
+            "command_digest": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$",
+              "maxLength": 64
+            },
+            "environment_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "generation": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "provider_id": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "tenant_id",
+            "session_id",
+            "operation_id",
+            "attempt",
+            "request_digest",
+            "idempotency_key",
+            "execution_id",
+            "command_digest",
+            "environment_id",
+            "generation",
+            "provider_id"
+          ]
+        },
+        "outcome": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "Accepted",
+                  "type": "string"
+                },
+                "handle": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "kind": {
+                      "const": "provider",
+                      "type": "string"
+                    },
+                    "provider": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "job_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "operation_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "attempt": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "request_digest": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$",
+                      "maxLength": 64
+                    },
+                    "execution_id": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$",
+                      "maxLength": 64
+                    },
+                    "command_digest": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$",
+                      "maxLength": 64
+                    },
+                    "environment_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "generation": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "evidence": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "query_ref": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "cancel_ref": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "provider",
+                    "job_id",
+                    "operation_id",
+                    "attempt",
+                    "request_digest",
+                    "execution_id",
+                    "command_digest",
+                    "environment_id",
+                    "generation",
+                    "evidence",
+                    "query_ref",
+                    "cancel_ref"
+                  ]
+                },
+                "yield_on_steer": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "kind",
+                "handle",
+                "yield_on_steer"
+              ]
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "Definitive",
+                  "type": "string"
+                },
+                "result": {
+                  "type": "object"
+                },
+                "usage": {
+                  "type": "object"
+                },
+                "shared_state": {
+                  "anyOf": [
+                    {
+                      "type": "object"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "evidence": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              },
+              "required": [
+                "kind",
+                "result",
+                "usage",
+                "shared_state",
+                "evidence"
+              ]
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "Unknown",
+                  "type": "string"
+                },
+                "reason": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "required": [
+                "kind",
+                "reason"
+              ]
+            }
+          ]
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "required": [
+        "schema_version",
+        "status",
+        "binding",
+        "outcome",
+        "evidence"
+      ]
+    }
+  }
+}

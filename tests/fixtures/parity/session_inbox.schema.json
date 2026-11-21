@@ -4,72 +4,7 @@
     {
       "allOf": [
         {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "schema_version": {
-              "const": "S1",
-              "type": "string"
-            },
-            "feature_level": {
-              "const": 1,
-              "type": "integer"
-            },
-            "actor": {
-              "$ref": "#/$defs/Principal"
-            },
-            "admission_proof": {
-              "$ref": "#/$defs/AdmissionProof"
-            },
-            "input_id": {
-              "type": "string",
-              "minLength": 1
-            },
-            "kind": {
-              "type": "string"
-            },
-            "target_turn_id": {
-              "anyOf": [
-                {
-                  "type": "string",
-                  "minLength": 1
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "generation": {
-              "anyOf": [
-                {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "available_ms": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "payload": {
-              "type": "object"
-            }
-          },
-          "required": [
-            "schema_version",
-            "feature_level",
-            "actor",
-            "admission_proof",
-            "input_id",
-            "kind",
-            "target_turn_id",
-            "generation",
-            "available_ms",
-            "payload"
-          ]
+          "$ref": "#/$defs/InboxEnvelope"
         },
         {
           "type": "object",
@@ -87,72 +22,7 @@
     {
       "allOf": [
         {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "schema_version": {
-              "const": "S1",
-              "type": "string"
-            },
-            "feature_level": {
-              "const": 1,
-              "type": "integer"
-            },
-            "actor": {
-              "$ref": "#/$defs/Principal"
-            },
-            "admission_proof": {
-              "$ref": "#/$defs/AdmissionProof"
-            },
-            "input_id": {
-              "type": "string",
-              "minLength": 1
-            },
-            "kind": {
-              "type": "string"
-            },
-            "target_turn_id": {
-              "anyOf": [
-                {
-                  "type": "string",
-                  "minLength": 1
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "generation": {
-              "anyOf": [
-                {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "available_ms": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "payload": {
-              "type": "object"
-            }
-          },
-          "required": [
-            "schema_version",
-            "feature_level",
-            "actor",
-            "admission_proof",
-            "input_id",
-            "kind",
-            "target_turn_id",
-            "generation",
-            "available_ms",
-            "payload"
-          ]
+          "$ref": "#/$defs/InboxEnvelope"
         },
         {
           "type": "object",
@@ -170,72 +40,7 @@
     {
       "allOf": [
         {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "schema_version": {
-              "const": "S1",
-              "type": "string"
-            },
-            "feature_level": {
-              "const": 1,
-              "type": "integer"
-            },
-            "actor": {
-              "$ref": "#/$defs/Principal"
-            },
-            "admission_proof": {
-              "$ref": "#/$defs/AdmissionProof"
-            },
-            "input_id": {
-              "type": "string",
-              "minLength": 1
-            },
-            "kind": {
-              "type": "string"
-            },
-            "target_turn_id": {
-              "anyOf": [
-                {
-                  "type": "string",
-                  "minLength": 1
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "generation": {
-              "anyOf": [
-                {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "available_ms": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "payload": {
-              "type": "object"
-            }
-          },
-          "required": [
-            "schema_version",
-            "feature_level",
-            "actor",
-            "admission_proof",
-            "input_id",
-            "kind",
-            "target_turn_id",
-            "generation",
-            "available_ms",
-            "payload"
-          ]
+          "$ref": "#/$defs/InboxEnvelope"
         },
         {
           "type": "object",
@@ -253,72 +58,7 @@
     {
       "allOf": [
         {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "schema_version": {
-              "const": "S1",
-              "type": "string"
-            },
-            "feature_level": {
-              "const": 1,
-              "type": "integer"
-            },
-            "actor": {
-              "$ref": "#/$defs/Principal"
-            },
-            "admission_proof": {
-              "$ref": "#/$defs/AdmissionProof"
-            },
-            "input_id": {
-              "type": "string",
-              "minLength": 1
-            },
-            "kind": {
-              "type": "string"
-            },
-            "target_turn_id": {
-              "anyOf": [
-                {
-                  "type": "string",
-                  "minLength": 1
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "generation": {
-              "anyOf": [
-                {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "available_ms": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "payload": {
-              "type": "object"
-            }
-          },
-          "required": [
-            "schema_version",
-            "feature_level",
-            "actor",
-            "admission_proof",
-            "input_id",
-            "kind",
-            "target_turn_id",
-            "generation",
-            "available_ms",
-            "payload"
-          ]
+          "$ref": "#/$defs/InboxEnvelope"
         },
         {
           "type": "object",
@@ -336,72 +76,7 @@
     {
       "allOf": [
         {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "schema_version": {
-              "const": "S1",
-              "type": "string"
-            },
-            "feature_level": {
-              "const": 1,
-              "type": "integer"
-            },
-            "actor": {
-              "$ref": "#/$defs/Principal"
-            },
-            "admission_proof": {
-              "$ref": "#/$defs/AdmissionProof"
-            },
-            "input_id": {
-              "type": "string",
-              "minLength": 1
-            },
-            "kind": {
-              "type": "string"
-            },
-            "target_turn_id": {
-              "anyOf": [
-                {
-                  "type": "string",
-                  "minLength": 1
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "generation": {
-              "anyOf": [
-                {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "available_ms": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "payload": {
-              "type": "object"
-            }
-          },
-          "required": [
-            "schema_version",
-            "feature_level",
-            "actor",
-            "admission_proof",
-            "input_id",
-            "kind",
-            "target_turn_id",
-            "generation",
-            "available_ms",
-            "payload"
-          ]
+          "$ref": "#/$defs/InboxEnvelope"
         },
         {
           "type": "object",
@@ -419,72 +94,7 @@
     {
       "allOf": [
         {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "schema_version": {
-              "const": "S1",
-              "type": "string"
-            },
-            "feature_level": {
-              "const": 1,
-              "type": "integer"
-            },
-            "actor": {
-              "$ref": "#/$defs/Principal"
-            },
-            "admission_proof": {
-              "$ref": "#/$defs/AdmissionProof"
-            },
-            "input_id": {
-              "type": "string",
-              "minLength": 1
-            },
-            "kind": {
-              "type": "string"
-            },
-            "target_turn_id": {
-              "anyOf": [
-                {
-                  "type": "string",
-                  "minLength": 1
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "generation": {
-              "anyOf": [
-                {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "available_ms": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "payload": {
-              "type": "object"
-            }
-          },
-          "required": [
-            "schema_version",
-            "feature_level",
-            "actor",
-            "admission_proof",
-            "input_id",
-            "kind",
-            "target_turn_id",
-            "generation",
-            "available_ms",
-            "payload"
-          ]
+          "$ref": "#/$defs/InboxEnvelope"
         },
         {
           "type": "object",
@@ -502,72 +112,7 @@
     {
       "allOf": [
         {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "schema_version": {
-              "const": "S1",
-              "type": "string"
-            },
-            "feature_level": {
-              "const": 1,
-              "type": "integer"
-            },
-            "actor": {
-              "$ref": "#/$defs/Principal"
-            },
-            "admission_proof": {
-              "$ref": "#/$defs/AdmissionProof"
-            },
-            "input_id": {
-              "type": "string",
-              "minLength": 1
-            },
-            "kind": {
-              "type": "string"
-            },
-            "target_turn_id": {
-              "anyOf": [
-                {
-                  "type": "string",
-                  "minLength": 1
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "generation": {
-              "anyOf": [
-                {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "available_ms": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "payload": {
-              "type": "object"
-            }
-          },
-          "required": [
-            "schema_version",
-            "feature_level",
-            "actor",
-            "admission_proof",
-            "input_id",
-            "kind",
-            "target_turn_id",
-            "generation",
-            "available_ms",
-            "payload"
-          ]
+          "$ref": "#/$defs/InboxEnvelope"
         },
         {
           "type": "object",
@@ -585,72 +130,7 @@
     {
       "allOf": [
         {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "schema_version": {
-              "const": "S1",
-              "type": "string"
-            },
-            "feature_level": {
-              "const": 1,
-              "type": "integer"
-            },
-            "actor": {
-              "$ref": "#/$defs/Principal"
-            },
-            "admission_proof": {
-              "$ref": "#/$defs/AdmissionProof"
-            },
-            "input_id": {
-              "type": "string",
-              "minLength": 1
-            },
-            "kind": {
-              "type": "string"
-            },
-            "target_turn_id": {
-              "anyOf": [
-                {
-                  "type": "string",
-                  "minLength": 1
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "generation": {
-              "anyOf": [
-                {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "available_ms": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "payload": {
-              "type": "object"
-            }
-          },
-          "required": [
-            "schema_version",
-            "feature_level",
-            "actor",
-            "admission_proof",
-            "input_id",
-            "kind",
-            "target_turn_id",
-            "generation",
-            "available_ms",
-            "payload"
-          ]
+          "$ref": "#/$defs/InboxEnvelope"
         },
         {
           "type": "object",
@@ -668,72 +148,7 @@
     {
       "allOf": [
         {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "schema_version": {
-              "const": "S1",
-              "type": "string"
-            },
-            "feature_level": {
-              "const": 1,
-              "type": "integer"
-            },
-            "actor": {
-              "$ref": "#/$defs/Principal"
-            },
-            "admission_proof": {
-              "$ref": "#/$defs/AdmissionProof"
-            },
-            "input_id": {
-              "type": "string",
-              "minLength": 1
-            },
-            "kind": {
-              "type": "string"
-            },
-            "target_turn_id": {
-              "anyOf": [
-                {
-                  "type": "string",
-                  "minLength": 1
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "generation": {
-              "anyOf": [
-                {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "available_ms": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "payload": {
-              "type": "object"
-            }
-          },
-          "required": [
-            "schema_version",
-            "feature_level",
-            "actor",
-            "admission_proof",
-            "input_id",
-            "kind",
-            "target_turn_id",
-            "generation",
-            "available_ms",
-            "payload"
-          ]
+          "$ref": "#/$defs/InboxEnvelope"
         },
         {
           "type": "object",
@@ -743,6 +158,78 @@
             },
             "payload": {
               "$ref": "#/$defs/ModelSelectionPayload"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "allOf": [
+        {
+          "$ref": "#/$defs/InboxEnvelopeLevel2"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "user"
+            },
+            "payload": {
+              "$ref": "#/$defs/ContentPayload"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "allOf": [
+        {
+          "$ref": "#/$defs/InboxEnvelopeLevel2"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "follow_up"
+            },
+            "payload": {
+              "$ref": "#/$defs/ContentPayload"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "allOf": [
+        {
+          "$ref": "#/$defs/InboxEnvelopeLevel2"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "model_selection"
+            },
+            "payload": {
+              "$ref": "#/$defs/ModelSelectionPayload"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "allOf": [
+        {
+          "$ref": "#/$defs/InboxEnvelopeLevel3"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "provider_evidence"
+            },
+            "payload": {
+              "$ref": "#/$defs/ProviderEvidencePayloadLevel3"
             }
           }
         }
@@ -1278,7 +765,7 @@
         "budget"
       ]
     },
-    "Requirements": {
+    "SessionRequirements": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
@@ -1388,6 +875,752 @@
         {
           "type": "null"
         }
+      ]
+    },
+    "ExecutionEnvironmentBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "descriptor": {
+          "$ref": "#/$defs/ContentRef"
+        },
+        "environment_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "isolation": {
+          "type": "string",
+          "enum": [
+            "none",
+            "container",
+            "microvm"
+          ]
+        },
+        "network": {
+          "type": "string",
+          "enum": [
+            "open",
+            "allowlist",
+            "none"
+          ]
+        },
+        "enforces_network_policy": {
+          "type": "boolean"
+        },
+        "enforces_resource_limits": {
+          "type": "boolean"
+        },
+        "persistent": {
+          "type": "boolean"
+        },
+        "environment_capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        },
+        "capabilities_digest": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$",
+              "maxLength": 64
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "network_policy_ref_digest": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$",
+              "maxLength": 64
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "isolation_policy_ref_digest": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$",
+              "maxLength": 64
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "operational_policy": {
+          "$ref": "#/$defs/ContentRef"
+        }
+      },
+      "required": [
+        "descriptor",
+        "environment_id",
+        "generation",
+        "isolation",
+        "network",
+        "enforces_network_policy",
+        "enforces_resource_limits",
+        "persistent",
+        "environment_capabilities",
+        "capabilities_digest",
+        "network_policy_ref_digest",
+        "isolation_policy_ref_digest",
+        "operational_policy"
+      ]
+    },
+    "ExecutionIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "operation_key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tenant_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "environment_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "operation_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "execution_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "maxLength": 64
+        }
+      },
+      "required": [
+        "operation_key",
+        "tenant_id",
+        "environment_id",
+        "session_id",
+        "operation_id",
+        "execution_id"
+      ]
+    },
+    "ProviderExecutionHandle": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "provider",
+          "type": "string"
+        },
+        "provider": {
+          "type": "string",
+          "minLength": 1
+        },
+        "job_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "operation_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "request_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "maxLength": 64
+        },
+        "execution_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "maxLength": 64
+        },
+        "command_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "maxLength": 64
+        },
+        "environment_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "query_ref": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cancel_ref": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "provider",
+        "job_id",
+        "operation_id",
+        "attempt",
+        "request_digest",
+        "execution_id",
+        "command_digest",
+        "environment_id",
+        "generation",
+        "evidence",
+        "query_ref",
+        "cancel_ref"
+      ]
+    },
+    "ProviderLookupBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "tenant_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "operation_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "request_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "maxLength": 64
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "execution_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "maxLength": 64
+        },
+        "command_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "maxLength": 64
+        },
+        "environment_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "provider_id": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "tenant_id",
+        "session_id",
+        "operation_id",
+        "attempt",
+        "request_digest",
+        "idempotency_key",
+        "execution_id",
+        "command_digest",
+        "environment_id",
+        "generation",
+        "provider_id"
+      ]
+    },
+    "ProviderLookupAcceptedOutcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "Accepted",
+          "type": "string"
+        },
+        "handle": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "provider",
+              "type": "string"
+            },
+            "provider": {
+              "type": "string",
+              "minLength": 1
+            },
+            "job_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "operation_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "attempt": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "request_digest": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$",
+              "maxLength": 64
+            },
+            "execution_id": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$",
+              "maxLength": 64
+            },
+            "command_digest": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$",
+              "maxLength": 64
+            },
+            "environment_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "generation": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "evidence": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "query_ref": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "cancel_ref": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "provider",
+            "job_id",
+            "operation_id",
+            "attempt",
+            "request_digest",
+            "execution_id",
+            "command_digest",
+            "environment_id",
+            "generation",
+            "evidence",
+            "query_ref",
+            "cancel_ref"
+          ]
+        },
+        "yield_on_steer": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "kind",
+        "handle",
+        "yield_on_steer"
+      ]
+    },
+    "ProviderLookupDefinitiveOutcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "Definitive",
+          "type": "string"
+        },
+        "result": {
+          "type": "object"
+        },
+        "usage": {
+          "type": "object"
+        },
+        "shared_state": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "required": [
+        "kind",
+        "result",
+        "usage",
+        "shared_state",
+        "evidence"
+      ]
+    },
+    "ProviderLookupUnknownOutcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "Unknown",
+          "type": "string"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "kind",
+        "reason"
+      ]
+    },
+    "ProviderLookupResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "vv-agent.provider-lookup.v1",
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "not_started",
+            "running",
+            "exited",
+            "unknown"
+          ]
+        },
+        "binding": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "tenant_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "session_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "operation_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "attempt": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "request_digest": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$",
+              "maxLength": 64
+            },
+            "idempotency_key": {
+              "type": "string",
+              "minLength": 1
+            },
+            "execution_id": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$",
+              "maxLength": 64
+            },
+            "command_digest": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$",
+              "maxLength": 64
+            },
+            "environment_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "generation": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "provider_id": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "tenant_id",
+            "session_id",
+            "operation_id",
+            "attempt",
+            "request_digest",
+            "idempotency_key",
+            "execution_id",
+            "command_digest",
+            "environment_id",
+            "generation",
+            "provider_id"
+          ]
+        },
+        "outcome": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "Accepted",
+                  "type": "string"
+                },
+                "handle": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "kind": {
+                      "const": "provider",
+                      "type": "string"
+                    },
+                    "provider": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "job_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "operation_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "attempt": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "request_digest": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$",
+                      "maxLength": 64
+                    },
+                    "execution_id": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$",
+                      "maxLength": 64
+                    },
+                    "command_digest": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$",
+                      "maxLength": 64
+                    },
+                    "environment_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "generation": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "evidence": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "query_ref": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "cancel_ref": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "provider",
+                    "job_id",
+                    "operation_id",
+                    "attempt",
+                    "request_digest",
+                    "execution_id",
+                    "command_digest",
+                    "environment_id",
+                    "generation",
+                    "evidence",
+                    "query_ref",
+                    "cancel_ref"
+                  ]
+                },
+                "yield_on_steer": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "kind",
+                "handle",
+                "yield_on_steer"
+              ]
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "Definitive",
+                  "type": "string"
+                },
+                "result": {
+                  "type": "object"
+                },
+                "usage": {
+                  "type": "object"
+                },
+                "shared_state": {
+                  "anyOf": [
+                    {
+                      "type": "object"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "evidence": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              },
+              "required": [
+                "kind",
+                "result",
+                "usage",
+                "shared_state",
+                "evidence"
+              ]
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "Unknown",
+                  "type": "string"
+                },
+                "reason": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "required": [
+                "kind",
+                "reason"
+              ]
+            }
+          ]
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "required": [
+        "schema_version",
+        "status",
+        "binding",
+        "outcome",
+        "evidence"
       ]
     },
     "ResultId": {
@@ -1964,6 +2197,34 @@
         "handle"
       ]
     },
+    "ProviderEvidencePayloadLevel3": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "operation_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "request_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "maxLength": 64
+        },
+        "provider_lookup": {
+          "$ref": "#/$defs/ContentRef"
+        }
+      },
+      "required": [
+        "operation_id",
+        "attempt",
+        "request_digest",
+        "provider_lookup"
+      ]
+    },
     "BeforeMemoryData": {
       "type": "object",
       "additionalProperties": false,
@@ -2016,7 +2277,12 @@
               "properties": {
                 "code": {
                   "type": "string",
-                  "minLength": 1
+                  "enum": [
+                    "host.policy_stop",
+                    "host_stop",
+                    "hook_stop",
+                    "stopped"
+                  ]
                 },
                 "message": {
                   "$ref": "#/$defs/ContentRef"
@@ -2213,13 +2479,13 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "schema_version": {
-          "const": "S1",
-          "type": "string"
-        },
         "feature_level": {
           "const": 1,
           "type": "integer"
+        },
+        "schema_version": {
+          "const": "S1",
+          "type": "string"
         },
         "actor": {
           "$ref": "#/$defs/Principal"
@@ -2265,8 +2531,148 @@
         }
       },
       "required": [
-        "schema_version",
         "feature_level",
+        "schema_version",
+        "actor",
+        "admission_proof",
+        "input_id",
+        "kind",
+        "target_turn_id",
+        "generation",
+        "available_ms",
+        "payload"
+      ]
+    },
+    "InboxEnvelopeLevel2": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "feature_level": {
+          "const": 2,
+          "type": "integer"
+        },
+        "schema_version": {
+          "const": "S1",
+          "type": "string"
+        },
+        "actor": {
+          "$ref": "#/$defs/Principal"
+        },
+        "admission_proof": {
+          "$ref": "#/$defs/AdmissionProof"
+        },
+        "input_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "type": "string"
+        },
+        "target_turn_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "generation": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "available_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "payload": {
+          "type": "object"
+        },
+        "requirements": {
+          "$ref": "#/$defs/SessionRequirements"
+        }
+      },
+      "required": [
+        "feature_level",
+        "schema_version",
+        "actor",
+        "admission_proof",
+        "input_id",
+        "kind",
+        "target_turn_id",
+        "generation",
+        "available_ms",
+        "payload",
+        "requirements"
+      ]
+    },
+    "InboxEnvelopeLevel3": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "feature_level": {
+          "const": 3,
+          "type": "integer"
+        },
+        "schema_version": {
+          "const": "S1",
+          "type": "string"
+        },
+        "actor": {
+          "$ref": "#/$defs/Principal"
+        },
+        "admission_proof": {
+          "$ref": "#/$defs/AdmissionProof"
+        },
+        "input_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "type": "string"
+        },
+        "target_turn_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "generation": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "available_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "payload": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "feature_level",
+        "schema_version",
         "actor",
         "admission_proof",
         "input_id",
@@ -2282,72 +2688,7 @@
         {
           "allOf": [
             {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "schema_version": {
-                  "const": "S1",
-                  "type": "string"
-                },
-                "feature_level": {
-                  "const": 1,
-                  "type": "integer"
-                },
-                "actor": {
-                  "$ref": "#/$defs/Principal"
-                },
-                "admission_proof": {
-                  "$ref": "#/$defs/AdmissionProof"
-                },
-                "input_id": {
-                  "type": "string",
-                  "minLength": 1
-                },
-                "kind": {
-                  "type": "string"
-                },
-                "target_turn_id": {
-                  "anyOf": [
-                    {
-                      "type": "string",
-                      "minLength": 1
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "generation": {
-                  "anyOf": [
-                    {
-                      "type": "integer",
-                      "minimum": 0
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "available_ms": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "payload": {
-                  "type": "object"
-                }
-              },
-              "required": [
-                "schema_version",
-                "feature_level",
-                "actor",
-                "admission_proof",
-                "input_id",
-                "kind",
-                "target_turn_id",
-                "generation",
-                "available_ms",
-                "payload"
-              ]
+              "$ref": "#/$defs/InboxEnvelope"
             },
             {
               "type": "object",
@@ -2365,72 +2706,7 @@
         {
           "allOf": [
             {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "schema_version": {
-                  "const": "S1",
-                  "type": "string"
-                },
-                "feature_level": {
-                  "const": 1,
-                  "type": "integer"
-                },
-                "actor": {
-                  "$ref": "#/$defs/Principal"
-                },
-                "admission_proof": {
-                  "$ref": "#/$defs/AdmissionProof"
-                },
-                "input_id": {
-                  "type": "string",
-                  "minLength": 1
-                },
-                "kind": {
-                  "type": "string"
-                },
-                "target_turn_id": {
-                  "anyOf": [
-                    {
-                      "type": "string",
-                      "minLength": 1
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "generation": {
-                  "anyOf": [
-                    {
-                      "type": "integer",
-                      "minimum": 0
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "available_ms": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "payload": {
-                  "type": "object"
-                }
-              },
-              "required": [
-                "schema_version",
-                "feature_level",
-                "actor",
-                "admission_proof",
-                "input_id",
-                "kind",
-                "target_turn_id",
-                "generation",
-                "available_ms",
-                "payload"
-              ]
+              "$ref": "#/$defs/InboxEnvelope"
             },
             {
               "type": "object",
@@ -2448,72 +2724,7 @@
         {
           "allOf": [
             {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "schema_version": {
-                  "const": "S1",
-                  "type": "string"
-                },
-                "feature_level": {
-                  "const": 1,
-                  "type": "integer"
-                },
-                "actor": {
-                  "$ref": "#/$defs/Principal"
-                },
-                "admission_proof": {
-                  "$ref": "#/$defs/AdmissionProof"
-                },
-                "input_id": {
-                  "type": "string",
-                  "minLength": 1
-                },
-                "kind": {
-                  "type": "string"
-                },
-                "target_turn_id": {
-                  "anyOf": [
-                    {
-                      "type": "string",
-                      "minLength": 1
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "generation": {
-                  "anyOf": [
-                    {
-                      "type": "integer",
-                      "minimum": 0
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "available_ms": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "payload": {
-                  "type": "object"
-                }
-              },
-              "required": [
-                "schema_version",
-                "feature_level",
-                "actor",
-                "admission_proof",
-                "input_id",
-                "kind",
-                "target_turn_id",
-                "generation",
-                "available_ms",
-                "payload"
-              ]
+              "$ref": "#/$defs/InboxEnvelope"
             },
             {
               "type": "object",
@@ -2531,72 +2742,7 @@
         {
           "allOf": [
             {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "schema_version": {
-                  "const": "S1",
-                  "type": "string"
-                },
-                "feature_level": {
-                  "const": 1,
-                  "type": "integer"
-                },
-                "actor": {
-                  "$ref": "#/$defs/Principal"
-                },
-                "admission_proof": {
-                  "$ref": "#/$defs/AdmissionProof"
-                },
-                "input_id": {
-                  "type": "string",
-                  "minLength": 1
-                },
-                "kind": {
-                  "type": "string"
-                },
-                "target_turn_id": {
-                  "anyOf": [
-                    {
-                      "type": "string",
-                      "minLength": 1
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "generation": {
-                  "anyOf": [
-                    {
-                      "type": "integer",
-                      "minimum": 0
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "available_ms": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "payload": {
-                  "type": "object"
-                }
-              },
-              "required": [
-                "schema_version",
-                "feature_level",
-                "actor",
-                "admission_proof",
-                "input_id",
-                "kind",
-                "target_turn_id",
-                "generation",
-                "available_ms",
-                "payload"
-              ]
+              "$ref": "#/$defs/InboxEnvelope"
             },
             {
               "type": "object",
@@ -2614,72 +2760,7 @@
         {
           "allOf": [
             {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "schema_version": {
-                  "const": "S1",
-                  "type": "string"
-                },
-                "feature_level": {
-                  "const": 1,
-                  "type": "integer"
-                },
-                "actor": {
-                  "$ref": "#/$defs/Principal"
-                },
-                "admission_proof": {
-                  "$ref": "#/$defs/AdmissionProof"
-                },
-                "input_id": {
-                  "type": "string",
-                  "minLength": 1
-                },
-                "kind": {
-                  "type": "string"
-                },
-                "target_turn_id": {
-                  "anyOf": [
-                    {
-                      "type": "string",
-                      "minLength": 1
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "generation": {
-                  "anyOf": [
-                    {
-                      "type": "integer",
-                      "minimum": 0
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "available_ms": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "payload": {
-                  "type": "object"
-                }
-              },
-              "required": [
-                "schema_version",
-                "feature_level",
-                "actor",
-                "admission_proof",
-                "input_id",
-                "kind",
-                "target_turn_id",
-                "generation",
-                "available_ms",
-                "payload"
-              ]
+              "$ref": "#/$defs/InboxEnvelope"
             },
             {
               "type": "object",
@@ -2697,72 +2778,7 @@
         {
           "allOf": [
             {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "schema_version": {
-                  "const": "S1",
-                  "type": "string"
-                },
-                "feature_level": {
-                  "const": 1,
-                  "type": "integer"
-                },
-                "actor": {
-                  "$ref": "#/$defs/Principal"
-                },
-                "admission_proof": {
-                  "$ref": "#/$defs/AdmissionProof"
-                },
-                "input_id": {
-                  "type": "string",
-                  "minLength": 1
-                },
-                "kind": {
-                  "type": "string"
-                },
-                "target_turn_id": {
-                  "anyOf": [
-                    {
-                      "type": "string",
-                      "minLength": 1
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "generation": {
-                  "anyOf": [
-                    {
-                      "type": "integer",
-                      "minimum": 0
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "available_ms": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "payload": {
-                  "type": "object"
-                }
-              },
-              "required": [
-                "schema_version",
-                "feature_level",
-                "actor",
-                "admission_proof",
-                "input_id",
-                "kind",
-                "target_turn_id",
-                "generation",
-                "available_ms",
-                "payload"
-              ]
+              "$ref": "#/$defs/InboxEnvelope"
             },
             {
               "type": "object",
@@ -2780,72 +2796,7 @@
         {
           "allOf": [
             {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "schema_version": {
-                  "const": "S1",
-                  "type": "string"
-                },
-                "feature_level": {
-                  "const": 1,
-                  "type": "integer"
-                },
-                "actor": {
-                  "$ref": "#/$defs/Principal"
-                },
-                "admission_proof": {
-                  "$ref": "#/$defs/AdmissionProof"
-                },
-                "input_id": {
-                  "type": "string",
-                  "minLength": 1
-                },
-                "kind": {
-                  "type": "string"
-                },
-                "target_turn_id": {
-                  "anyOf": [
-                    {
-                      "type": "string",
-                      "minLength": 1
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "generation": {
-                  "anyOf": [
-                    {
-                      "type": "integer",
-                      "minimum": 0
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "available_ms": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "payload": {
-                  "type": "object"
-                }
-              },
-              "required": [
-                "schema_version",
-                "feature_level",
-                "actor",
-                "admission_proof",
-                "input_id",
-                "kind",
-                "target_turn_id",
-                "generation",
-                "available_ms",
-                "payload"
-              ]
+              "$ref": "#/$defs/InboxEnvelope"
             },
             {
               "type": "object",
@@ -2863,72 +2814,7 @@
         {
           "allOf": [
             {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "schema_version": {
-                  "const": "S1",
-                  "type": "string"
-                },
-                "feature_level": {
-                  "const": 1,
-                  "type": "integer"
-                },
-                "actor": {
-                  "$ref": "#/$defs/Principal"
-                },
-                "admission_proof": {
-                  "$ref": "#/$defs/AdmissionProof"
-                },
-                "input_id": {
-                  "type": "string",
-                  "minLength": 1
-                },
-                "kind": {
-                  "type": "string"
-                },
-                "target_turn_id": {
-                  "anyOf": [
-                    {
-                      "type": "string",
-                      "minLength": 1
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "generation": {
-                  "anyOf": [
-                    {
-                      "type": "integer",
-                      "minimum": 0
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "available_ms": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "payload": {
-                  "type": "object"
-                }
-              },
-              "required": [
-                "schema_version",
-                "feature_level",
-                "actor",
-                "admission_proof",
-                "input_id",
-                "kind",
-                "target_turn_id",
-                "generation",
-                "available_ms",
-                "payload"
-              ]
+              "$ref": "#/$defs/InboxEnvelope"
             },
             {
               "type": "object",
@@ -2946,72 +2832,7 @@
         {
           "allOf": [
             {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "schema_version": {
-                  "const": "S1",
-                  "type": "string"
-                },
-                "feature_level": {
-                  "const": 1,
-                  "type": "integer"
-                },
-                "actor": {
-                  "$ref": "#/$defs/Principal"
-                },
-                "admission_proof": {
-                  "$ref": "#/$defs/AdmissionProof"
-                },
-                "input_id": {
-                  "type": "string",
-                  "minLength": 1
-                },
-                "kind": {
-                  "type": "string"
-                },
-                "target_turn_id": {
-                  "anyOf": [
-                    {
-                      "type": "string",
-                      "minLength": 1
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "generation": {
-                  "anyOf": [
-                    {
-                      "type": "integer",
-                      "minimum": 0
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "available_ms": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "payload": {
-                  "type": "object"
-                }
-              },
-              "required": [
-                "schema_version",
-                "feature_level",
-                "actor",
-                "admission_proof",
-                "input_id",
-                "kind",
-                "target_turn_id",
-                "generation",
-                "available_ms",
-                "payload"
-              ]
+              "$ref": "#/$defs/InboxEnvelope"
             },
             {
               "type": "object",
@@ -3021,6 +2842,78 @@
                 },
                 "payload": {
                   "$ref": "#/$defs/ModelSelectionPayload"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/InboxEnvelopeLevel2"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "user"
+                },
+                "payload": {
+                  "$ref": "#/$defs/ContentPayload"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/InboxEnvelopeLevel2"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "follow_up"
+                },
+                "payload": {
+                  "$ref": "#/$defs/ContentPayload"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/InboxEnvelopeLevel2"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "model_selection"
+                },
+                "payload": {
+                  "$ref": "#/$defs/ModelSelectionPayload"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/InboxEnvelopeLevel3"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "provider_evidence"
+                },
+                "payload": {
+                  "$ref": "#/$defs/ProviderEvidencePayloadLevel3"
                 }
               }
             }
