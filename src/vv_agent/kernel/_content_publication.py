@@ -662,7 +662,16 @@ def link_declared_record_content(
     """Link every declared ref to the record sequence assigned by append."""
 
     durable = _require_record_link_store(writer)
-    for link in links:
+    resolved = tuple(links)
+    batch_link = getattr(durable, "link_records", None)
+    if callable(batch_link):
+        batch_link(
+            writer.tenant_id,
+            writer.session_id,
+            ((link.record_seq, link.ref, link.slot) for link in resolved),
+        )
+        return
+    for link in resolved:
         durable.link_record(
             writer.tenant_id,
             writer.session_id,

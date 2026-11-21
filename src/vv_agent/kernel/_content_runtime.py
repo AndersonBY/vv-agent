@@ -47,7 +47,7 @@ from ._content_publication import (
     publish_session_created_content,
 )
 from ._content_reader import _LinkValidatedContentStore, _OwnerBoundContentStore
-from ._content_sql import CoreSQLContentStore
+from ._content_sql import CoreSQLContentStore, _ContentWriteMemo
 from ._content_store import ContentCipher, DurableContentStore
 from ._postgres import CorePostgresContentStore, PostgresStore
 from ._records import SessionSpec
@@ -239,12 +239,14 @@ def _deferred_content_writer(writer: SessionContentWriter) -> tuple[SessionConte
         writer._binding.cipher,
         provider_id=writer._durable._provider_id,
     )
+    durable.bind_transaction(writer.tx, write_memo=writer._write_memo)
     deferred = SessionContentWriter(
         tx=writer.tx,
         tenant_id=writer.tenant_id,
         session_id=writer.session_id,
         binding=writer._binding,
         _published_refs=writer._published_refs,
+        _write_memo=writer._write_memo,
     )
     deferred._durable = durable
     deferred.durable = cast(DurableContentStore, _ValidatedDurableContentStore(durable))
@@ -474,6 +476,15 @@ class _ValidatedDurableContentStore:
     ) -> None:
         self._durable.link_record(tenant_id, session_id, record_seq, ref, _slot(slot, _RECORD_SLOT_SPECS))
 
+    def link_records(
+        self,
+        tenant_id: str,
+        session_id: str,
+        links: Iterable[tuple[int, ContentRef, str]],
+    ) -> None:
+        validated = tuple((record_seq, ref, _slot(slot, _RECORD_SLOT_SPECS)) for record_seq, ref, slot in links)
+        self._durable.link_records(tenant_id, session_id, validated)
+
     def link_input(
         self,
         tenant_id: str,
@@ -545,6 +556,7 @@ class SessionContentWriter:
         session_id: str,
         binding: ContentRuntimeBinding,
         _published_refs: set[ContentRef] | None = None,
+        _write_memo: _ContentWriteMemo | None = None,
     ) -> None:
         if not isinstance(tenant_id, str) or not tenant_id:
             raise ValueError("tenant_id must be a non-empty string")
@@ -572,6 +584,8 @@ class SessionContentWriter:
         self._binding = binding
         self._key_provider = binding.key_provider
         self._durable: CoreSQLContentStore = durable
+        self._write_memo = _write_memo if _write_memo is not None else _ContentWriteMemo()
+        self._durable.bind_transaction(tx, write_memo=self._write_memo)
         self.durable = cast(DurableContentStore, _ValidatedDurableContentStore(durable))
         self._published_refs = _published_refs if _published_refs is not None else set()
 
@@ -686,6 +700,10 @@ class SessionContentWriter:
             _slot(slot, _RECORD_SLOT_SPECS),
         )
 
+    def link_records(self, links: Iterable[tuple[int, ContentRef, str]]) -> None:
+        validated = tuple((record_seq, ref, _slot(slot, _RECORD_SLOT_SPECS)) for record_seq, ref, slot in links)
+        self._durable.link_records(self.tenant_id, self.session_id, validated)
+
     def assert_input(self, input_id: str, ref: ContentRef | Mapping[str, Any], slot: str) -> ContentRef:
         return self._durable.assert_link(
             self.tenant_id,
@@ -784,6 +802,7 @@ class _ContentSessionTxAdapter:
         self._tx = tx
         self._binding = binding
         self._published_refs: set[ContentRef] = set()
+        self._write_memo = _ContentWriteMemo()
 
     def content_writer(self, *, tenant_id: str, session_id: str):
         return SessionContentWriter(
@@ -792,6 +811,7 @@ class _ContentSessionTxAdapter:
             session_id=session_id,
             binding=self._binding,
             _published_refs=self._published_refs,
+            _write_memo=self._write_memo,
         )
 
     def lock_session(self, session_id: str) -> None:
@@ -868,7 +888,12 @@ class _ContentSessionStoreAdapter:
     @contextmanager
     def atomic(self) -> Iterator[SessionTx]:
         with self._store.atomic() as tx:
-            yield cast(SessionTx, _ContentSessionTxAdapter(tx, self._binding))
+            adapter = _ContentSessionTxAdapter(tx, self._binding)
+            try:
+                yield cast(SessionTx, adapter)
+            finally:
+                adapter._write_memo.clear()
+                adapter._published_refs.clear()
 
     def __getattr__(self, name: str):
         return getattr(self._store, name)

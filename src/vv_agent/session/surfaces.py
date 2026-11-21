@@ -526,11 +526,10 @@ def _project_captured_record_page(
     if not page.records:
         return page.records[-1].seq if page.records else 0, [], False
     hydration = hydration_for_session_store(store, sid)
-    hydrated_context = hydrate_records(context, hydration)
     page_sequences = {stored.seq for stored in page.records}
     events = [
         event
-        for event in project_records(hydrated_context)
+        for event in project_records(context, hydration=hydration)
         if event.metadata.get("session_seq") in page_sequences and (run_id is None or event.run_id == run_id)
     ]
     boundary = page.head_seq if through_seq is None else min(page.head_seq, through_seq)

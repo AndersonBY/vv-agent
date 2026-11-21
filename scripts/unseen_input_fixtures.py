@@ -417,6 +417,10 @@ def _history_projection(store, session_id: str, records, rows, groups: list[Appe
             if identity not in current_ids:
                 continue
             record = by_id[identity]
+            if record["kind"] == "usage_observed":
+                # The group-level observation above is the historical projection.
+                grouped_ids.add(identity)
+                continue
             if record["kind"] == "op_planned":
                 operation_id = record["operation_id"]
                 if (record.get("attempt") or 1) > 1 and operation_id in planned_versions:
@@ -431,7 +435,9 @@ def _history_projection(store, session_id: str, records, rows, groups: list[Appe
         missing = sorted(current_ids - projected_ids)
         extra = sorted(projected_ids - current_ids)
         raise AssertionError(f"historical append groups mismatch: missing={missing}, extra={extra}")
-    if [record["kind"] for record in output if record["kind"] != "usage_observed"] != [record["kind"] for record in prepared]:
+    projected_kinds = [record["kind"] for record in output if record["kind"] != "usage_observed"]
+    prepared_kinds = [record["kind"] for record in prepared if record["kind"] != "usage_observed"]
+    if projected_kinds != prepared_kinds:
         raise AssertionError("historical append groups reordered logical records")
 
     _finish_payload_digests(prepared)

@@ -8,9 +8,15 @@ from dataclasses import replace
 from vv_agent.kernel._sql import SQLStore
 from vv_agent.tracing import Span, TraceProcessor
 
-from .projection import SessionHydration, hydrate_record_payload, hydration_for_session_store
+from .projection import (
+    SessionHydration,
+    hydration_for_session_store,
+    projection_records_frame,
+)
 from .records import copy_json, digest
 from .store import SessionStore, StoredRecord
+
+_SPAN_CONTENT_KINDS = frozenset({"turn_started", "op_planned", "op_prepared", "op_completed", "turn_ended"})
 
 
 def project_spans(
@@ -18,10 +24,15 @@ def project_spans(
     *,
     hydration: SessionHydration | None = None,
 ) -> list[tuple[int, str, Span]]:
+    with projection_records_frame(records, hydration, hydrate_kinds=_SPAN_CONTENT_KINDS) as hydrated:
+        return _project_hydrated_spans(hydrated)
+
+
+def _project_hydrated_spans(records: tuple[StoredRecord, ...]) -> list[tuple[int, str, Span]]:
     spans, deliveries, plans = {}, [], {}
     for stored in records:
         r = stored.record
-        p = hydrate_record_payload(stored, hydration)
+        p = copy_json(r._payload)
         tid = r.turn_id
         if tid is None:
             continue

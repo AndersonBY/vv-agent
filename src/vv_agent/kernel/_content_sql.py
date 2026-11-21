@@ -14,7 +14,7 @@ import hmac
 import json
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
 from ._canonical_json import canonical_json_bytes, validate_sha256
@@ -47,9 +47,24 @@ _NONCE_BYTES = 12
 _STAGING_PIN_MS = 5 * 60 * 1000
 _CONTENT_COLUMNS = "content_id,key_id,mac,size,labels,state,nonce,ciphertext,object_locator"
 _READ_FRAME_OWNER_BATCH = 256
+_CONTENT_LINK_INSERT_BATCH = 128
 _COMMAND_POLICY_FIELDS = frozenset({"network_policy_digest", "isolation_policy_digest"})
 
 ObjectLocatorCleaner = Callable[[str, str, bytes], None]
+
+
+@dataclass(slots=True)
+class _ContentWriteMemo:
+    """Secrets and immutable content identities retained only by one SQL transaction."""
+
+    session_keys: dict[tuple[str, str], SessionKeyRecord] = field(default_factory=dict)
+    data_keys: dict[tuple[str, str], bytes] = field(default_factory=dict)
+    content: dict[tuple[str, str, str, ContentLabels], tuple[ContentRef, ContentState]] = field(default_factory=dict)
+
+    def clear(self) -> None:
+        self.session_keys.clear()
+        self.data_keys.clear()
+        self.content.clear()
 
 
 @dataclass(frozen=True, slots=True)
@@ -590,6 +605,19 @@ class CoreSQLContentStore:
         if object_locator_cleaner is not None and not callable(object_locator_cleaner):
             raise TypeError("object_locator_cleaner must be callable")
         self._object_locator_cleaner = object_locator_cleaner
+        self._write_memo: _ContentWriteMemo | None = None
+        self._transaction_active: Callable[[], None] | None = None
+
+    def bind_transaction(self, tx: Any, *, write_memo: _ContentWriteMemo | None = None) -> None:
+        """Bind caches to one caller-owned transaction and its active guard."""
+
+        self._write_memo = write_memo if write_memo is not None else _ContentWriteMemo()
+        self._transaction_active = tx._active
+
+    def close(self) -> None:
+        if self._write_memo is not None:
+            self._write_memo.clear()
+        self._write_memo = None
 
     def set_object_locator_cleaner(self, cleaner: ObjectLocatorCleaner) -> None:
         """Attach the idempotent external object deletion capability."""
@@ -610,7 +638,14 @@ class CoreSQLContentStore:
             yield
 
     def _require_transaction(self) -> None:
-        self._backend.require_transaction()
+        try:
+            self._backend.require_transaction()
+            if self._transaction_active is not None:
+                self._transaction_active()
+        except BaseException:
+            if self._write_memo is not None:
+                self._write_memo.clear()
+            raise
 
     def _assert_backend_tenant_context(self, tenant_id: str) -> None:
         """Reject a tenant switch when the durable backend carries a bound identity."""
@@ -632,24 +667,52 @@ class CoreSQLContentStore:
         if row[0] != "live":
             raise ContentUnavailable("content session is fenced for deletion")
 
-    def _key_row(self, tenant_id: str, session_id: str) -> tuple[Any, ...] | None:
+    def _key_row(self, tenant_id: str, session_id: str, *, for_update: bool = False) -> tuple[Any, ...] | None:
         return self._backend.fetchone(
-            "SELECT key_id,provider_id,wrapped_key,state FROM sk_session_key WHERE tenant_id={p} AND session_id={p}",
+            "SELECT key_id,provider_id,wrapped_key,state FROM sk_session_key "
+            "WHERE tenant_id={p} AND session_id={p}"
+            f"{self._backend.lock_clause if for_update else ''}",
             (tenant_id, session_id),
         )
 
-    def _session_key(self, tenant_id: str, session_id: str) -> SessionKeyRecord:
-        row = self._key_row(tenant_id, session_id)
+    def _session_key(self, tenant_id: str, session_id: str, *, for_update: bool = False) -> SessionKeyRecord:
+        row = self._key_row(tenant_id, session_id, for_update=for_update)
         if row is None:
             raise ContentUnavailable("content session is unavailable")
         return _key_from_row(tenant_id, session_id, row)
 
-    def _active_session_key(self, tenant_id: str, session_id: str) -> SessionKeyRecord:
-        key = self._session_key(tenant_id, session_id)
+    def _active_session_key(self, tenant_id: str, session_id: str, *, for_update: bool = False) -> SessionKeyRecord:
+        key = self._session_key(tenant_id, session_id, for_update=for_update)
         if key.provider_id != self._provider_id:
             raise KeyUnavailable("session data key provider does not match")
         if key.state is not SessionKeyState.ACTIVE:
             raise KeyUnavailable("session data key is not active")
+        return key
+
+    def _write_session_key(
+        self,
+        tenant_id: str,
+        session_id: str,
+    ) -> SessionKeyRecord:
+        binding = (tenant_id, session_id)
+        memo = self._write_memo
+        if memo is not None:
+            cached = memo.session_keys.get(binding)
+            if cached is not None:
+                # The row lock and provider check are transaction-scoped; a new memo revalidates.
+                return cached
+        try:
+            key = self._active_session_key(tenant_id, session_id, for_update=True)
+        except BaseException:
+            self._discard_session_memo(tenant_id, session_id)
+            raise
+        try:
+            self._restore_key(key)
+        except BaseException:
+            self._discard_session_memo(tenant_id, session_id)
+            raise
+        if memo is not None:
+            memo.session_keys[binding] = key
         return key
 
     @staticmethod
@@ -667,6 +730,48 @@ class CoreSQLContentStore:
         if len(data_key) != _DATA_KEY_BYTES:
             raise KeyUnavailable("session data key has an invalid size")
         return data_key
+
+    def _write_data_key(self, tenant_id: str, session_id: str, key: SessionKeyRecord) -> bytes:
+        binding = (tenant_id, session_id)
+        memo = self._write_memo
+        data_key = memo.data_keys.get(binding) if memo is not None else None
+        if data_key is None:
+            data_key = self._unwrap(tenant_id, session_id, key)
+            if memo is not None:
+                memo.data_keys[binding] = data_key
+        return data_key
+
+    def _discard_session_memo(self, tenant_id: str, session_id: str, *, content_only: bool = False) -> None:
+        memo = self._write_memo
+        if memo is None:
+            return
+        if not content_only:
+            memo.session_keys.pop((tenant_id, session_id), None)
+            memo.data_keys.pop((tenant_id, session_id), None)
+        memo.content = {key: value for key, value in memo.content.items() if (key[0], key[1]) != (tenant_id, session_id)}
+
+    def _ensure_write_session_key(self, tenant_id: str, session_id: str) -> SessionKeyRecord:
+        try:
+            return self._write_session_key(tenant_id, session_id)
+        except ContentUnavailable:
+            pass
+
+        wrapped = self._key_provider.generate_data_key(tenant_id, session_id)
+        if (wrapped.tenant_id, wrapped.session_id) != (tenant_id, session_id):
+            raise ContentBindingMismatch("generated data key does not match the session binding")
+        key = SessionKeyRecord(
+            tenant_id=tenant_id,
+            session_id=session_id,
+            key_id=wrapped.key_id,
+            wrapped_key=wrapped.wrapped_key,
+            provider_id=self._provider_id,
+            state=SessionKeyState.ACTIVE,
+        )
+        self.put_session_key(key)
+        stored = self._write_session_key(tenant_id, session_id)
+        if stored != key:
+            raise ContentBindingMismatch("session key identity has different bytes")
+        return stored
 
     def command_digest(
         self,
@@ -695,8 +800,8 @@ class CoreSQLContentStore:
             operational_policy=operational_policy,
         )
         self._require_live(tenant_id, session_id)
-        key = self._active_session_key(tenant_id, session_id)
-        data_key = self._unwrap(tenant_id, session_id, key)
+        key = self._write_session_key(tenant_id, session_id)
+        data_key = self._write_data_key(tenant_id, session_id, key)
         return hmac.digest(data_key, framing, hashlib.sha256).hex()
 
     def _bound_content(
@@ -820,29 +925,7 @@ class CoreSQLContentStore:
         session_id = _text(session_id, "session_id")
         self._require_transaction()
         self._require_live(tenant_id, session_id)
-        existing = self._session_key(tenant_id, session_id) if self._key_row(tenant_id, session_id) is not None else None
-        if existing is not None:
-            if existing.provider_id != self._provider_id or existing.state is not SessionKeyState.ACTIVE:
-                raise KeyUnavailable("session data key is unavailable")
-            self._restore_key(existing)
-            return self._wrapped_key(existing)
-
-        wrapped = self._key_provider.generate_data_key(tenant_id, session_id)
-        if (wrapped.tenant_id, wrapped.session_id) != (tenant_id, session_id):
-            raise ContentBindingMismatch("generated data key does not match the session binding")
-        key = SessionKeyRecord(
-            tenant_id=tenant_id,
-            session_id=session_id,
-            key_id=wrapped.key_id,
-            wrapped_key=wrapped.wrapped_key,
-            provider_id=self._provider_id,
-            state=SessionKeyState.ACTIVE,
-        )
-        self.put_session_key(key)
-        stored = self._active_session_key(tenant_id, session_id)
-        if stored != key:
-            raise ContentBindingMismatch("session key identity has different bytes")
-        return wrapped
+        return self._wrapped_key(self._ensure_write_session_key(tenant_id, session_id))
 
     def put_session_key(self, key: SessionKeyRecord) -> None:
         self._require_transaction()
@@ -878,6 +961,7 @@ class CoreSQLContentStore:
                 "UPDATE sk_session_key SET state={p} WHERE tenant_id={p} AND session_id={p} AND key_id={p} AND state='active'",
                 (key.state.value, key.tenant_id, key.session_id, key.key_id),
             )
+            self._discard_session_memo(key.tenant_id, key.session_id)
             return
         raise KeyUnavailable("session data key state transition is not allowed")
 
@@ -905,11 +989,19 @@ class CoreSQLContentStore:
         self._require_transaction()
         self._require_live(tenant_id, session_id)
 
-        wrapped = self.create_session_key(tenant_id, session_id)
-        key = self._active_session_key(tenant_id, session_id)
-        data_key = self._unwrap(tenant_id, session_id, key)
+        key = self._ensure_write_session_key(tenant_id, session_id)
+        wrapped = self._wrapped_key(key)
+        data_key = self._write_data_key(tenant_id, session_id, key)
         mac = _content_mac(data_key, tenant_id, session_id, plaintext)
         _labels, labels_bytes = _labels_from_storage(canonical_json_bytes(labels.to_dict()))
+        memo_key = (tenant_id, session_id, mac, labels)
+        memo = self._write_memo
+        cached = memo.content.get(memo_key) if memo is not None else None
+        if cached is not None:
+            existing, existing_state = cached
+            if existing.mac != mac or existing.labels != labels or existing.size != len(plaintext):
+                raise ContentIntegrityError("deduplicated content metadata is inconsistent")
+            return self._reuse_content(tenant_id, session_id, existing, existing_state, content_state, memo_key=memo_key)
         existing_row = self._backend.fetchone(
             f"SELECT {_CONTENT_COLUMNS} FROM sk_content "
             "WHERE tenant_id={p} AND session_id={p} AND key_id={p} AND mac={p} AND labels={p}"
@@ -920,7 +1012,14 @@ class CoreSQLContentStore:
             existing, existing_state, _nonce, _ciphertext, _locator = _content_from_row(existing_row)
             if existing.mac != mac or existing.labels != labels or existing.size != len(plaintext):
                 raise ContentIntegrityError("deduplicated content metadata is inconsistent")
-            return self._reuse_content(tenant_id, session_id, existing, existing_state, content_state)
+            return self._reuse_content(
+                tenant_id,
+                session_id,
+                existing,
+                existing_state,
+                content_state,
+                memo_key=memo_key,
+            )
 
         content_id = f"content_{_random_token(self._cipher, 32)}"
         size = len(plaintext)
@@ -953,6 +1052,8 @@ class CoreSQLContentStore:
             ),
         )
         if inserted:
+            if memo is not None:
+                memo.content[memo_key] = (ref, content_state)
             return ref
 
         # A concurrent caller may have won the unique identity between selection and insertion.
@@ -965,7 +1066,14 @@ class CoreSQLContentStore:
         if row is None:
             raise ContentUnavailable("content insertion did not produce a row")
         existing, existing_state, _nonce, _ciphertext, _locator = _content_from_row(row)
-        return self._reuse_content(tenant_id, session_id, existing, existing_state, content_state)
+        return self._reuse_content(
+            tenant_id,
+            session_id,
+            existing,
+            existing_state,
+            content_state,
+            memo_key=memo_key,
+        )
 
     def _reuse_content(
         self,
@@ -974,6 +1082,8 @@ class CoreSQLContentStore:
         existing: ContentRef,
         existing_state: ContentState,
         requested_state: ContentState,
+        *,
+        memo_key: tuple[str, str, str, ContentLabels] | None = None,
     ) -> ContentRef:
         if existing_state is ContentState.GC_PENDING:
             raise ContentUnavailable("deduplicated content is unavailable")
@@ -990,6 +1100,11 @@ class CoreSQLContentStore:
                     "WHERE tenant_id={p} AND session_id={p} AND content_id={p} AND state='staged'",
                     (self._backend.now_ms() + _STAGING_PIN_MS, tenant_id, session_id, existing.content_id),
                 )
+        if memo_key is not None and self._write_memo is not None:
+            self._write_memo.content[memo_key] = (
+                existing,
+                requested_state if existing_state is ContentState.STAGED else existing_state,
+            )
         return existing
 
     def get(self, tenant_id: str, session_id: str, ref: ContentRef) -> bytes:
@@ -1157,7 +1272,11 @@ class CoreSQLContentStore:
         if not isinstance(ref, ContentRef):
             raise TypeError("ref must be ContentRef")
         self._require_live(tenant_id, session_id)
-        key = self._active_session_key(tenant_id, session_id)
+        if for_update:
+            key = self._write_session_key(tenant_id, session_id)
+            self._write_data_key(tenant_id, session_id, key)
+        else:
+            key = self._active_session_key(tenant_id, session_id)
         row = self._backend.fetchone(
             f"SELECT {_CONTENT_COLUMNS},pin_until_ms FROM sk_content "
             "WHERE tenant_id={p} AND session_id={p} AND content_id={p}"
@@ -1209,6 +1328,140 @@ class CoreSQLContentStore:
             "AND content_id={p} AND state IN ('staged','live')",
             (tenant_id, session_id, ref.content_id),
         )
+
+    def link_records(
+        self,
+        tenant_id: str,
+        session_id: str,
+        links: Iterable[tuple[int, ContentRef, str]],
+    ) -> None:
+        """Link one record batch with constant SQL round trips per bounded chunk."""
+
+        tenant_id = _text(tenant_id, "tenant_id")
+        session_id = _text(session_id, "session_id")
+        normalized: list[tuple[int, ContentRef, str]] = []
+        owner_slots: dict[tuple[int, str], ContentRef] = {}
+        for record_seq, ref_o, slot_o in links:
+            _, owner = _owner_identity(record_seq=record_seq, input_id=None)
+            assert isinstance(owner, int)
+            if not isinstance(ref_o, ContentRef):
+                raise TypeError("ref must be ContentRef")
+            slot = _link_slot(slot_o)
+            owner_slot = (owner, slot)
+            previous = owner_slots.get(owner_slot)
+            if previous is not None and previous != ref_o:
+                raise ContentLinkConflict("content owner slot is already linked")
+            owner_slots[owner_slot] = ref_o
+            normalized.append((owner, ref_o, slot))
+        if not normalized:
+            return
+
+        self._require_transaction()
+        self._require_live(tenant_id, session_id)
+        key = self._write_session_key(tenant_id, session_id)
+        self._write_data_key(tenant_id, session_id, key)
+        refs_by_id: dict[str, list[ContentRef]] = {}
+        for _owner, ref, _slot in normalized:
+            refs_by_id.setdefault(ref.content_id, []).append(ref)
+
+        content_ids = tuple(sorted(refs_by_id))
+        for offset in range(0, len(content_ids), _READ_FRAME_OWNER_BATCH):
+            chunk = content_ids[offset : offset + _READ_FRAME_OWNER_BATCH]
+            placeholders = ",".join("{p}" for _ in chunk)
+            rows = self._backend.fetchall(
+                f"SELECT {_CONTENT_COLUMNS},pin_until_ms FROM sk_content "
+                "WHERE tenant_id={p} AND session_id={p} "
+                f"AND content_id IN ({placeholders}) ORDER BY content_id{self._backend.lock_clause}",
+                (tenant_id, session_id, *chunk),
+            )
+            now_ms = self._backend.now_ms()
+            for row in rows:
+                stored, state, _nonce, _ciphertext, _locator = _content_from_row(row[:-1])
+                candidates = refs_by_id.pop(stored.content_id, ())
+                for ref in candidates:
+                    if stored.key_id != key.key_id or ref.key_id != key.key_id:
+                        raise ContentBindingMismatch("content key does not belong to the session binding")
+                    if stored != ref:
+                        raise ContentIntegrityError("content metadata does not match its reference")
+                    if state is ContentState.GC_PENDING:
+                        raise ContentUnavailable("content is unavailable")
+                    if state is ContentState.STAGED and (row[-1] is None or row[-1] <= now_ms):
+                        raise ContentUnavailable("content staging pin is expired")
+        if refs_by_id:
+            raise ContentUnavailable("content is unavailable")
+
+        owners = tuple(dict.fromkeys(owner for owner, _ref, _slot in normalized))
+        for offset in range(0, len(owners), _READ_FRAME_OWNER_BATCH):
+            chunk = owners[offset : offset + _READ_FRAME_OWNER_BATCH]
+            placeholders = ",".join("{p}" for _ in chunk)
+            rows = self._backend.fetchall(
+                f"SELECT seq FROM sk_record WHERE tenant_id={{p}} AND session_id={{p}} AND seq IN ({placeholders})",
+                (tenant_id, session_id, *chunk),
+            )
+            if {row[0] for row in rows} != set(chunk):
+                raise ContentUnavailable("content owner is unavailable")
+
+        persisted: dict[tuple[int, str], tuple[Any, ...]] = {}
+        for offset in range(0, len(owners), _READ_FRAME_OWNER_BATCH):
+            owner_chunk = owners[offset : offset + _READ_FRAME_OWNER_BATCH]
+            owner_placeholders = ",".join("{p}" for _ in owner_chunk)
+            rows = self._backend.fetchall(
+                "SELECT record_seq,slot,content_id FROM sk_content_link "
+                "WHERE tenant_id={p} AND session_id={p} "
+                f"AND record_seq IN ({owner_placeholders})",
+                (tenant_id, session_id, *owner_chunk),
+            )
+            persisted.update({(row[0], row[1]): row for row in rows})
+        for record_seq, ref, slot in normalized:
+            row = persisted.get((record_seq, slot))
+            if row is not None and row[2] != ref.content_id:
+                raise ContentLinkConflict("content owner slot is already linked")
+
+        unique_links = tuple(dict.fromkeys(normalized))
+        for offset in range(0, len(unique_links), _CONTENT_LINK_INSERT_BATCH):
+            chunk = unique_links[offset : offset + _CONTENT_LINK_INSERT_BATCH]
+            placeholders = ",".join("({p},{p},{p},{p},{p})" for _ in chunk)
+            params: list[Any] = []
+            for record_seq, ref, slot in chunk:
+                params.extend((tenant_id, session_id, ref.content_id, record_seq, slot))
+            self._backend.run(
+                "INSERT INTO sk_content_link(tenant_id,session_id,content_id,record_seq,slot) "
+                f"VALUES {placeholders} ON CONFLICT DO NOTHING",
+                tuple(params),
+            )
+
+        persisted.clear()
+        for offset in range(0, len(owners), _READ_FRAME_OWNER_BATCH):
+            owner_chunk = owners[offset : offset + _READ_FRAME_OWNER_BATCH]
+            owner_placeholders = ",".join("{p}" for _ in owner_chunk)
+            rows = self._backend.fetchall(
+                "SELECT record_seq,slot,content_id FROM sk_content_link "
+                "WHERE tenant_id={p} AND session_id={p} "
+                f"AND record_seq IN ({owner_placeholders})",
+                (tenant_id, session_id, *owner_chunk),
+            )
+            for row in rows:
+                persisted[(row[0], row[1])] = row
+        for record_seq, ref, slot in normalized:
+            row = persisted.get((record_seq, slot))
+            if row is None or row[2] != ref.content_id:
+                raise ContentLinkConflict("content owner slot is already linked")
+
+        content_id_chunk = tuple(sorted({ref.content_id for _owner, ref, _slot in normalized}))
+        for offset in range(0, len(content_id_chunk), _READ_FRAME_OWNER_BATCH):
+            chunk = content_id_chunk[offset : offset + _READ_FRAME_OWNER_BATCH]
+            placeholders = ",".join("{p}" for _ in chunk)
+            self._backend.run(
+                "UPDATE sk_content SET state='live',pin_until_ms=NULL "
+                "WHERE tenant_id={p} AND session_id={p} "
+                f"AND content_id IN ({placeholders}) AND state IN ('staged','live')",
+                (tenant_id, session_id, *chunk),
+            )
+        if self._write_memo is not None:
+            live_ids = set(content_id_chunk)
+            for memo_key, (ref, _state) in tuple(self._write_memo.content.items()):
+                if ref.content_id in live_ids:
+                    self._write_memo.content[memo_key] = (ref, ContentState.LIVE)
 
     def link_record(self, tenant_id: str, session_id: str, record_seq: int, ref: ContentRef, slot: str) -> None:
         tenant_id = _text(tenant_id, "tenant_id")
@@ -1297,6 +1550,7 @@ class CoreSQLContentStore:
         session_id = _text(session_id, "session_id")
         self._require_transaction()
         self._require_live(tenant_id, session_id)
+        self._discard_session_memo(tenant_id, session_id, content_only=True)
         now_ms = self._backend.now_ms()
         candidates = self._backend.fetchall(
             "SELECT c.content_id,c.object_locator FROM sk_content c "
@@ -1347,6 +1601,7 @@ class CoreSQLContentStore:
         tenant_id = _text(tenant_id, "tenant_id")
         session_id = _text(session_id, "session_id")
         self._require_transaction()
+        self._discard_session_memo(tenant_id, session_id)
         row = self._key_row(tenant_id, session_id)
         if row is None:
             content_count = self._backend.fetchone(
