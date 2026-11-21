@@ -1,7 +1,4 @@
 {
-  "historical_contract_version": "39.0.0",
-  "historical_record_schema_version": 1,
-  "historical_inbox_schema_version": 3,
   "producer": "scripts/unseen_input_fixtures.py",
   "cases": [
     {

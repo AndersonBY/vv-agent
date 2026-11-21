@@ -2,3047 +2,1131 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "oneOf": [
     {
-      "allOf": [
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "schema_version": {
-              "const": "S1",
-              "type": "string"
-            },
-            "feature_level": {
-              "const": 1,
-              "type": "integer"
-            },
-            "actor": {
-              "$ref": "#/$defs/Principal"
-            },
-            "admission_proof": {
-              "$ref": "#/$defs/AdmissionProof"
-            },
-            "input_id": {
-              "type": "string",
-              "minLength": 1
-            },
-            "kind": {
-              "type": "string"
-            },
-            "target_turn_id": {
-              "anyOf": [
-                {
-                  "type": "string",
-                  "minLength": 1
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "generation": {
-              "anyOf": [
-                {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "available_ms": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "payload": {
-              "type": "object"
-            }
-          },
-          "required": [
-            "schema_version",
-            "feature_level",
-            "actor",
-            "admission_proof",
-            "input_id",
-            "kind",
-            "target_turn_id",
-            "generation",
-            "available_ms",
-            "payload"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "kind": {
-              "const": "user"
-            },
-            "payload": {
-              "$ref": "#/$defs/ContentPayload"
-            }
-          }
-        }
-      ]
-    },
-    {
-      "allOf": [
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "schema_version": {
-              "const": "S1",
-              "type": "string"
-            },
-            "feature_level": {
-              "const": 1,
-              "type": "integer"
-            },
-            "actor": {
-              "$ref": "#/$defs/Principal"
-            },
-            "admission_proof": {
-              "$ref": "#/$defs/AdmissionProof"
-            },
-            "input_id": {
-              "type": "string",
-              "minLength": 1
-            },
-            "kind": {
-              "type": "string"
-            },
-            "target_turn_id": {
-              "anyOf": [
-                {
-                  "type": "string",
-                  "minLength": 1
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "generation": {
-              "anyOf": [
-                {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "available_ms": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "payload": {
-              "type": "object"
-            }
-          },
-          "required": [
-            "schema_version",
-            "feature_level",
-            "actor",
-            "admission_proof",
-            "input_id",
-            "kind",
-            "target_turn_id",
-            "generation",
-            "available_ms",
-            "payload"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "kind": {
-              "const": "steer"
-            },
-            "payload": {
-              "$ref": "#/$defs/ContentPayload"
-            }
-          }
-        }
-      ]
-    },
-    {
-      "allOf": [
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "schema_version": {
-              "const": "S1",
-              "type": "string"
-            },
-            "feature_level": {
-              "const": 1,
-              "type": "integer"
-            },
-            "actor": {
-              "$ref": "#/$defs/Principal"
-            },
-            "admission_proof": {
-              "$ref": "#/$defs/AdmissionProof"
-            },
-            "input_id": {
-              "type": "string",
-              "minLength": 1
-            },
-            "kind": {
-              "type": "string"
-            },
-            "target_turn_id": {
-              "anyOf": [
-                {
-                  "type": "string",
-                  "minLength": 1
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "generation": {
-              "anyOf": [
-                {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "available_ms": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "payload": {
-              "type": "object"
-            }
-          },
-          "required": [
-            "schema_version",
-            "feature_level",
-            "actor",
-            "admission_proof",
-            "input_id",
-            "kind",
-            "target_turn_id",
-            "generation",
-            "available_ms",
-            "payload"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "kind": {
-              "const": "follow_up"
-            },
-            "payload": {
-              "$ref": "#/$defs/ContentPayload"
-            }
-          }
-        }
-      ]
-    },
-    {
-      "allOf": [
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "schema_version": {
-              "const": "S1",
-              "type": "string"
-            },
-            "feature_level": {
-              "const": 1,
-              "type": "integer"
-            },
-            "actor": {
-              "$ref": "#/$defs/Principal"
-            },
-            "admission_proof": {
-              "$ref": "#/$defs/AdmissionProof"
-            },
-            "input_id": {
-              "type": "string",
-              "minLength": 1
-            },
-            "kind": {
-              "type": "string"
-            },
-            "target_turn_id": {
-              "anyOf": [
-                {
-                  "type": "string",
-                  "minLength": 1
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "generation": {
-              "anyOf": [
-                {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "available_ms": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "payload": {
-              "type": "object"
-            }
-          },
-          "required": [
-            "schema_version",
-            "feature_level",
-            "actor",
-            "admission_proof",
-            "input_id",
-            "kind",
-            "target_turn_id",
-            "generation",
-            "available_ms",
-            "payload"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "kind": {
-              "const": "provider_result"
-            },
-            "payload": {
-              "$ref": "#/$defs/ProviderResultPayload"
-            }
-          }
-        }
-      ]
-    },
-    {
-      "allOf": [
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "schema_version": {
-              "const": "S1",
-              "type": "string"
-            },
-            "feature_level": {
-              "const": 1,
-              "type": "integer"
-            },
-            "actor": {
-              "$ref": "#/$defs/Principal"
-            },
-            "admission_proof": {
-              "$ref": "#/$defs/AdmissionProof"
-            },
-            "input_id": {
-              "type": "string",
-              "minLength": 1
-            },
-            "kind": {
-              "type": "string"
-            },
-            "target_turn_id": {
-              "anyOf": [
-                {
-                  "type": "string",
-                  "minLength": 1
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "generation": {
-              "anyOf": [
-                {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "available_ms": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "payload": {
-              "type": "object"
-            }
-          },
-          "required": [
-            "schema_version",
-            "feature_level",
-            "actor",
-            "admission_proof",
-            "input_id",
-            "kind",
-            "target_turn_id",
-            "generation",
-            "available_ms",
-            "payload"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "kind": {
-              "const": "approval_answer"
-            },
-            "payload": {
-              "$ref": "#/$defs/ApprovalAnswerPayload"
-            }
-          }
-        }
-      ]
-    },
-    {
-      "allOf": [
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "schema_version": {
-              "const": "S1",
-              "type": "string"
-            },
-            "feature_level": {
-              "const": 1,
-              "type": "integer"
-            },
-            "actor": {
-              "$ref": "#/$defs/Principal"
-            },
-            "admission_proof": {
-              "$ref": "#/$defs/AdmissionProof"
-            },
-            "input_id": {
-              "type": "string",
-              "minLength": 1
-            },
-            "kind": {
-              "type": "string"
-            },
-            "target_turn_id": {
-              "anyOf": [
-                {
-                  "type": "string",
-                  "minLength": 1
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "generation": {
-              "anyOf": [
-                {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "available_ms": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "payload": {
-              "type": "object"
-            }
-          },
-          "required": [
-            "schema_version",
-            "feature_level",
-            "actor",
-            "admission_proof",
-            "input_id",
-            "kind",
-            "target_turn_id",
-            "generation",
-            "available_ms",
-            "payload"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "kind": {
-              "const": "child_result"
-            },
-            "payload": {
-              "$ref": "#/$defs/ChildResultPayload"
-            }
-          }
-        }
-      ]
-    },
-    {
-      "allOf": [
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "schema_version": {
-              "const": "S1",
-              "type": "string"
-            },
-            "feature_level": {
-              "const": 1,
-              "type": "integer"
-            },
-            "actor": {
-              "$ref": "#/$defs/Principal"
-            },
-            "admission_proof": {
-              "$ref": "#/$defs/AdmissionProof"
-            },
-            "input_id": {
-              "type": "string",
-              "minLength": 1
-            },
-            "kind": {
-              "type": "string"
-            },
-            "target_turn_id": {
-              "anyOf": [
-                {
-                  "type": "string",
-                  "minLength": 1
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "generation": {
-              "anyOf": [
-                {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "available_ms": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "payload": {
-              "type": "object"
-            }
-          },
-          "required": [
-            "schema_version",
-            "feature_level",
-            "actor",
-            "admission_proof",
-            "input_id",
-            "kind",
-            "target_turn_id",
-            "generation",
-            "available_ms",
-            "payload"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "kind": {
-              "const": "control"
-            },
-            "payload": {
-              "$ref": "#/$defs/ControlPayload"
-            }
-          }
-        }
-      ]
-    },
-    {
-      "allOf": [
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "schema_version": {
-              "const": "S1",
-              "type": "string"
-            },
-            "feature_level": {
-              "const": 1,
-              "type": "integer"
-            },
-            "actor": {
-              "$ref": "#/$defs/Principal"
-            },
-            "admission_proof": {
-              "$ref": "#/$defs/AdmissionProof"
-            },
-            "input_id": {
-              "type": "string",
-              "minLength": 1
-            },
-            "kind": {
-              "type": "string"
-            },
-            "target_turn_id": {
-              "anyOf": [
-                {
-                  "type": "string",
-                  "minLength": 1
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "generation": {
-              "anyOf": [
-                {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "available_ms": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "payload": {
-              "type": "object"
-            }
-          },
-          "required": [
-            "schema_version",
-            "feature_level",
-            "actor",
-            "admission_proof",
-            "input_id",
-            "kind",
-            "target_turn_id",
-            "generation",
-            "available_ms",
-            "payload"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "kind": {
-              "const": "provider_evidence"
-            },
-            "payload": {
-              "$ref": "#/$defs/ProviderEvidencePayload"
-            }
-          }
-        }
-      ]
-    },
-    {
-      "allOf": [
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "schema_version": {
-              "const": "S1",
-              "type": "string"
-            },
-            "feature_level": {
-              "const": 1,
-              "type": "integer"
-            },
-            "actor": {
-              "$ref": "#/$defs/Principal"
-            },
-            "admission_proof": {
-              "$ref": "#/$defs/AdmissionProof"
-            },
-            "input_id": {
-              "type": "string",
-              "minLength": 1
-            },
-            "kind": {
-              "type": "string"
-            },
-            "target_turn_id": {
-              "anyOf": [
-                {
-                  "type": "string",
-                  "minLength": 1
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "generation": {
-              "anyOf": [
-                {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "available_ms": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "payload": {
-              "type": "object"
-            }
-          },
-          "required": [
-            "schema_version",
-            "feature_level",
-            "actor",
-            "admission_proof",
-            "input_id",
-            "kind",
-            "target_turn_id",
-            "generation",
-            "available_ms",
-            "payload"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "kind": {
-              "const": "model_selection"
-            },
-            "payload": {
-              "$ref": "#/$defs/ModelSelectionPayload"
-            }
-          }
-        }
-      ]
-    }
-  ],
-  "$defs": {
-    "ContentLabels": {
-      "type": "object",
       "additionalProperties": false,
       "properties": {
-        "source": {
-          "type": "array",
-          "items": {
-            "type": "string",
-            "enum": [
-              "system",
-              "user",
-              "internal",
-              "untrusted"
-            ]
-          },
-          "uniqueItems": true
-        },
-        "classification": {
-          "type": "string",
-          "enum": [
-            "public",
-            "internal",
-            "confidential",
-            "restricted"
-          ]
-        }
-      },
-      "required": [
-        "source",
-        "classification"
-      ]
-    },
-    "ContentRef": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "content_id": {
-          "type": "string",
-          "minLength": 1
-        },
-        "mac": {
-          "type": "string",
-          "pattern": "^[0-9a-f]{64}$",
-          "maxLength": 64
-        },
-        "size": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "key_id": {
-          "type": "string",
-          "minLength": 1
-        },
-        "labels": {
-          "$ref": "#/$defs/ContentLabels"
-        }
-      },
-      "required": [
-        "content_id",
-        "mac",
-        "size",
-        "key_id",
-        "labels"
-      ]
-    },
-    "Principal": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "tenant_id": {
-          "type": "string",
-          "minLength": 1
-        },
-        "subject_id": {
-          "type": "string",
-          "minLength": 1
-        },
-        "subject_kind": {
-          "type": "string",
-          "enum": [
-            "user",
-            "service",
-            "agent"
-          ]
-        },
-        "attributes": {
-          "$ref": "#/$defs/ContentRef"
-        }
-      },
-      "required": [
-        "tenant_id",
-        "subject_id",
-        "subject_kind",
-        "attributes"
-      ]
-    },
-    "AdmissionProof": {
-      "anyOf": [
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "admission_key_id": {
-              "type": "string",
-              "minLength": 1
-            },
-            "admission_signature": {
-              "type": "string",
-              "minLength": 4,
-              "pattern": "^(?:[A-Za-z0-9+/]{4})+(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
-            },
-            "admission_signed_ms": {
-              "type": "integer",
-              "minimum": 0
-            }
-          },
-          "required": [
-            "admission_key_id",
-            "admission_signature",
-            "admission_signed_ms"
-          ]
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
-    "InputProof": {
-      "anyOf": [
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "input_seq": {
-              "type": "integer",
-              "minimum": 1
-            },
-            "received_ms": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "key_id": {
-              "type": "string",
-              "minLength": 1
-            },
-            "signature": {
-              "type": "string",
-              "minLength": 4,
-              "pattern": "^(?:[A-Za-z0-9+/]{4})+(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
-            },
-            "signed_ms": {
-              "type": "integer",
-              "minimum": 0
-            }
-          },
-          "required": [
-            "input_seq",
-            "received_ms",
-            "key_id",
-            "signature",
-            "signed_ms"
-          ]
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
-    "PolicyDecision": {
-      "anyOf": [
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "policy_digest": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{64}$",
-              "maxLength": 64
-            },
-            "rule_id": {
-              "type": "string",
-              "minLength": 1
-            },
-            "effect": {
-              "type": "string",
-              "enum": [
-                "allow",
-                "deny",
-                "require_approval"
-              ]
-            }
-          },
-          "required": [
-            "policy_digest",
-            "rule_id",
-            "effect"
-          ]
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
-    "TokenizerBinding": {
-      "anyOf": [
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "model_identity": {
-              "type": "string",
-              "minLength": 1
-            },
-            "counting_method": {
-              "type": "string",
-              "enum": [
-                "provider_reported",
-                "tokenizer"
-              ]
-            },
-            "implementation_id": {
-              "type": "string",
-              "minLength": 1
-            },
-            "asset_identity": {
-              "type": "string",
-              "minLength": 1
-            },
-            "normalization_id": {
-              "type": "string",
-              "minLength": 1
-            }
-          },
-          "required": [
-            "model_identity",
-            "counting_method",
-            "implementation_id",
-            "asset_identity",
-            "normalization_id"
-          ]
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
-    "CacheUsage": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "status": {
-          "type": "string",
-          "enum": [
-            "provider_reported",
-            "accounting_missing",
-            "unsupported"
-          ]
-        },
-        "read_input_tokens": {
-          "anyOf": [
-            {
-              "type": "integer",
-              "minimum": 0
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "write_input_tokens": {
-          "anyOf": [
-            {
-              "type": "integer",
-              "minimum": 0
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "uncached_input_tokens": {
-          "anyOf": [
-            {
-              "type": "integer",
-              "minimum": 0
-            },
-            {
-              "type": "null"
-            }
-          ]
-        }
-      },
-      "required": [
-        "status",
-        "read_input_tokens",
-        "write_input_tokens",
-        "uncached_input_tokens"
-      ]
-    },
-    "TokenCounts": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "input_tokens": {
-          "anyOf": [
-            {
-              "type": "integer",
-              "minimum": 0
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "output_tokens": {
-          "anyOf": [
-            {
-              "type": "integer",
-              "minimum": 0
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "total_tokens": {
-          "anyOf": [
-            {
-              "type": "integer",
-              "minimum": 0
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "reasoning_tokens": {
-          "anyOf": [
-            {
-              "type": "integer",
-              "minimum": 0
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "usage_source": {
-          "type": "string",
-          "enum": [
-            "provider_reported",
-            "estimated",
-            "accounting_missing"
-          ]
-        },
-        "cache_usage": {
-          "$ref": "#/$defs/CacheUsage"
-        }
-      },
-      "required": [
-        "input_tokens",
-        "output_tokens",
-        "total_tokens",
-        "reasoning_tokens",
-        "usage_source",
-        "cache_usage"
-      ]
-    },
-    "BudgetCounts": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "cycles": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "tool_calls": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "elapsed_ms": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "total_tokens": {
-          "anyOf": [
-            {
-              "type": "integer",
-              "minimum": 0
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "uncached_input_tokens": {
-          "anyOf": [
-            {
-              "type": "integer",
-              "minimum": 0
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "tool_calls_by_name": {
-          "type": "object",
-          "additionalProperties": {
-            "type": "integer",
-            "minimum": 0
-          }
-        },
-        "host_cost": {
-          "anyOf": [
-            {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "amount_microunits": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "unit": {
-                  "$ref": "#/$defs/ContentRef"
-                },
-                "currency": {
-                  "anyOf": [
-                    {
-                      "$ref": "#/$defs/ContentRef"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                }
-              },
-              "required": [
-                "amount_microunits",
-                "unit",
-                "currency"
-              ]
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "unavailable_dimensions": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "properties": {
-              "dimension": {
-                "type": "string",
-                "enum": [
-                  "total_tokens",
-                  "uncached_input_tokens",
-                  "tool_calls",
-                  "tool_calls_by_name",
-                  "wall_time",
-                  "host_cost"
-                ]
-              },
-              "reason": {
-                "type": "string",
-                "enum": [
-                  "accounting_missing",
-                  "usage_missing",
-                  "meter_missing",
-                  "meter_unavailable",
-                  "meter_error",
-                  "unit_mismatch",
-                  "currency_mismatch",
-                  "non_monotonic",
-                  "integer_overflow"
-                ]
-              }
-            },
-            "required": [
-              "dimension",
-              "reason"
-            ]
-          }
-        }
-      },
-      "required": [
-        "cycles",
-        "tool_calls",
-        "elapsed_ms",
-        "total_tokens",
-        "uncached_input_tokens",
-        "tool_calls_by_name",
-        "host_cost",
-        "unavailable_dimensions"
-      ]
-    },
-    "UsageCounts": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "tokens": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/TokenCounts"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "budget": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/BudgetCounts"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        }
-      },
-      "required": [
-        "tokens",
-        "budget"
-      ]
-    },
-    "Requirements": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "level": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "handler_version": {
-          "anyOf": [
-            {
-              "type": "string",
-              "minLength": 1
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "capabilities": {
-          "type": "array",
-          "items": {
-            "type": "string",
-            "minLength": 1
-          },
-          "uniqueItems": true
-        }
-      },
-      "required": [
-        "level",
-        "handler_version",
-        "capabilities"
-      ]
-    },
-    "EnvironmentBinding": {
-      "anyOf": [
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "descriptor": {
-              "$ref": "#/$defs/ContentRef"
-            },
-            "environment_capabilities": {
-              "type": "array",
-              "items": {
-                "type": "string",
-                "minLength": 1
-              },
-              "uniqueItems": true
-            },
-            "capabilities_digest": {
-              "anyOf": [
-                {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{64}$",
-                  "maxLength": 64
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "network_policy_ref_digest": {
-              "anyOf": [
-                {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{64}$",
-                  "maxLength": 64
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "isolation_policy_ref_digest": {
-              "anyOf": [
-                {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{64}$",
-                  "maxLength": 64
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "operational_policy": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/ContentRef"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "descriptor",
-            "environment_capabilities",
-            "capabilities_digest",
-            "network_policy_ref_digest",
-            "isolation_policy_ref_digest",
-            "operational_policy"
-          ]
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
-    "ResultId": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "operation_id": {
-          "type": "string",
-          "minLength": 1
-        },
-        "attempt": {
-          "type": "integer",
-          "minimum": 1
-        }
-      },
-      "required": [
-        "operation_id",
-        "attempt"
-      ]
-    },
-    "ProviderHandle": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "kind": {
-          "const": "provider"
-        },
-        "provider": {
-          "type": "string",
-          "minLength": 1
-        },
-        "job_id": {
-          "$ref": "#/$defs/ContentRef"
-        },
-        "operation_id": {
-          "type": "string",
-          "minLength": 1
-        },
-        "attempt": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "request_digest": {
-          "type": "string",
-          "pattern": "^[0-9a-f]{64}$",
-          "maxLength": 64
-        },
-        "evidence": {
-          "$ref": "#/$defs/ContentRef"
-        },
-        "query_ref": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ContentRef"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "cancel_ref": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ContentRef"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        }
-      },
-      "required": [
-        "kind",
-        "provider",
-        "job_id",
-        "operation_id",
-        "attempt",
-        "request_digest",
-        "evidence",
-        "query_ref",
-        "cancel_ref"
-      ]
-    },
-    "ApprovalHandle": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "kind": {
-          "const": "approval"
-        },
-        "request_id": {
-          "type": "string",
-          "minLength": 1
-        },
-        "request_digest": {
-          "type": "string",
-          "pattern": "^[0-9a-f]{64}$",
-          "maxLength": 64
-        },
-        "scope": {
-          "$ref": "#/$defs/ContentRef"
-        }
-      },
-      "required": [
-        "kind",
-        "request_id",
-        "request_digest",
-        "scope"
-      ]
-    },
-    "UserHandle": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "kind": {
-          "const": "user"
-        },
-        "interaction_id": {
-          "type": "string",
-          "minLength": 1
-        },
-        "question": {
-          "$ref": "#/$defs/ContentRef"
-        }
-      },
-      "required": [
-        "kind",
-        "interaction_id",
-        "question"
-      ]
-    },
-    "ChildHandle": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "kind": {
-          "const": "child"
-        },
-        "session_id": {
-          "type": "string",
-          "minLength": 1
-        },
-        "turn_id": {
-          "type": "string",
-          "minLength": 1
-        },
-        "generation": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "background": {
-          "type": "boolean"
-        },
-        "delivery_target": {
-          "$ref": "#/$defs/DeliveryTarget"
-        },
-        "siblings": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/ChildIdentity"
-          }
-        }
-      },
-      "required": [
-        "kind",
-        "session_id",
-        "turn_id",
-        "generation",
-        "background",
-        "delivery_target"
-      ]
-    },
-    "DeliveryTarget": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "session_id": {
-          "type": "string",
-          "minLength": 1
-        },
-        "turn_id": {
-          "type": "string",
-          "minLength": 1
-        },
-        "generation": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "operation_id": {
-          "type": "string",
-          "minLength": 1
-        },
-        "attempt": {
-          "type": "integer",
-          "minimum": 1
-        }
-      },
-      "required": [
-        "session_id",
-        "turn_id",
-        "generation",
-        "operation_id",
-        "attempt"
-      ]
-    },
-    "ChildIdentity": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "session_id": {
-          "type": "string",
-          "minLength": 1
-        },
-        "turn_id": {
-          "type": "string",
-          "minLength": 1
-        },
-        "generation": {
-          "type": "integer",
-          "minimum": 0
-        }
-      },
-      "required": [
-        "session_id",
-        "turn_id",
-        "generation"
-      ]
-    },
-    "Delegation": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "mode": {
-          "type": "string",
-          "enum": [
-            "configured",
-            "agent_as_tool",
-            "background_task",
-            "handoff"
-          ]
-        },
-        "agent_name": {
-          "$ref": "#/$defs/ContentRef"
-        },
-        "handoff_count": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "max_handoffs": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "metadata": {
-          "$ref": "#/$defs/ContentRef"
-        }
-      },
-      "required": [
-        "mode",
-        "agent_name",
-        "handoff_count",
-        "max_handoffs",
-        "metadata"
-      ]
-    },
-    "ModelSelectionPayload": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "selection": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ContentRef"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        }
-      },
-      "required": [
-        "selection"
-      ]
-    },
-    "ContentPayload": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "content": {
-          "$ref": "#/$defs/ContentRef"
-        }
-      },
-      "required": [
-        "content"
-      ]
-    },
-    "ProviderResultPayload": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "operation_id": {
-          "type": "string",
-          "minLength": 1
-        },
-        "attempt": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "request_digest": {
-          "type": "string",
-          "pattern": "^[0-9a-f]{64}$",
-          "maxLength": 64
-        },
-        "provider_binding": {
-          "anyOf": [
-            {
-              "type": "string",
-              "minLength": 1
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "result": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ContentRef"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "usage": {
-          "$ref": "#/$defs/ContentRef"
-        },
-        "evidence": {
-          "$ref": "#/$defs/ContentRef"
-        }
-      },
-      "required": [
-        "operation_id",
-        "attempt",
-        "request_digest",
-        "provider_binding",
-        "result",
-        "usage",
-        "evidence"
-      ]
-    },
-    "ApprovalAnswerPayload": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "operation_id": {
-          "type": "string",
-          "minLength": 1
-        },
-        "attempt": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "request_id": {
-          "type": "string",
-          "minLength": 1
-        },
-        "request_digest": {
-          "type": "string",
-          "pattern": "^[0-9a-f]{64}$",
-          "maxLength": 64
-        },
-        "decision": {
-          "type": "string",
-          "enum": [
-            "allow_session",
-            "approve",
-            "deny",
-            "timeout",
-            "approve_once",
-            "approve_for_session"
-          ]
-        },
-        "scope": {
-          "$ref": "#/$defs/ContentRef"
-        },
-        "reason": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ContentRef"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "metadata": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ContentRef"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "policy_digest": {
-          "anyOf": [
-            {
-              "type": "string",
-              "pattern": "^[0-9a-f]{64}$",
-              "maxLength": 64
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "rule_id": {
-          "anyOf": [
-            {
-              "type": "string",
-              "minLength": 1
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "expires_ms": {
-          "anyOf": [
-            {
-              "type": "integer",
-              "minimum": 0
-            },
-            {
-              "type": "null"
-            }
-          ]
-        }
-      },
-      "required": [
-        "operation_id",
-        "attempt",
-        "request_id",
-        "request_digest",
-        "decision",
-        "scope"
-      ]
-    },
-    "ChildResultPayload": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "session_id": {
-          "type": "string",
-          "minLength": 1
-        },
-        "turn_id": {
-          "type": "string",
-          "minLength": 1
-        },
-        "operation_id": {
-          "type": "string",
-          "minLength": 1
-        },
-        "attempt": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "status": {
-          "type": "string",
-          "enum": [
-            "running",
-            "completed",
-            "failed",
-            "cancelled",
-            "aborted"
-          ]
-        },
-        "result": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ContentRef"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "terminal_seq": {
-          "anyOf": [
-            {
-              "type": "integer",
-              "minimum": 1
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "terminal_digest": {
-          "anyOf": [
-            {
-              "type": "string",
-              "pattern": "^[0-9a-f]{64}$",
-              "maxLength": 64
-            },
-            {
-              "type": "null"
-            }
-          ]
-        }
-      },
-      "required": [
-        "session_id",
-        "turn_id",
-        "operation_id",
-        "attempt",
-        "status",
-        "result",
-        "terminal_seq",
-        "terminal_digest"
-      ]
-    },
-    "ControlPayload": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "action": {
-          "type": "string",
-          "enum": [
-            "close",
-            "archive",
-            "suspend",
-            "resume",
-            "cancel",
-            "abort"
-          ]
-        }
-      },
-      "required": [
-        "action"
-      ]
-    },
-    "ProviderEvidencePayload": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "operation_id": {
-          "type": "string",
-          "minLength": 1
-        },
-        "attempt": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "request_digest": {
-          "type": "string",
-          "pattern": "^[0-9a-f]{64}$",
-          "maxLength": 64
-        },
-        "handle": {
-          "$ref": "#/$defs/ProviderHandle"
-        },
-        "yield_on_steer": {
-          "const": true,
-          "type": "boolean"
-        }
-      },
-      "required": [
-        "operation_id",
-        "attempt",
-        "request_digest",
-        "handle"
-      ]
-    },
-    "BeforeMemoryData": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "messages": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/ContentRef"
-          }
-        },
-        "shared_state": {
-          "$ref": "#/$defs/ContentRef"
-        }
-      },
-      "required": [
-        "messages",
-        "shared_state"
-      ]
-    },
-    "AfterCycleData": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "action": {
-          "type": "string",
-          "enum": [
-            "continue",
-            "steer",
-            "stop_non_success"
-          ]
-        },
-        "steering_messages": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/ContentRef"
-          }
-        },
-        "disallow_tools": {
-          "type": "array",
-          "items": {
-            "type": "string",
-            "minLength": 1
-          }
-        },
-        "stop": {
-          "anyOf": [
-            {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "code": {
-                  "type": "string",
-                  "minLength": 1
-                },
-                "message": {
-                  "$ref": "#/$defs/ContentRef"
-                }
-              },
-              "required": [
-                "code",
-                "message"
-              ]
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "shared_state": {
-          "$ref": "#/$defs/ContentRef"
-        },
-        "error": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ContentRef"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        }
-      },
-      "required": [
-        "action",
-        "steering_messages",
-        "disallow_tools",
-        "stop",
-        "shared_state",
-        "error"
-      ]
-    },
-    "MemoryEventData": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "event": {
-          "$ref": "#/$defs/ContentRef"
-        }
-      },
-      "required": [
-        "event"
-      ]
-    },
-    "SessionMemorySavedData": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "state": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "last_extracted_message_index": {
-              "anyOf": [
-                {
-                  "type": "integer",
-                  "minimum": 1
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "tokens_at_last_extraction": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "initialized": {
-              "type": "boolean"
-            },
-            "entries": {
-              "type": "array",
-              "items": {
-                "type": "object",
-                "additionalProperties": false,
-                "properties": {
-                  "category": {
-                    "type": "string",
-                    "minLength": 1
-                  },
-                  "source_cycle": {
-                    "type": "integer",
-                    "minimum": 0
-                  },
-                  "importance": {
-                    "type": "integer",
-                    "minimum": 0
-                  },
-                  "content": {
-                    "$ref": "#/$defs/ContentRef"
-                  }
-                },
-                "required": [
-                  "category",
-                  "source_cycle",
-                  "importance",
-                  "content"
-                ]
-              }
-            }
-          },
-          "required": [
-            "last_extracted_message_index",
-            "tokens_at_last_extraction",
-            "initialized",
-            "entries"
-          ]
-        }
-      },
-      "required": [
-        "state"
-      ]
-    },
-    "OutputCheckedData": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "status": {
-          "type": "string",
-          "enum": [
-            "completed",
-            "repair",
-            "failed"
-          ]
-        },
-        "reason": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ContentRef"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "value": {
-          "$ref": "#/$defs/ContentRef"
-        },
-        "partial_output": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ContentRef"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        }
-      },
-      "required": [
-        "status",
-        "reason",
-        "value"
-      ]
-    },
-    "BudgetBoundaryData": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "tool_names": {
-          "type": "array",
-          "items": {
-            "type": "string",
-            "minLength": 1
-          }
-        },
-        "usage": {
-          "$ref": "#/$defs/ContentRef"
-        },
-        "exhaustion": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ContentRef"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        }
-      },
-      "required": [
-        "tool_names",
-        "usage",
-        "exhaustion"
-      ]
-    },
-    "InboxEnvelope": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "schema_version": {
-          "const": "S1",
-          "type": "string"
-        },
-        "feature_level": {
-          "const": 1,
+        "available_ms": {
+          "minimum": 0,
           "type": "integer"
         },
-        "actor": {
-          "$ref": "#/$defs/Principal"
-        },
-        "admission_proof": {
-          "$ref": "#/$defs/AdmissionProof"
+        "generation": {
+          "type": "null"
         },
         "input_id": {
-          "type": "string",
-          "minLength": 1
-        },
-        "kind": {
+          "minLength": 1,
           "type": "string"
         },
-        "target_turn_id": {
-          "anyOf": [
-            {
-              "type": "string",
-              "minLength": 1
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "generation": {
-          "anyOf": [
-            {
-              "type": "integer",
-              "minimum": 0
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "available_ms": {
-          "type": "integer",
-          "minimum": 0
+        "kind": {
+          "const": "model_selection"
         },
         "payload": {
+          "additionalProperties": false,
+          "properties": {
+            "selection": {
+              "anyOf": [
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "model": {
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "model_settings": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "extra_args": {
+                          "type": "object"
+                        },
+                        "extra_body": {
+                          "type": "object"
+                        },
+                        "extra_headers": {
+                          "additionalProperties": {
+                            "type": "string"
+                          },
+                          "type": "object"
+                        },
+                        "max_tokens": {
+                          "anyOf": [
+                            {
+                              "minimum": 1,
+                              "type": "integer"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "parallel_tool_calls": {
+                          "anyOf": [
+                            {
+                              "type": "boolean"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "reasoning": {
+                          "anyOf": [
+                            {
+                              "type": "object"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "response_format": {
+                          "anyOf": [
+                            {
+                              "oneOf": [
+                                {
+                                  "additionalProperties": false,
+                                  "properties": {
+                                    "type": {
+                                      "enum": [
+                                        "text",
+                                        "json_object"
+                                      ],
+                                      "type": "string"
+                                    }
+                                  },
+                                  "required": [
+                                    "type"
+                                  ],
+                                  "type": "object"
+                                },
+                                {
+                                  "additionalProperties": false,
+                                  "properties": {
+                                    "json_schema": {
+                                      "type": "object"
+                                    },
+                                    "type": {
+                                      "const": "json_schema"
+                                    }
+                                  },
+                                  "required": [
+                                    "type",
+                                    "json_schema"
+                                  ],
+                                  "type": "object"
+                                }
+                              ]
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "retry": {
+                          "anyOf": [
+                            {
+                              "additionalProperties": false,
+                              "properties": {
+                                "backoff_seconds": {
+                                  "minimum": 0,
+                                  "type": "number"
+                                },
+                                "max_attempts": {
+                                  "minimum": 1,
+                                  "type": "integer"
+                                }
+                              },
+                              "required": [],
+                              "type": "object"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "temperature": {
+                          "anyOf": [
+                            {
+                              "minimum": 0,
+                              "type": "number"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "timeout_seconds": {
+                          "anyOf": [
+                            {
+                              "exclusiveMinimum": 0,
+                              "type": "number"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "tool_choice": {
+                          "anyOf": [
+                            {
+                              "oneOf": [
+                                {
+                                  "enum": [
+                                    "auto",
+                                    "required",
+                                    "none"
+                                  ],
+                                  "type": "string"
+                                },
+                                {
+                                  "additionalProperties": false,
+                                  "properties": {
+                                    "function": {
+                                      "additionalProperties": false,
+                                      "properties": {
+                                        "name": {
+                                          "minLength": 1,
+                                          "type": "string"
+                                        }
+                                      },
+                                      "required": [
+                                        "name"
+                                      ],
+                                      "type": "object"
+                                    },
+                                    "type": {
+                                      "const": "function"
+                                    }
+                                  },
+                                  "required": [
+                                    "type",
+                                    "function"
+                                  ],
+                                  "type": "object"
+                                }
+                              ]
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "top_p": {
+                          "anyOf": [
+                            {
+                              "maximum": 1,
+                              "minimum": 0,
+                              "type": "number"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [],
+                      "type": "object"
+                    },
+                    "route": {
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "model",
+                    "route"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "selection"
+          ],
           "type": "object"
+        },
+        "schema_version": {
+          "const": 3,
+          "type": "integer"
+        },
+        "target_turn_id": {
+          "type": "null"
         }
       },
       "required": [
         "schema_version",
-        "feature_level",
-        "actor",
-        "admission_proof",
         "input_id",
         "kind",
         "target_turn_id",
         "generation",
         "available_ms",
         "payload"
-      ]
+      ],
+      "type": "object"
     },
-    "InboxItem": {
-      "oneOf": [
-        {
-          "allOf": [
+    {
+      "additionalProperties": false,
+      "properties": {
+        "available_ms": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "generation": {
+          "anyOf": [
             {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "schema_version": {
-                  "const": "S1",
-                  "type": "string"
-                },
-                "feature_level": {
-                  "const": 1,
-                  "type": "integer"
-                },
-                "actor": {
-                  "$ref": "#/$defs/Principal"
-                },
-                "admission_proof": {
-                  "$ref": "#/$defs/AdmissionProof"
-                },
-                "input_id": {
-                  "type": "string",
-                  "minLength": 1
-                },
-                "kind": {
-                  "type": "string"
-                },
-                "target_turn_id": {
-                  "anyOf": [
-                    {
-                      "type": "string",
-                      "minLength": 1
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "generation": {
-                  "anyOf": [
-                    {
-                      "type": "integer",
-                      "minimum": 0
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "available_ms": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "payload": {
-                  "type": "object"
-                }
-              },
-              "required": [
-                "schema_version",
-                "feature_level",
-                "actor",
-                "admission_proof",
-                "input_id",
-                "kind",
-                "target_turn_id",
-                "generation",
-                "available_ms",
-                "payload"
-              ]
+              "minimum": 0,
+              "type": "integer"
             },
             {
-              "type": "object",
-              "properties": {
-                "kind": {
-                  "const": "user"
-                },
-                "payload": {
-                  "$ref": "#/$defs/ContentPayload"
-                }
-              }
+              "type": "null"
             }
           ]
         },
-        {
-          "allOf": [
-            {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "schema_version": {
-                  "const": "S1",
-                  "type": "string"
-                },
-                "feature_level": {
-                  "const": 1,
-                  "type": "integer"
-                },
-                "actor": {
-                  "$ref": "#/$defs/Principal"
-                },
-                "admission_proof": {
-                  "$ref": "#/$defs/AdmissionProof"
-                },
-                "input_id": {
-                  "type": "string",
-                  "minLength": 1
-                },
-                "kind": {
-                  "type": "string"
-                },
-                "target_turn_id": {
-                  "anyOf": [
-                    {
-                      "type": "string",
-                      "minLength": 1
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "generation": {
-                  "anyOf": [
-                    {
-                      "type": "integer",
-                      "minimum": 0
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "available_ms": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "payload": {
-                  "type": "object"
-                }
-              },
-              "required": [
-                "schema_version",
-                "feature_level",
-                "actor",
-                "admission_proof",
-                "input_id",
-                "kind",
-                "target_turn_id",
-                "generation",
-                "available_ms",
-                "payload"
-              ]
-            },
-            {
-              "type": "object",
-              "properties": {
-                "kind": {
-                  "const": "steer"
-                },
-                "payload": {
-                  "$ref": "#/$defs/ContentPayload"
-                }
-              }
-            }
-          ]
+        "input_id": {
+          "minLength": 1,
+          "type": "string"
         },
-        {
-          "allOf": [
-            {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "schema_version": {
-                  "const": "S1",
-                  "type": "string"
-                },
-                "feature_level": {
-                  "const": 1,
-                  "type": "integer"
-                },
-                "actor": {
-                  "$ref": "#/$defs/Principal"
-                },
-                "admission_proof": {
-                  "$ref": "#/$defs/AdmissionProof"
-                },
-                "input_id": {
-                  "type": "string",
-                  "minLength": 1
-                },
-                "kind": {
-                  "type": "string"
-                },
-                "target_turn_id": {
-                  "anyOf": [
-                    {
-                      "type": "string",
-                      "minLength": 1
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "generation": {
-                  "anyOf": [
-                    {
-                      "type": "integer",
-                      "minimum": 0
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "available_ms": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "payload": {
-                  "type": "object"
-                }
-              },
-              "required": [
-                "schema_version",
-                "feature_level",
-                "actor",
-                "admission_proof",
-                "input_id",
-                "kind",
-                "target_turn_id",
-                "generation",
-                "available_ms",
-                "payload"
-              ]
-            },
-            {
-              "type": "object",
-              "properties": {
-                "kind": {
-                  "const": "follow_up"
-                },
-                "payload": {
-                  "$ref": "#/$defs/ContentPayload"
-                }
-              }
-            }
-          ]
+        "kind": {
+          "const": "user"
         },
-        {
-          "allOf": [
-            {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "schema_version": {
-                  "const": "S1",
-                  "type": "string"
-                },
-                "feature_level": {
-                  "const": 1,
-                  "type": "integer"
-                },
-                "actor": {
-                  "$ref": "#/$defs/Principal"
-                },
-                "admission_proof": {
-                  "$ref": "#/$defs/AdmissionProof"
-                },
-                "input_id": {
-                  "type": "string",
-                  "minLength": 1
-                },
-                "kind": {
-                  "type": "string"
-                },
-                "target_turn_id": {
-                  "anyOf": [
-                    {
-                      "type": "string",
-                      "minLength": 1
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "generation": {
-                  "anyOf": [
-                    {
-                      "type": "integer",
-                      "minimum": 0
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "available_ms": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "payload": {
-                  "type": "object"
-                }
-              },
-              "required": [
-                "schema_version",
-                "feature_level",
-                "actor",
-                "admission_proof",
-                "input_id",
-                "kind",
-                "target_turn_id",
-                "generation",
-                "available_ms",
-                "payload"
-              ]
-            },
-            {
-              "type": "object",
-              "properties": {
-                "kind": {
-                  "const": "provider_result"
-                },
-                "payload": {
-                  "$ref": "#/$defs/ProviderResultPayload"
-                }
-              }
-            }
-          ]
+        "payload": {
+          "additionalProperties": false,
+          "properties": {
+            "content": {}
+          },
+          "required": [
+            "content"
+          ],
+          "type": "object"
         },
-        {
-          "allOf": [
-            {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "schema_version": {
-                  "const": "S1",
-                  "type": "string"
-                },
-                "feature_level": {
-                  "const": 1,
-                  "type": "integer"
-                },
-                "actor": {
-                  "$ref": "#/$defs/Principal"
-                },
-                "admission_proof": {
-                  "$ref": "#/$defs/AdmissionProof"
-                },
-                "input_id": {
-                  "type": "string",
-                  "minLength": 1
-                },
-                "kind": {
-                  "type": "string"
-                },
-                "target_turn_id": {
-                  "anyOf": [
-                    {
-                      "type": "string",
-                      "minLength": 1
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "generation": {
-                  "anyOf": [
-                    {
-                      "type": "integer",
-                      "minimum": 0
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "available_ms": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "payload": {
-                  "type": "object"
-                }
-              },
-              "required": [
-                "schema_version",
-                "feature_level",
-                "actor",
-                "admission_proof",
-                "input_id",
-                "kind",
-                "target_turn_id",
-                "generation",
-                "available_ms",
-                "payload"
-              ]
-            },
-            {
-              "type": "object",
-              "properties": {
-                "kind": {
-                  "const": "approval_answer"
-                },
-                "payload": {
-                  "$ref": "#/$defs/ApprovalAnswerPayload"
-                }
-              }
-            }
-          ]
+        "schema_version": {
+          "const": 3,
+          "type": "integer"
         },
-        {
-          "allOf": [
+        "target_turn_id": {
+          "anyOf": [
             {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "schema_version": {
-                  "const": "S1",
-                  "type": "string"
-                },
-                "feature_level": {
-                  "const": 1,
-                  "type": "integer"
-                },
-                "actor": {
-                  "$ref": "#/$defs/Principal"
-                },
-                "admission_proof": {
-                  "$ref": "#/$defs/AdmissionProof"
-                },
-                "input_id": {
-                  "type": "string",
-                  "minLength": 1
-                },
-                "kind": {
-                  "type": "string"
-                },
-                "target_turn_id": {
-                  "anyOf": [
-                    {
-                      "type": "string",
-                      "minLength": 1
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "generation": {
-                  "anyOf": [
-                    {
-                      "type": "integer",
-                      "minimum": 0
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "available_ms": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "payload": {
-                  "type": "object"
-                }
-              },
-              "required": [
-                "schema_version",
-                "feature_level",
-                "actor",
-                "admission_proof",
-                "input_id",
-                "kind",
-                "target_turn_id",
-                "generation",
-                "available_ms",
-                "payload"
-              ]
+              "minLength": 1,
+              "type": "string"
             },
             {
-              "type": "object",
-              "properties": {
-                "kind": {
-                  "const": "child_result"
-                },
-                "payload": {
-                  "$ref": "#/$defs/ChildResultPayload"
-                }
-              }
-            }
-          ]
-        },
-        {
-          "allOf": [
-            {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "schema_version": {
-                  "const": "S1",
-                  "type": "string"
-                },
-                "feature_level": {
-                  "const": 1,
-                  "type": "integer"
-                },
-                "actor": {
-                  "$ref": "#/$defs/Principal"
-                },
-                "admission_proof": {
-                  "$ref": "#/$defs/AdmissionProof"
-                },
-                "input_id": {
-                  "type": "string",
-                  "minLength": 1
-                },
-                "kind": {
-                  "type": "string"
-                },
-                "target_turn_id": {
-                  "anyOf": [
-                    {
-                      "type": "string",
-                      "minLength": 1
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "generation": {
-                  "anyOf": [
-                    {
-                      "type": "integer",
-                      "minimum": 0
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "available_ms": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "payload": {
-                  "type": "object"
-                }
-              },
-              "required": [
-                "schema_version",
-                "feature_level",
-                "actor",
-                "admission_proof",
-                "input_id",
-                "kind",
-                "target_turn_id",
-                "generation",
-                "available_ms",
-                "payload"
-              ]
-            },
-            {
-              "type": "object",
-              "properties": {
-                "kind": {
-                  "const": "control"
-                },
-                "payload": {
-                  "$ref": "#/$defs/ControlPayload"
-                }
-              }
-            }
-          ]
-        },
-        {
-          "allOf": [
-            {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "schema_version": {
-                  "const": "S1",
-                  "type": "string"
-                },
-                "feature_level": {
-                  "const": 1,
-                  "type": "integer"
-                },
-                "actor": {
-                  "$ref": "#/$defs/Principal"
-                },
-                "admission_proof": {
-                  "$ref": "#/$defs/AdmissionProof"
-                },
-                "input_id": {
-                  "type": "string",
-                  "minLength": 1
-                },
-                "kind": {
-                  "type": "string"
-                },
-                "target_turn_id": {
-                  "anyOf": [
-                    {
-                      "type": "string",
-                      "minLength": 1
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "generation": {
-                  "anyOf": [
-                    {
-                      "type": "integer",
-                      "minimum": 0
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "available_ms": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "payload": {
-                  "type": "object"
-                }
-              },
-              "required": [
-                "schema_version",
-                "feature_level",
-                "actor",
-                "admission_proof",
-                "input_id",
-                "kind",
-                "target_turn_id",
-                "generation",
-                "available_ms",
-                "payload"
-              ]
-            },
-            {
-              "type": "object",
-              "properties": {
-                "kind": {
-                  "const": "provider_evidence"
-                },
-                "payload": {
-                  "$ref": "#/$defs/ProviderEvidencePayload"
-                }
-              }
-            }
-          ]
-        },
-        {
-          "allOf": [
-            {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "schema_version": {
-                  "const": "S1",
-                  "type": "string"
-                },
-                "feature_level": {
-                  "const": 1,
-                  "type": "integer"
-                },
-                "actor": {
-                  "$ref": "#/$defs/Principal"
-                },
-                "admission_proof": {
-                  "$ref": "#/$defs/AdmissionProof"
-                },
-                "input_id": {
-                  "type": "string",
-                  "minLength": 1
-                },
-                "kind": {
-                  "type": "string"
-                },
-                "target_turn_id": {
-                  "anyOf": [
-                    {
-                      "type": "string",
-                      "minLength": 1
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "generation": {
-                  "anyOf": [
-                    {
-                      "type": "integer",
-                      "minimum": 0
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "available_ms": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "payload": {
-                  "type": "object"
-                }
-              },
-              "required": [
-                "schema_version",
-                "feature_level",
-                "actor",
-                "admission_proof",
-                "input_id",
-                "kind",
-                "target_turn_id",
-                "generation",
-                "available_ms",
-                "payload"
-              ]
-            },
-            {
-              "type": "object",
-              "properties": {
-                "kind": {
-                  "const": "model_selection"
-                },
-                "payload": {
-                  "$ref": "#/$defs/ModelSelectionPayload"
-                }
-              }
+              "type": "null"
             }
           ]
         }
-      ]
+      },
+      "required": [
+        "schema_version",
+        "input_id",
+        "kind",
+        "target_turn_id",
+        "generation",
+        "available_ms",
+        "payload"
+      ],
+      "type": "object"
     },
-    "Handle": {
-      "oneOf": [
-        {
-          "$ref": "#/$defs/ProviderHandle"
+    {
+      "additionalProperties": false,
+      "properties": {
+        "available_ms": {
+          "minimum": 0,
+          "type": "integer"
         },
-        {
-          "$ref": "#/$defs/ApprovalHandle"
+        "generation": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
-        {
-          "$ref": "#/$defs/UserHandle"
+        "input_id": {
+          "minLength": 1,
+          "type": "string"
         },
-        {
-          "$ref": "#/$defs/ChildHandle"
+        "kind": {
+          "const": "steer"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "properties": {
+            "content": {}
+          },
+          "required": [
+            "content"
+          ],
+          "type": "object"
+        },
+        "schema_version": {
+          "const": 3,
+          "type": "integer"
+        },
+        "target_turn_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
-      ]
+      },
+      "required": [
+        "schema_version",
+        "input_id",
+        "kind",
+        "target_turn_id",
+        "generation",
+        "available_ms",
+        "payload"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "available_ms": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "generation": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "input_id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "kind": {
+          "const": "follow_up"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "properties": {
+            "content": {}
+          },
+          "required": [
+            "content"
+          ],
+          "type": "object"
+        },
+        "schema_version": {
+          "const": 3,
+          "type": "integer"
+        },
+        "target_turn_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "input_id",
+        "kind",
+        "target_turn_id",
+        "generation",
+        "available_ms",
+        "payload"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "available_ms": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "generation": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "input_id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "kind": {
+          "const": "provider_result"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "properties": {
+            "attempt": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "evidence": {
+              "items": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "operation_id": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "provider_binding": {
+              "anyOf": [
+                {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "request_digest": {
+              "maxLength": 64,
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "result": {},
+            "usage": {
+              "type": "object"
+            }
+          },
+          "required": [
+            "operation_id",
+            "attempt",
+            "request_digest",
+            "provider_binding",
+            "result",
+            "usage",
+            "evidence"
+          ],
+          "type": "object"
+        },
+        "schema_version": {
+          "const": 3,
+          "type": "integer"
+        },
+        "target_turn_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "input_id",
+        "kind",
+        "target_turn_id",
+        "generation",
+        "available_ms",
+        "payload"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "available_ms": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "generation": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "input_id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "kind": {
+          "const": "approval_answer"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "properties": {
+            "attempt": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "decision": {
+              "enum": [
+                "approve",
+                "deny",
+                "allow_session",
+                "timeout"
+              ],
+              "type": "string"
+            },
+            "metadata": {
+              "type": "object"
+            },
+            "operation_id": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "request_digest": {
+              "maxLength": 64,
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "request_id": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "scope": {
+              "items": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "operation_id",
+            "attempt",
+            "request_id",
+            "request_digest",
+            "decision",
+            "scope"
+          ],
+          "type": "object"
+        },
+        "schema_version": {
+          "const": 3,
+          "type": "integer"
+        },
+        "target_turn_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "input_id",
+        "kind",
+        "target_turn_id",
+        "generation",
+        "available_ms",
+        "payload"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "available_ms": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "generation": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "input_id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "kind": {
+          "const": "child_result"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "properties": {
+            "attempt": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "operation_id": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "result": {},
+            "session_id": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "status": {
+              "enum": [
+                "completed",
+                "failed",
+                "cancelled",
+                "aborted"
+              ],
+              "type": "string"
+            },
+            "terminal_digest": {
+              "maxLength": 64,
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "terminal_seq": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "turn_id": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "session_id",
+            "turn_id",
+            "operation_id",
+            "attempt",
+            "result",
+            "status",
+            "terminal_seq",
+            "terminal_digest"
+          ],
+          "type": "object"
+        },
+        "schema_version": {
+          "const": 3,
+          "type": "integer"
+        },
+        "target_turn_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "input_id",
+        "kind",
+        "target_turn_id",
+        "generation",
+        "available_ms",
+        "payload"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "available_ms": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "generation": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "input_id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "kind": {
+          "const": "control"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "properties": {
+            "action": {
+              "enum": [
+                "close",
+                "archive",
+                "suspend",
+                "resume",
+                "cancel",
+                "abort"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "action"
+          ],
+          "type": "object"
+        },
+        "schema_version": {
+          "const": 3,
+          "type": "integer"
+        },
+        "target_turn_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "input_id",
+        "kind",
+        "target_turn_id",
+        "generation",
+        "available_ms",
+        "payload"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "available_ms": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "generation": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "input_id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "kind": {
+          "const": "provider_evidence"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "properties": {
+            "attempt": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "handle": {
+              "oneOf": [
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "attempt": {
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "cancel_ref": {
+                      "anyOf": [
+                        {
+                          "minLength": 1,
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "evidence": {
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "job_id": {
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "kind": {
+                      "const": "provider"
+                    },
+                    "operation_id": {
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "provider": {
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "query_ref": {
+                      "anyOf": [
+                        {
+                          "minLength": 1,
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "request_digest": {
+                      "maxLength": 64,
+                      "pattern": "^[0-9a-f]{64}$",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "provider",
+                    "job_id",
+                    "operation_id",
+                    "attempt",
+                    "request_digest",
+                    "evidence",
+                    "query_ref",
+                    "cancel_ref"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "kind": {
+                      "const": "approval"
+                    },
+                    "request_digest": {
+                      "maxLength": 64,
+                      "pattern": "^[0-9a-f]{64}$",
+                      "type": "string"
+                    },
+                    "request_id": {
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "scope": {
+                      "items": {
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "request_id",
+                    "request_digest",
+                    "scope"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "interaction_id": {
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "kind": {
+                      "const": "user"
+                    },
+                    "question": {
+                      "minLength": 1,
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "interaction_id",
+                    "question"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "background": {
+                      "type": "boolean"
+                    },
+                    "delivery_target": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "attempt": {
+                          "minimum": 1,
+                          "type": "integer"
+                        },
+                        "generation": {
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "operation_id": {
+                          "minLength": 1,
+                          "type": "string"
+                        },
+                        "session_id": {
+                          "minLength": 1,
+                          "type": "string"
+                        },
+                        "turn_id": {
+                          "minLength": 1,
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "session_id",
+                        "turn_id",
+                        "generation",
+                        "operation_id",
+                        "attempt"
+                      ],
+                      "type": "object"
+                    },
+                    "generation": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "kind": {
+                      "const": "child"
+                    },
+                    "session_id": {
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "siblings": {
+                      "items": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "generation": {
+                            "minimum": 0,
+                            "type": "integer"
+                          },
+                          "session_id": {
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          "turn_id": {
+                            "minLength": 1,
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "session_id",
+                          "turn_id",
+                          "generation"
+                        ],
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    "turn_id": {
+                      "minLength": 1,
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "session_id",
+                    "turn_id",
+                    "generation",
+                    "background",
+                    "delivery_target"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "operation_id": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "request_digest": {
+              "maxLength": 64,
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "yield_on_steer": {
+              "const": true,
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "operation_id",
+            "attempt",
+            "request_digest",
+            "handle"
+          ],
+          "type": "object"
+        },
+        "schema_version": {
+          "const": 3,
+          "type": "integer"
+        },
+        "target_turn_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "input_id",
+        "kind",
+        "target_turn_id",
+        "generation",
+        "available_ms",
+        "payload"
+      ],
+      "type": "object"
     }
-  }
+  ]
 }
