@@ -10,7 +10,7 @@ import pytest
 from vv_agent.kernel._boundary_hydration import hydrate_session_records
 from vv_agent.kernel._content import ContentRef
 
-from .report import DEFAULT_WORKERS, run_campaign, seed_results, versions
+from .report import DEFAULT_WORKERS, MAX_WORKERS, run_campaign, seed_results, versions
 from .scenarios import SCENARIOS, run_scenario
 from .world import SimWorld
 
@@ -68,10 +68,16 @@ def test_seed_replay(tmp_path):
     assert original["calls"] == replayed["calls"]
 
 
-def test_simulation_smoke():
+def test_simulation_smoke(monkeypatch):
+    import tempfile
+    from pathlib import Path
+
     # The PR gate is 1000; explicit smaller overrides are development samples.
     count = int(os.environ.get("VV_AGENT_SIM_SEEDS", "1000"))
     assert count > 0
+    if os.environ.get("TMPDIR") is None and Path("/dev/shm").is_dir():
+        monkeypatch.setenv("TMPDIR", "/dev/shm")
+        monkeypatch.setattr(tempfile, "tempdir", None)
     result = run_campaign(seeds=count, workers=int(os.environ.get("VV_AGENT_SIM_WORKERS", str(DEFAULT_WORKERS))))
     assert "error" not in result, result
     print(result)
@@ -190,16 +196,128 @@ def test_context_compaction_calls_real_normalizer_and_token_counter(sim_database
     assert counted and all(result > 0 for _messages, _model, result in counted)
 
 
-def test_spawned_seeds_match_serial_real_driver_traces():
+def test_process_start_method_falls_back_to_spawn_for_open_sqlite_connection(monkeypatch):
+    import sqlite3
+    import threading
+
+    from . import report
+
+    connection = sqlite3.connect(":memory:")
+    try:
+        assert report._has_open_sqlite_connections()
+    finally:
+        connection.close()
+
+    monkeypatch.setattr(report.multiprocessing, "get_all_start_methods", lambda: ["fork", "spawn"])
+    monkeypatch.setattr(report, "_has_open_sqlite_connections", lambda: False)
+    assert report._process_start_method("sqlite") == "fork"
+    assert report._process_start_method("postgres") == "spawn"
+
+    started, release = threading.Event(), threading.Event()
+
+    def hold_worker_thread():
+        started.set()
+        release.wait(timeout=5)
+
+    thread = threading.Thread(target=hold_worker_thread)
+    thread.start()
+    assert started.wait(timeout=5)
+    try:
+        assert report._process_start_method("sqlite") == "spawn"
+    finally:
+        release.set()
+        thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert report._process_start_method("sqlite") == "fork"
+
+    monkeypatch.setattr(report.multiprocessing, "get_all_start_methods", lambda: ["spawn"])
+    assert report._process_start_method("sqlite") == "spawn"
+
+    monkeypatch.setattr(report.multiprocessing, "get_all_start_methods", lambda: ["fork", "spawn"])
+    monkeypatch.setattr(report, "_has_open_sqlite_connections", lambda: True)
+    assert report._process_start_method("sqlite") == "spawn"
+
+
+def test_fork_selection_rechecks_after_warmup(monkeypatch):
+    import sqlite3
+
+    from . import report
+
+    opened = []
+
+    def warm_and_open_connection():
+        opened.append(sqlite3.connect(":memory:"))
+
+    monkeypatch.setattr(report.multiprocessing, "get_all_start_methods", lambda: ["fork", "spawn"])
+    monkeypatch.setattr(report, "_warm_fork_worker_runtime", warm_and_open_connection)
+    try:
+        start_method, mp_context = report._worker_process_context("sqlite", 2)
+        assert start_method == "spawn"
+        assert mp_context.get_start_method() == "spawn"
+    finally:
+        for connection in opened:
+            connection.close()
+
+
+def test_spawn_fallback_worker_plan_is_affinity_bounded(monkeypatch):
+    import multiprocessing
+
+    from . import report
+
+    spawn_context = multiprocessing.get_context("spawn")
+    monkeypatch.setattr(report, "_worker_process_context", lambda _backend, _workers: ("spawn", spawn_context))
+    monkeypatch.setattr(report, "_spawn_worker_limit", lambda: 4)
+    plan, start_method, mp_context = report._prepare_worker_execution(
+        "sqlite", {"requested_workers": MAX_WORKERS, "effective_workers": MAX_WORKERS}
+    )
+    assert report.MAX_WORKERS == 20
+    assert plan == {
+        "requested_workers": 20,
+        "effective_workers": 4,
+        "spawn_worker_limit": 4,
+        "resource_source": "process_affinity",
+    }
+    assert start_method == "spawn"
+    assert mp_context is spawn_context
+
+
+def test_spawned_or_forked_warmup_has_no_connection_or_thread_side_effect():
+    import threading
+
+    from . import report
+
+    threads = set(threading.enumerate())
+    report._warm_fork_worker_runtime.cache_clear()
+    assert not report._has_open_sqlite_connections()
+    report._warm_fork_worker_runtime()
+    assert not report._has_open_sqlite_connections()
+    assert set(threading.enumerate()) == threads
+
+
+def test_spawned_or_forked_parallel_seeds_match_serial_real_driver_traces():
     kwargs = {"seed": 17, "seeds": 5, "scenario": "model_result_precommit"}
     serial = list(seed_results(**kwargs, workers=1))
-    spawned = list(seed_results(**kwargs, workers=2))
-    assert all("error" not in result for result in serial + spawned), serial + spawned
-    assert serial == spawned
+    parallel = list(seed_results(**kwargs, workers=2))
+    assert all("error" not in result for result in serial + parallel), serial + parallel
+    assert serial == parallel
 
 
-def test_seed_record_parse_cache_preserves_results_and_scope(sim_database):
-    from vv_agent.kernel._records import Record, _MessageCache
+def test_spawn_fallback_campaign_uses_real_independent_seed_processes():
+    import sqlite3
+
+    parent_connection = sqlite3.connect(":memory:")
+    try:
+        result = run_campaign(seed=23, seeds=2, scenario="tools", workers=2)
+    finally:
+        parent_connection.close()
+    assert "error" not in result, result
+    assert result["environment"]["worker_start_method"] == "spawn"
+    assert result["environment"]["postgres_worker_plan"]["effective_workers"] == 2
+    assert result["scenarios"] == {"tools": 2}
+
+
+def test_seed_parse_cache_preserves_results_scope_and_mutable_isolation(sim_database, monkeypatch):
+    from vv_agent.kernel._records import InboxItem, Record, _MessageCache
 
     from . import report
 
@@ -207,12 +325,17 @@ def test_seed_record_parse_cache_preserves_results_and_scope(sim_database):
         run_scenario(world, "tools")
         _, rows, _ = world.read_state("s")
     body = next(row.record.encode() for row in rows if row.record.kind == "turn_started")
+    inbox_body = InboxItem(**next(row.record._payload["input"] for row in rows if row.record.kind == "input_applied")).encode()
     baseline = Record.parse(body)
+    inbox_baseline = InboxItem.parse(inbox_body)
     descriptor = Record.__dict__["_parse"]
+    inbox_descriptor = InboxItem.__dict__["parse"]
 
     with report._seed_record_parse_cache() as parse:
         parsed = Record.parse(body)
         repeated = Record.parse(body)
+        inbox = InboxItem.parse(inbox_body)
+        inbox_repeated = InboxItem.parse(inbox_body)
         first_messages, second_messages = _MessageCache(), _MessageCache()
         first_fold = Record._parse(body, first_messages)
         first_fold_repeated = Record._parse(body, first_messages)
@@ -225,13 +348,23 @@ def test_seed_record_parse_cache_preserves_results_and_scope(sim_database):
         assert first_fold._message_cache_id == id(first_messages)
         assert first_fold_repeated._message_cache_id == id(first_messages)
         assert second_fold._message_cache_id == id(second_messages)
+        assert inbox is not inbox_repeated
+        assert inbox.payload is not inbox_repeated.payload
+        assert inbox.actor is not inbox_repeated.actor
 
         original_digest = second_fold._payload["definition_digest"]
+        original_content = inbox_repeated.payload["content"]
+        original_actor = dict(inbox_repeated.actor)
         first_fold._payload["definition_digest"] = "polluted"
+        inbox.payload["content"] = "polluted"
+        inbox.actor.clear()
         assert second_fold._payload["definition_digest"] == original_digest
         assert repeated._payload["definition_digest"] == original_digest
+        assert inbox_repeated.payload["content"] == original_content
+        assert inbox_repeated.actor == original_actor
 
     assert Record.__dict__["_parse"] is descriptor
+    assert InboxItem.__dict__["parse"] is inbox_descriptor
     assert parse.cache_info().currsize == 0
     for candidate in (parsed, repeated, second_fold):
         assert candidate == baseline
@@ -240,12 +373,36 @@ def test_seed_record_parse_cache_preserves_results_and_scope(sim_database):
         assert candidate.digest == baseline.digest
         assert candidate.encode() == body
     assert first_fold.encode() == body
+    assert inbox_repeated == inbox_baseline
 
     with report._seed_record_parse_cache() as next_parse:
         next_scope = Record.parse(body)
+        next_inbox = InboxItem.parse(inbox_body)
         assert next_parse.cache_info().misses == 1
     assert next_scope == baseline
+    assert next_inbox == inbox_baseline
     assert next_parse.cache_info().currsize == 0
+
+    class CountingDescriptor:
+        def __init__(self, descriptor):
+            self.descriptor = descriptor
+            self.resolutions = 0
+
+        def __get__(self, instance, owner):
+            self.resolutions += 1
+            return self.descriptor.__get__(instance, owner)
+
+    record_probe = CountingDescriptor(Record.__dict__["_parse"])
+    inbox_probe = CountingDescriptor(InboxItem.__dict__["parse"])
+    monkeypatch.setattr(Record, "_parse", record_probe)
+    monkeypatch.setattr(InboxItem, "parse", inbox_probe)
+    for _ in range(2):
+        with report._seed_record_parse_cache() as scoped_parse:
+            assert Record.parse(body) == baseline
+            assert InboxItem.parse(inbox_body) == inbox_baseline
+            assert scoped_parse.cache_info().misses == 1
+    assert record_probe.resolutions == 2
+    assert inbox_probe.resolutions == 2
 
 
 @pytest.mark.parametrize(
@@ -289,7 +446,7 @@ def test_campaign_identity_once_and_matching_replay(tmp_path, monkeypatch):
     }
 
 
-@pytest.mark.parametrize("workers", [0, 11])
+@pytest.mark.parametrize("workers", [0, MAX_WORKERS + 1])
 def test_worker_cap_rejects_invalid_counts_before_any_seed(workers):
     with pytest.raises(ValueError, match="workers"):
         next(seed_results(workers=workers))
@@ -306,13 +463,13 @@ def test_empty_accounting_cannot_claim_i5(tmp_path):
 def controlled_seed_pool(monkeypatch):
     from . import report
 
-    submitted, completed, closed = [], [], []
+    submitted, completed, closed, contexts = [], [], [], []
     failures = set()
 
     class Pool(Executor):
         def __init__(self, *, max_workers, mp_context):
             assert max_workers == 2
-            assert mp_context.get_start_method() == "spawn"
+            contexts.append(mp_context)
 
         def __enter__(self):
             return self
@@ -337,11 +494,11 @@ def controlled_seed_pool(monkeypatch):
             closed.append(True)
 
     monkeypatch.setattr(report, "ProcessPoolExecutor", Pool)
-    return submitted, completed, closed, failures
+    return submitted, completed, closed, failures, contexts
 
 
 def test_seed_submission_is_bounded_and_preserves_input_order(controlled_seed_pool):
-    submitted, completed, closed, _failures = controlled_seed_pool
+    submitted, completed, closed, _failures, contexts = controlled_seed_pool
     results = seed_results(seeds=9, workers=2)
     for yielded, expected in enumerate(range(9), start=1):
         assert next(results)["seed"] == expected
@@ -351,10 +508,12 @@ def test_seed_submission_is_bounded_and_preserves_input_order(controlled_seed_po
     with pytest.raises(StopIteration):
         next(results)
     assert closed == [True]
+    assert len(contexts) == 1
+    assert contexts[0].get_start_method() in {"fork", "spawn"}
 
 
 def test_campaign_stops_at_first_ordered_failure(controlled_seed_pool):
-    submitted, completed, closed, failures = controlled_seed_pool
+    submitted, completed, closed, failures, contexts = controlled_seed_pool
     failures.update({1, 2})
     result = run_campaign(seeds=9, workers=2)
     assert completed.index(2) < completed.index(1)
@@ -363,6 +522,20 @@ def test_campaign_stops_at_first_ordered_failure(controlled_seed_pool):
     assert [seed for seed, _future in submitted] == list(range(6))
     assert len(submitted) - 2 <= 4
     assert closed == [True]
+    assert result["environment"]["worker_start_method"] == contexts[0].get_start_method()
+
+
+def test_campaign_rejects_in_memory_mutants_before_parallel_execution(monkeypatch):
+    from . import report
+
+    monkeypatch.setattr(report, "mutation_identity", lambda: [{"mutation": "retry_key"}])
+
+    def forbidden(_job):
+        pytest.fail("in-memory mutant reached worker execution")
+
+    monkeypatch.setattr(report, "_run_seed", forbidden)
+    with pytest.raises(ValueError, match="in-memory mutants require workers=1"):
+        run_campaign(seeds=1, workers=2)
 
 
 @pytest.fixture
@@ -552,7 +725,7 @@ def test_unavailable_filesystem_probe_reports_unknown(monkeypatch):
         report._filesystem.cache_clear()
 
 
-def test_campaign_reports_spawned_worker_storage_not_parent_tempfile_cache(monkeypatch):
+def test_campaign_reports_forked_or_spawned_worker_storage_not_parent_tempfile_cache(monkeypatch):
     import tempfile
     from pathlib import Path
 

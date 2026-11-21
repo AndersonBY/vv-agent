@@ -53,14 +53,19 @@ def drop_input_identity_constraint(world):
         input_link = store._one(
             "SELECT conname FROM pg_constraint "
             "WHERE conrelid='sk_content_link'::regclass AND contype='f' AND confrelid='sk_inbox'::regclass "
-            "AND pg_get_constraintdef(oid) LIKE '%(tenant_id, session_id, input_id)%'"
+            "AND pg_get_constraintdef(oid) LIKE %s",
+            ("%(tenant_id, session_id, input_id)%",),
         )[0]
         constraints = [
             row[0]
             for row in store._rows(
                 "SELECT conname FROM pg_constraint WHERE conrelid='sk_inbox'::regclass AND ("
-                "(contype='p' AND pg_get_constraintdef(oid) LIKE 'PRIMARY KEY (tenant_id, session_id, input_id)%') OR "
-                "(contype='u' AND pg_get_constraintdef(oid) LIKE 'UNIQUE (tenant_id, session_id, input_seq)%'))"
+                "(contype='p' AND pg_get_constraintdef(oid) LIKE %s) OR "
+                "(contype='u' AND pg_get_constraintdef(oid) LIKE %s))",
+                (
+                    "PRIMARY KEY (tenant_id, session_id, input_id)%",
+                    "UNIQUE (tenant_id, session_id, input_seq)%",
+                ),
             )
         ]
         assert len(constraints) == 2, "input identity constraints changed"

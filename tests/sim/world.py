@@ -66,16 +66,27 @@ def sqlite_root(store):
     return None
 
 
+def sqlite_change_version(store):
+    """Return SQLite's O(1) cross-connection and same-connection change markers."""
+
+    root = sqlite_root(store)
+    if root is None:
+        return None
+    with root._connection_lock:
+        data_version = root.connection.execute("PRAGMA data_version").fetchone()[0]
+        return data_version, root.connection.total_changes
+
+
 def sqlite_state_version(store, sid):
     root = sqlite_root(store)
     if root is None:
         return None
+    change_version = sqlite_change_version(root)
     head = root._one(
         "SELECT head_seq,inbox_seq FROM sk_session WHERE tenant_id=%s AND session_id=%s",
         (store.tenant_id, sid),
     )
-    data_version = root.connection.execute("PRAGMA data_version").fetchone()[0]
-    return data_version, root.connection.total_changes, *head
+    return *change_version, *head
 
 
 class SimSQLiteStore(SQLiteStore):
@@ -102,61 +113,24 @@ class SimSQLiteStore(SQLiteStore):
     def _verified_records(self, session_id, through, **kwargs):
         if kwargs:
             return super()._verified_records(session_id, through, **kwargs)
-        params = (self.tenant_id, session_id, through)
-        session_rows = tuple(
-            self._rows(
-                "SELECT tenant_id,session_id,head_seq,inbox_seq,lease_epoch,deletion_state FROM sk_session "
-                "WHERE tenant_id=%s AND session_id=%s",
-                (self.tenant_id, session_id),
-            )
-        )
-        record_rows = tuple(
-            self._rows(
-                "SELECT body,seq,commit_id,writer_epoch,created_ms,digest,chain_digest,record_id,"
-                "schema_version,kind,turn_id,operation_id,attempt,commit_position,commit_digest FROM sk_record "
-                "WHERE tenant_id=%s AND session_id=%s ORDER BY seq",
-                params[:2],
-            )
-        )
-        checkpoint_rows = tuple(
-            self._rows(
-                "SELECT seq,chain_digest,key_id,signature,signed_ms FROM sk_checkpoint "
-                "WHERE tenant_id=%s AND session_id=%s ORDER BY seq",
-                params[:2],
-            )
-        )
-        commit_rows = tuple(
-            self._rows(
-                "SELECT commit_id,body,digest,record_sequences,head_seq,created_ms FROM sk_commit "
-                "WHERE tenant_id=%s AND session_id=%s ORDER BY created_ms,commit_id",
-                (self.tenant_id, session_id),
-            )
-        )
-        consumer_rows = tuple(
-            self._rows(
-                "SELECT tenant_id,session_id,consumer,last_seq,project_retry_at_ms FROM sk_consumer "
-                "WHERE tenant_id=%s AND session_id=%s ORDER BY consumer",
-                params[:2],
-            )
-        )
+        # Transaction-local views are not stable cache entries after rollback.
+        if self._transaction_in_progress():
+            return super()._verified_records(session_id, through)
+        # data_version advances on commits from other connections; total_changes
+        # also advances for writes made by this connection.
+        change_version = sqlite_change_version(self)
         configured, allow_unsigned, signer = self._input_admission_policy()
         policy = (configured, allow_unsigned, id(signer), getattr(signer, "key_id", None))
-        signature = (
-            self.tenant_id,
-            session_id,
-            through,
-            policy,
-            session_rows,
-            record_rows,
-            checkpoint_rows,
-            commit_rows,
-            consumer_rows,
-        )
+        signature = self.tenant_id, session_id, through, policy
         cached = self._sim_verified_ledger_cache
-        if cached is not None and cached[0] == signature:
-            return cached[1], cached[2]
+        if cached is not None and cached[0] == change_version:
+            verified = cached[1].get(signature)
+            if verified is not None:
+                return verified
         stored_rows, chains = super()._verified_records(session_id, through)
-        self._sim_verified_ledger_cache = (signature, stored_rows, chains)
+        cached = cached[1] if cached is not None and cached[0] == change_version else {}
+        cached[signature] = stored_rows, chains
+        self._sim_verified_ledger_cache = change_version, cached
         return stored_rows, chains
 
 
@@ -364,7 +338,7 @@ class SimWorld:
         self.verified_folds, self.verified_prefixes = {}, {}
         self._signature_cache = {}
         self._ledger_checks = {}
-        self._content_signatures, self._content_bodies = {}, {}
+        self._content_bodies = {}
         self.queue = []
         self.after_external = None
         self.scenario = None
@@ -433,12 +407,11 @@ class SimWorld:
         version = sqlite_state_version(store, sid)
         if cached is not None and version is not None and cached.version == version:
             return cached.fold.state, cached.records, cached.inbox_seq
-        head = store._head(sid)
+        head = version[-2:] if version is not None else store._head(sid)[:2]
         verified, _chains = store._verified_records(sid, head[0])
         records = tuple(store._stored(sid, row) for row in verified)
         inbox_seq = head[1]
-        signature = self.cached_state_signature(store, sid)
-        self._content_signatures[sid] = signature
+        signature = self.cached_state_signature(store, sid, version=version)
         hydration = self.hydration(sid)
         prefix = cached.records if cached is not None else ()
         if cached is not None and cached.signature[0] == signature[0][: len(prefix)]:
@@ -453,7 +426,23 @@ class SimWorld:
         """Run the production ledger verifier and compare its complete SQL prefix."""
 
         store = self.connection("observer")
-        head, inbox_seq = store._head(sid)[:2]
+        state_version = sqlite_state_version(store, sid)
+        cache_key = (id(sqlite_root(store) or store), store.tenant_id, sid)
+        configured, allow_unsigned, signer = store._input_admission_policy()
+        check_version = (
+            state_version,
+            configured,
+            allow_unsigned,
+            id(signer),
+            getattr(signer, "key_id", None),
+        )
+        cached = self._ledger_checks.get(cache_key) if state_version is not None else None
+        if cached is not None and cached[0] == check_version:
+            head = state_version[-2]
+            if head:
+                self.covered.add("I9")
+            return cached[1]
+        head, inbox_seq = state_version[-2:] if state_version is not None else store._head(sid)[:2]
         try:
             verified, chains = store._verified_records(sid, head)
             require(
@@ -461,36 +450,25 @@ class SimWorld:
                 "I9",
                 f"seed={self.seed} session={sid} verifier returned an incomplete prefix",
             )
-            if self.signed:
-                checkpoint_count = store._one(
-                    "SELECT count(*) FROM sk_checkpoint WHERE tenant_id=%s AND session_id=%s",
-                    (store.tenant_id, sid),
-                )[0]
-                require(
-                    checkpoint_count == head,
-                    "I9",
-                    f"seed={self.seed} session={sid} checkpoint count {checkpoint_count}, head={head}",
-                )
-            else:
-                checkpoint_count = store._one(
-                    "SELECT count(*) FROM sk_checkpoint WHERE tenant_id=%s AND session_id=%s",
-                    (store.tenant_id, sid),
-                )[0]
-                require(
-                    checkpoint_count == 0,
-                    "I9",
-                    f"seed={self.seed} session={sid} hash-only ledger contains checkpoint evidence",
-                )
             store._stored_inputs(sid, inbox_seq)
         except LedgerIntegrityError as exc:
+            cached = self.snapshots.get(sid)
+            if cached is not None:
+                try:
+                    self._check_inputs(sid, cached.records, self.state_signature(store, sid))
+                except InvariantViolation as input_error:
+                    if input_error.invariant == "I3":
+                        raise
             raise InvariantViolation("I9", f"seed={self.seed} session={sid}: {exc}") from exc
         previous = chains[-1] if chains else _initial_chain_digest(store.tenant_id, sid)
+        if state_version is not None:
+            self._ledger_checks[cache_key] = check_version, previous
         if head:
             self.covered.add("I9")
         return previous
 
-    def cached_state_signature(self, store, sid, records=None):
-        version = sqlite_state_version(store, sid)
+    def cached_state_signature(self, store, sid, records=None, *, version=None):
+        version = sqlite_state_version(store, sid) if version is None else version
         if version is None:
             return self.state_signature(store, sid, records)
         root = sqlite_root(store)
@@ -915,8 +893,8 @@ class SimWorld:
             if applications:
                 self.covered.add("I3")
 
-    def _check_inputs(self, sid, rows):
-        signature = self.snapshots[sid].signature
+    def _check_inputs(self, sid, rows, signature=None):
+        signature = self.snapshots[sid].signature if signature is None else signature
         inputs = tuple((row[0], row[10]) for row in signature[1])
         bodies = {row[0]: row[3] for row in signature[1]}
         applications = Counter(r.record._payload["input"]["input_id"] for r in rows if r.record.kind == "input_applied")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import gc
 import hashlib
 import importlib.util
 import json
@@ -11,6 +12,7 @@ import multiprocessing
 import os
 import platform
 import subprocess
+import threading
 import time
 from collections import deque
 from concurrent.futures import ProcessPoolExecutor
@@ -22,12 +24,14 @@ from typing import Any, Self
 from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parents[2]
-MAX_WORKERS = 10
+# The formal 1,000-seed gate runs on the 20-CPU reference host. Spawn fallback
+# plans are additionally capped to the process affinity below.
+MAX_WORKERS = 20
 POSTGRES_CONNECTIONS_PER_WORKER = 16
 POSTGRES_ADMIN_CONNECTION_RESERVE = 4
 POSTGRES_CLEANUP_RETRY_DELAYS = (0.025, 0.05, 0.1, 0.2)
 AFFINITY = sorted(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else None
-DEFAULT_WORKERS = min(10, len(AFFINITY) if AFFINITY is not None else (os.cpu_count() or 1))
+DEFAULT_WORKERS = min(MAX_WORKERS, len(AFFINITY) if AFFINITY is not None else (os.cpu_count() or 1))
 
 
 class _PostgresDatabase(str):
@@ -99,6 +103,79 @@ def simulation_worker_plan(backend, workers):
     if backend == "postgres":
         return postgres_worker_plan(workers)
     return {"requested_workers": workers, "effective_workers": workers}
+
+
+def _has_open_sqlite_connections():
+    """Detect a live parent SQLite handle before forking a worker pool."""
+    import sqlite3
+
+    for candidate in gc.get_objects():
+        if not isinstance(candidate, sqlite3.Connection):
+            continue
+        try:
+            _ = candidate.in_transaction
+        except sqlite3.ProgrammingError:
+            continue
+        return True
+    return False
+
+
+def _has_active_worker_threads():
+    """A fork is safe only when no non-main worker thread can own shared locks."""
+    main_thread = threading.main_thread()
+    return any(thread.is_alive() for thread in threading.enumerate() if thread is not main_thread)
+
+
+def _process_start_method(backend):
+    """Use fork only for single-threaded SQLite parents without inheritable handles."""
+    if (
+        backend == "sqlite"
+        and "fork" in multiprocessing.get_all_start_methods()
+        and not _has_active_worker_threads()
+        and not _has_open_sqlite_connections()
+    ):
+        return "fork"
+    return "spawn"
+
+
+@cache
+def _warm_fork_worker_runtime():
+    """Load the tokenizer and provider imports once for workers that inherit them."""
+    from vv_agent._token_counting import count_messages_tokens
+
+    count_messages_tokens([{"role": "user", "content": "fork worker warmup"}], model="scripted")
+
+
+def _worker_process_context(backend, workers):
+    """Resolve and warm one final process context for this worker pool."""
+    if workers == 1:
+        return "serial", None
+    start_method = _process_start_method(backend)
+    if start_method == "fork":
+        _warm_fork_worker_runtime()
+        # Warmup may initialize native threads or database handles.
+        start_method = _process_start_method(backend)
+    return start_method, multiprocessing.get_context(start_method)
+
+
+def _spawn_worker_limit():
+    """Bound spawned interpreters by the CPUs this process can actually run on."""
+    return max(1, len(AFFINITY) if AFFINITY is not None else (os.cpu_count() or 1))
+
+
+def _prepare_worker_execution(backend, plan):
+    """Freeze the final start method, context and resource-limited worker count."""
+    start_method, mp_context = _worker_process_context(backend, plan["effective_workers"])
+    if start_method == "spawn":
+        limit = _spawn_worker_limit()
+        plan = plan | {
+            "effective_workers": min(plan["effective_workers"], limit),
+            "spawn_worker_limit": limit,
+            "resource_source": "process_affinity",
+        }
+    if plan["effective_workers"] == 1:
+        return plan, "serial", None
+    return plan, start_method, mp_context
 
 
 def _cleanup_postgres_database(admin, name):
@@ -311,38 +388,69 @@ def replay_provenance(recorded, current):
 
 @contextmanager
 def _seed_record_parse_cache():
-    """Validate immutable record bodies once without sharing mutable Record instances."""
-    from vv_agent.kernel._records import Record, _MessageCache
+    """Validate one seed's immutable bodies without sharing mutable values."""
+    from vv_agent.kernel._records import InboxItem, Record, _MessageCache, copy_json
 
-    descriptor = Record.__dict__["_parse"]
-    uncached = Record._parse
+    record_descriptor = Record.__dict__["_parse"]
+    inbox_descriptor = InboxItem.__dict__["parse"]
 
     @lru_cache(maxsize=4096)
     def parse(cls: type[Record], body: bytes) -> Record:
-        return uncached(body)
+        return record_descriptor.__get__(None, cls)(body)
 
     def cached_parse(cls: type[Record], body: bytes, messages: _MessageCache | None = None) -> Record:
         if type(body) is not bytes:
-            return uncached(body, messages)
+            return record_descriptor.__get__(None, cls)(body, messages)
         template = parse(cls, body)
         record = copy.copy(template)
-        record._retain(template.encode(), copy.deepcopy(template._value))
+        record._retain(template.encode(), copy_json(template._value))
         if messages is not None:
             record._share_messages(messages)
         return record
 
+    @lru_cache(maxsize=4096)
+    def parse_inbox(cls: type[InboxItem], body: bytes) -> InboxItem:
+        return inbox_descriptor.__get__(None, cls)(body)
+
+    def cached_inbox_parse(cls: type[InboxItem], body: bytes) -> InboxItem:
+        if type(body) is not bytes:
+            return inbox_descriptor.__get__(None, cls)(body)
+        template = parse_inbox(cls, body)
+        return InboxItem(
+            input_id=template.input_id,
+            kind=template.kind,
+            payload=copy_json(template.payload),
+            target_turn_id=template.target_turn_id,
+            generation=template.generation,
+            available_ms=template.available_ms,
+            actor=copy_json(template.actor),
+            admission_proof=copy_json(template.admission_proof),
+            schema_version=template.schema_version,
+            feature_level=template.feature_level,
+            requirements=copy_json(template.requirements),
+        )
+
     type.__setattr__(Record, "_parse", classmethod(cached_parse))
+    type.__setattr__(InboxItem, "parse", classmethod(cached_inbox_parse))
     try:
         yield parse
     finally:
-        type.__setattr__(Record, "_parse", descriptor)
+        type.__setattr__(Record, "_parse", record_descriptor)
+        type.__setattr__(InboxItem, "parse", inbox_descriptor)
         parse.cache_clear()
+        parse_inbox.cache_clear()
 
 
 def _run_seed(job):
-    # Imported in the child, after spawn; no SQL connection crosses processes.
+    # Each worker opens and closes its own database; jobs never carry SQL handles.
+    import tempfile
+
     from .scenarios import run_scenario
     from .world import InvariantViolation, SimWorld
+
+    if multiprocessing.parent_process() is not None:
+        # Fork inherits the parent's tempfile cache; workers must honor their current TMPDIR.
+        tempfile.tempdir = None
 
     backend, seed, scenario, replay, budget = job
     db = None
@@ -395,17 +503,43 @@ def _run_seed(job):
     return failure
 
 
-def _seed_results(*, backend="sqlite", seed=0, seeds=1, scenario=None, workers=1, replay=None, minimize_budget=0):
-    if seeds < 1 or not 1 <= workers <= MAX_WORKERS or minimize_budget < 0:
-        raise ValueError(f"positive seeds, 1..{MAX_WORKERS} workers and a nonnegative minimization budget required")
+def _validate_worker_options(workers, minimize_budget):
+    if not 1 <= workers <= MAX_WORKERS or minimize_budget < 0:
+        raise ValueError(f"1..{MAX_WORKERS} workers and a nonnegative minimization budget required")
+
+
+def _seed_results(
+    *,
+    backend="sqlite",
+    seed=0,
+    seeds=1,
+    scenario=None,
+    workers=1,
+    replay=None,
+    minimize_budget=0,
+    start_method=None,
+    mp_context=None,
+):
+    if seeds < 1:
+        raise ValueError("positive seeds required")
+    _validate_worker_options(workers, minimize_budget)
     if replay is not None and seeds != 1:
         raise ValueError("a replay runs exactly one seed")
     jobs = ((backend, number, scenario, replay, minimize_budget) for number in range(seed, seed + seeds))
     if workers == 1:
+        if start_method not in (None, "serial"):
+            raise ValueError("serial worker count requires the serial start method")
         for job in jobs:
             yield _run_seed(job)
         return
-    with ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context("spawn")) as pool:
+    if mp_context is None:
+        selected_method, mp_context = _worker_process_context(backend, workers)
+        if start_method is not None and start_method != selected_method:
+            raise ValueError("declared and selected worker start methods differ")
+    selected_method = mp_context.get_start_method()
+    if start_method is not None and start_method != selected_method:
+        raise ValueError("declared and actual worker start methods differ")
+    with ProcessPoolExecutor(max_workers=workers, mp_context=mp_context) as pool:
         in_flight = deque()
         for _ in range(workers * 2):
             try:
@@ -422,7 +556,9 @@ def _seed_results(*, backend="sqlite", seed=0, seeds=1, scenario=None, workers=1
 
 def seed_results(*, backend="sqlite", seed=0, seeds=1, scenario=None, workers=1, replay=None, minimize_budget=0):
     """Bound submission AND result memory, including PostgreSQL connection slots."""
+    _validate_worker_options(workers, minimize_budget)
     plan = simulation_worker_plan(backend, workers)
+    plan, start_method, mp_context = _prepare_worker_execution(backend, plan)
     yield from _seed_results(
         backend=backend,
         seed=seed,
@@ -431,6 +567,8 @@ def seed_results(*, backend="sqlite", seed=0, seeds=1, scenario=None, workers=1,
         workers=plan["effective_workers"],
         replay=replay,
         minimize_budget=minimize_budget,
+        start_method=start_method,
+        mp_context=mp_context,
     )
 
 
@@ -453,6 +591,7 @@ def temporary_storage(directory=None):
 def run_campaign(*, backend="sqlite", seed=0, seeds=1000, scenario=None, workers=DEFAULT_WORKERS, replay=None, minimize_budget=0):
     """Time identity, child imports/warmup, storage, checks and pool shutdown."""
     started = time.perf_counter()
+    _validate_worker_options(workers, minimize_budget)
     from .world import PENDING
 
     identity = versions() | {
@@ -475,11 +614,13 @@ def run_campaign(*, backend="sqlite", seed=0, seeds=1000, scenario=None, workers
             "replay_provenance": provenance,
         }
     if identity["in_memory_mutations"] and workers > 1:
-        raise ValueError("in-memory mutants require workers=1; spawned workers execute the source on disk")
+        raise ValueError("in-memory mutants require workers=1; workers execute the source on disk")
     if replay is not None:
         seed, seeds, backend, scenario = replay["seed"], 1, replay["backend"], replay["scenario"]
     worker_plan = simulation_worker_plan(backend, workers)
+    worker_plan, worker_start_method, mp_context = _prepare_worker_execution(backend, worker_plan)
     identity["environment"]["postgres_worker_plan"] = worker_plan
+    identity["environment"]["worker_start_method"] = worker_start_method
     if backend == "postgres":
         identity["environment"]["postgres_cleanup"] = {
             "verified": False,
@@ -497,6 +638,8 @@ def run_campaign(*, backend="sqlite", seed=0, seeds=1000, scenario=None, workers
         workers=worker_plan["effective_workers"],
         replay=replay["decisions"] if replay is not None else None,
         minimize_budget=minimize_budget,
+        start_method=worker_start_method,
+        mp_context=mp_context,
     )
     try:
         for result in results:
