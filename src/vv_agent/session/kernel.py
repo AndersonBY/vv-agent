@@ -13,7 +13,13 @@ from typing import Any, cast
 from vv_agent.budget import BudgetEvaluator, BudgetExhaustion
 from vv_agent.constants import SUB_TASK_STATUS_TOOL_NAME
 from vv_agent.kernel import _driver_outcomes
-from vv_agent.kernel._boundary_hydration import HydratedFoldResult, SessionHydration, hydrate_and_fold_records
+from vv_agent.kernel._boundary_hydration import (
+    HydratedFoldResult,
+    SessionHydration,
+    _lookup_input_owner,
+    _session_content_frame,
+    hydrate_and_fold_records,
+)
 from vv_agent.kernel._budget import BudgetObservation, HostCostObservation, _BudgetStopIteration
 from vv_agent.kernel._budget_values import BudgetUnavailableReason
 from vv_agent.kernel._cancellation import Cancellation
@@ -249,21 +255,26 @@ class _Driver(CoreDriver):
         self._logical_retry_record_ids.clear()
 
     def _logical_view(self) -> HydratedFoldResult:
-        hydration = hydration_for_session_store(self.store, self.sid)
         if self._active_logical_fold is not None and len(self._active_logical_fold.history) == len(self.records):
             assert self._logical_projected_state is not None
             result = HydratedFoldResult(self._active_logical_fold, self._logical_projected_state, ())
         else:
-            hydrated_records = hydrate_records(self.records, hydration)
-            retry_payloads = self._logical_retry_plan_payloads(hydration, hydrated_records=hydrated_records)
-            self._logical_retry_record_ids = set(retry_payloads)
-            with logical_operation_payloads(retry_payloads):
-                result = hydrate_and_fold_records(
-                    self.records,
-                    _fold_factory_for(self.store),
-                    hydration,
-                    hydrated_records=hydrated_records,
-                )
+            input_ids = (input_id for stored in self.records if (input_id := _lookup_input_owner(stored.record)) is not None)
+            with _session_content_frame(
+                self,
+                record_seqs=(stored.seq for stored in self.records),
+                input_ids=input_ids,
+            ) as hydration:
+                hydrated_records = hydrate_records(self.records, hydration)
+                retry_payloads = self._logical_retry_plan_payloads(hydration, hydrated_records=hydrated_records)
+                self._logical_retry_record_ids = set(retry_payloads)
+                with logical_operation_payloads(retry_payloads):
+                    result = hydrate_and_fold_records(
+                        self.records,
+                        _fold_factory_for(self.store),
+                        hydration,
+                        hydrated_records=hydrated_records,
+                    )
             self._active_logical_fold = result.fold
             self._logical_hydrated_records = result.hydrated_records
             self._logical_projected_state = self._logical_state_from_fold(result.fold)
@@ -274,24 +285,29 @@ class _Driver(CoreDriver):
         """Advance the retained logical prefix by only the newly committed records."""
 
         assert self._active_logical_fold is not None
-        hydration = hydration_for_session_store(self.store, self.sid)
-        hydrated_records = hydrate_records(records, hydration)
-        retry_payloads = self._logical_retry_plan_payloads_for(
-            hydration,
-            records,
-            hydrated_records=hydrated_records,
-            base_fold=self._active_logical_fold,
-        )
-        previous_state = self._active_logical_fold.state
-        with logical_operation_payloads(retry_payloads):
-            result = hydrate_and_fold_records(
-                records,
-                _fold_factory_for(self.store),
+        input_ids = (input_id for stored in records if (input_id := _lookup_input_owner(stored.record)) is not None)
+        with _session_content_frame(
+            self,
+            record_seqs=(stored.seq for stored in records),
+            input_ids=input_ids,
+        ) as hydration:
+            hydrated_records = hydrate_records(records, hydration)
+            retry_payloads = self._logical_retry_plan_payloads_for(
                 hydration,
+                records,
                 hydrated_records=hydrated_records,
                 base_fold=self._active_logical_fold,
-                record_bodies=tuple(stored.record.encode() for stored in records),
             )
+            previous_state = self._active_logical_fold.state
+            with logical_operation_payloads(retry_payloads):
+                result = hydrate_and_fold_records(
+                    records,
+                    _fold_factory_for(self.store),
+                    hydration,
+                    hydrated_records=hydrated_records,
+                    base_fold=self._active_logical_fold,
+                    record_bodies=tuple(stored.record.encode() for stored in records),
+                )
         self._logical_retry_record_ids.update(retry_payloads)
         self._logical_hydrated_records += result.hydrated_records
         if self._logical_projected_state is not None:
@@ -449,17 +465,31 @@ class _Driver(CoreDriver):
             yield self.state
             return
         if outer:
-            result = self._logical_view()
-            self.state = result.state
-            self._active_logical_fold = result.fold
+            with _session_content_frame(
+                self,
+                record_seqs=(stored.seq for stored in self.records),
+                input_ids=(
+                    stored.record._payload["input"]["input_id"]
+                    for stored in self.records
+                    if stored.record.kind == "input_applied"
+                ),
+            ):
+                result = self._logical_view()
+                self.state = result.state
+                self._active_logical_fold = result.fold
+                self._logical_scope_depth += 1
+                try:
+                    yield self.state
+                finally:
+                    self._logical_scope_depth -= 1
+                    self._invalidate_logical_view()
+                    self.state = self.fold.state
+            return
         self._logical_scope_depth += 1
         try:
             yield self.state
         finally:
             self._logical_scope_depth -= 1
-            if outer:
-                self._invalidate_logical_view()
-                self.state = self.fold.state
 
     def _logical_input(self, item: InboxItem) -> InboxItem:
         if self.content_reader is None:

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import hmac
 import json
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
@@ -264,6 +265,71 @@ class HydratedFoldResult:
     hydrated_records: tuple[StoredRecord, ...]
 
 
+class _ScopedContentFrameReader:
+    """Reuse one snapshot while preserving the original safe path on a frame miss."""
+
+    def __init__(self, reader: DurableContentReader, fallback: ContentReader, runtime: Any | None) -> None:
+        self.reader = reader
+        self.fallback = fallback
+        self.runtime = runtime
+
+    @property
+    def binding(self) -> tuple[str, str]:
+        return self.reader.binding
+
+    def read(self, tenant_id: str, session_id: str, owner: str, slot: str, ref: ContentRef) -> bytes:
+        try:
+            return self.reader.read(tenant_id, session_id, owner, slot, ref)
+        except MissingContentLink:
+            return self.fallback.read(tenant_id, session_id, owner, slot, ref)
+        except KeyUnavailable:
+            if self.runtime is not None:
+                self.runtime._key_unavailable = True
+            raise
+
+    @contextmanager
+    def _read_frame(
+        self,
+        *,
+        record_seqs: Iterable[int] = (),
+        input_ids: Iterable[str] = (),
+        validate_each_read: bool = True,
+    ) -> Iterator[_ScopedContentFrameReader]:
+        yield self
+
+
+@contextmanager
+def _session_content_frame(
+    driver: CoreDriver,
+    *,
+    record_seqs: Iterable[int] = (),
+    input_ids: Iterable[str] = (),
+) -> Iterator[SessionHydration]:
+    """Temporarily bind one logical batch to a disposable content frame."""
+
+    reader, tenant_id = driver._content_reader_binding()
+    fallback_reader = getattr(reader, "fallback", reader)
+    tracked_reader = getattr(fallback_reader, "reader", None)
+    tracking_runtime = getattr(fallback_reader, "runtime", None) if isinstance(tracked_reader, DurableContentReader) else None
+    durable_reader = tracked_reader if isinstance(tracked_reader, DurableContentReader) else fallback_reader
+    if not isinstance(durable_reader, DurableContentReader):
+        yield SessionHydration(reader, tenant_id=tenant_id, session_id=driver.sid)
+        return
+
+    with durable_reader._read_frame(
+        record_seqs=record_seqs,
+        input_ids=input_ids,
+        validate_each_read=False,
+    ) as frame_reader:
+        previous_reader, previous_hydrators = driver.content_reader, driver._hydrators
+        driver_reader = _ScopedContentFrameReader(frame_reader, fallback_reader, tracking_runtime)
+        driver.content_reader, driver._hydrators = driver_reader, {}
+        try:
+            yield SessionHydration(driver_reader, tenant_id=tenant_id, session_id=driver.sid)
+        finally:
+            driver.content_reader, driver._hydrators = previous_reader, previous_hydrators
+
+
 def hydrate_session_input_payload(
     item: InboxItem,
     hydration: SessionHydration | None,
@@ -307,7 +373,7 @@ def hydrate_session_input(
 ) -> InboxItem:
     """Hydrate one input while optionally resolving the actor identity proof."""
 
-    if hydration is None or not isinstance(hydration.reader, DurableContentReader):
+    if hydration is None or not callable(getattr(hydration.reader, "_read_frame", None)):
         return _hydrate_session_input(item, hydration, include_actor_attributes=include_actor_attributes)
     with hydration.reader._read_frame(input_ids=(item.input_id,)) as reader:
         return _hydrate_session_input(
@@ -475,7 +541,7 @@ def _hydrate_session_records_batch(
 ) -> tuple[StoredRecord, ...]:
     if not sources:
         return ()
-    if hydration is None or not isinstance(hydration.reader, DurableContentReader):
+    if hydration is None or not callable(getattr(hydration.reader, "_read_frame", None)):
         return tuple(
             hydrate_session_stored_record(
                 stored,
@@ -636,6 +702,51 @@ def fold_hydrated_records(
     return result.state
 
 
+def _logical_preflight_frame_owners(
+    driver: CoreDriver,
+    records: list[Record],
+    *,
+    base_fold: Fold | None,
+) -> tuple[set[int], set[str]]:
+    record_seqs = {stored.seq for stored in driver.records} if base_fold is None else set()
+    input_ids = {record._payload["input"]["input_id"] for record in records if record.kind == "input_applied"}
+    if base_fold is None:
+        input_ids.update(input_id for stored in driver.records if (input_id := _lookup_input_owner(stored.record)) is not None)
+
+    for record in records:
+        for _path, slot, value in _payload_slots(record.kind, record._payload):
+            if record.kind == "input_applied" and _path[:1] == ("input",):
+                continue
+            if value is None:
+                continue
+            try:
+                retained = declared_content_ref(value)
+            except ValueError:
+                continue
+            if retained is None:
+                continue
+            owner = driver._prepared_source_record(record, slot)
+            if owner is not None:
+                record_seqs.add(owner.seq)
+                continue
+            if record.kind != "op_planned" or slot not in {"request", "tool", "budget_admission"}:
+                continue
+            previous = next(
+                (
+                    stored
+                    for stored in reversed(driver.records)
+                    if stored.record.kind == "op_planned"
+                    and stored.record.operation_id == record.operation_id
+                    and (stored.record.attempt or 0) < (record.attempt or 0)
+                ),
+                None,
+            )
+            if previous is not None and driver._content_field(previous.record, slot) == retained.to_dict():
+                record_seqs.add(previous.seq)
+
+    return record_seqs, input_ids
+
+
 def validate_logical_preflight(
     driver: CoreDriver,
     records: list[Record],
@@ -647,6 +758,19 @@ def validate_logical_preflight(
 
     if driver.content_reader is None or not any(record.kind in _LOGICAL_PREFLIGHT_KINDS for record in records):
         return
+    record_seqs, input_ids = _logical_preflight_frame_owners(driver, records, base_fold=base_fold)
+    with _session_content_frame(driver, record_seqs=record_seqs, input_ids=input_ids) as hydration:
+        _validate_logical_preflight_in_frame(driver, records, encoded_records, hydration, base_fold=base_fold)
+
+
+def _validate_logical_preflight_in_frame(
+    driver: CoreDriver,
+    records: list[Record],
+    encoded_records: list[Record],
+    hydration: SessionHydration,
+    *,
+    base_fold: Fold | None,
+) -> None:
     semantic_payloads: list[dict[str, Any]] = []
     for record in records:
         payload = copy_json(record._payload)
@@ -695,8 +819,6 @@ def validate_logical_preflight(
     if len(records) != len(encoded_records):
         raise TransitionError("logical preflight record and committed body counts differ")
 
-    reader, tenant_id = driver._content_reader_binding()
-    hydration = SessionHydration(reader, tenant_id=tenant_id, session_id=driver.sid)
     base_seq = driver.records[-1].seq if driver.records else 0
     synthetic = tuple(
         StoredRecord(

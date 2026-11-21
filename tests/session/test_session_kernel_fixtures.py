@@ -27,6 +27,7 @@ from vv_agent.kernel import _sql as sql_module
 from vv_agent.kernel._content import ContentRef
 from vv_agent.kernel._content_publication import make_record_before_publication
 from vv_agent.kernel._content_reader import DurableContentReader
+from vv_agent.kernel._content_sql import _ContentReadFrame
 from vv_agent.kernel._driver import CoreDriver
 from vv_agent.kernel._hydration import KeyUnavailable, MissingContentLink
 from vv_agent.kernel._sql import LedgerIntegrityError, SQLStore
@@ -1700,7 +1701,39 @@ def test_active_logical_fold_refreshes_same_batch_retry_records_once(tmp_path: P
 
             with driver._logical_state_scope():
                 assert driver._active_logical_fold is not None
-                other.commit([first, started, unknown, retry])
+                frame_reads = frame_unwraps = 0
+                in_frame_read = False
+                original_frame_get = _ContentReadFrame.get
+                original_unwrap = provider.unwrap
+
+                def counted_frame_get(self, tenant_id, session_id, ref, *, link_validated=False):
+                    nonlocal frame_reads, in_frame_read
+                    frame_reads += 1
+                    in_frame_read = True
+                    try:
+                        return original_frame_get(
+                            self,
+                            tenant_id,
+                            session_id,
+                            ref,
+                            link_validated=link_validated,
+                        )
+                    finally:
+                        in_frame_read = False
+
+                def counted_unwrap(tenant_id, session_id, wrapped_key):
+                    nonlocal frame_unwraps
+                    if in_frame_read:
+                        frame_unwraps += 1
+                    return original_unwrap(tenant_id, session_id, wrapped_key)
+
+                with (
+                    patch.object(_ContentReadFrame, "get", counted_frame_get),
+                    patch.object(provider, "unwrap", counted_unwrap),
+                ):
+                    other.commit([first, started, unknown, retry])
+                assert frame_reads > 1
+                assert frame_unwraps == 1
                 stored_plans = [
                     row
                     for row in store.read_state(session_id)[1]
@@ -1727,6 +1760,41 @@ def test_active_logical_fold_refreshes_same_batch_retry_records_once(tmp_path: P
                 assert ContentRef.from_dict(raw_retry._payload["request"])
 
             assert sessions.store.release(lease)
+    finally:
+        provider.close()
+
+
+@pytest.mark.parametrize("tamper", ["key_destroy", "link"])
+def test_logical_content_frame_fails_closed_on_key_destroy_and_link_tamper(tmp_path: Path, tamper: str):
+    session_id = f"logical-frame-{tamper}"
+    provider = LocalKeyProvider(b"k" * 32)
+    try:
+        with SQLiteStore.standalone(str(tmp_path / f"{session_id}.sqlite")) as store:
+            store.install_schema()
+            store.configure_input_admission(allow_unsigned=True)
+            sessions = SessionDriver(store=store, content_key_provider=provider)
+            driver, lease = _start_logical_driver(sessions, store, session_id)
+            try:
+                started = next(row for row in driver.records if row.record.kind == "turn_started")
+                ref = ContentRef.from_dict(started.record._payload["definition"])
+                if tamper == "key_destroy":
+                    assert provider.destroy(store.tenant_id, ref.key_id).accepted
+                    expected = KeyUnavailable
+                else:
+                    other_ref = ContentRef.from_dict(started.record._payload["budget"])
+                    with store.atomic():
+                        store._rows(
+                            "UPDATE sk_content_link SET content_id=? "
+                            "WHERE tenant_id=? AND session_id=? AND record_seq=? AND slot=?",
+                            (other_ref.content_id, store.tenant_id, session_id, started.seq, "definition"),
+                        )
+                    expected = MissingContentLink
+
+                driver._invalidate_logical_view()
+                with pytest.raises(expected):
+                    driver._logical_view()
+            finally:
+                assert sessions.store.release(lease)
     finally:
         provider.close()
 

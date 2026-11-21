@@ -104,12 +104,20 @@ class DurableContentReader:
     connection, starts a transaction, or retains plaintext.
     """
 
-    def __init__(self, store: _OwnerBoundContentStore, *, tenant_id: str, session_id: str) -> None:
+    def __init__(
+        self,
+        store: _OwnerBoundContentStore,
+        *,
+        tenant_id: str,
+        session_id: str,
+        _framed: bool = False,
+    ) -> None:
         if not callable(getattr(store, "assert_link", None)) or not callable(getattr(store, "get", None)):
             raise TypeError("store must implement DurableContentStore")
         self._store = store
         self.tenant_id = _non_empty(tenant_id, "tenant_id")
         self.session_id = _non_empty(session_id, "session_id")
+        self._framed = _framed
 
     @property
     def binding(self) -> tuple[str, str]:
@@ -125,6 +133,9 @@ class DurableContentReader:
     ) -> Iterator[DurableContentReader]:
         """Bind one disposable frame store without retaining it on this reader."""
 
+        if self._framed:
+            yield self
+            return
         opener = getattr(self._store, "_read_frame", None)
         if not callable(opener):
             yield self
@@ -136,7 +147,7 @@ class DurableContentReader:
             input_ids=input_ids,
             validate_each_read=validate_each_read,
         ) as store:
-            yield DurableContentReader(store, tenant_id=self.tenant_id, session_id=self.session_id)
+            yield DurableContentReader(store, tenant_id=self.tenant_id, session_id=self.session_id, _framed=True)
 
     def read(
         self,

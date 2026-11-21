@@ -1197,6 +1197,13 @@ class SessionDriver:
         candidates.update(handle.session_id for handle in self.handles)
         candidates.update(self._observer_cursors)
         for root in roots:
+            registration = self._runtimes.get(root)
+            if registration is not None:
+                config = registration.config
+                if config.event_store is None and config.stream is None and not trace_processors(config):
+                    self._observer_cursors[root] = store.lease_status(root)[0]
+                    self._notify_session(root)
+                    continue
             try:
                 child_ids = self._discover_child_runtimes(store, root)
             except Conflict as exc:
@@ -1211,6 +1218,10 @@ class SessionDriver:
                 registration = self._registration_for_cursor(sid, store=store)
                 if registration is None:
                     continue
+                config = registration.config
+                if config.event_store is None and config.stream is None and not trace_processors(config):
+                    self._notify_session(sid)
+                    continue
                 runtime = _ProjectionRuntime(
                     owner=self,
                     agent=registration.agent,
@@ -1219,6 +1230,9 @@ class SessionDriver:
                     handler_version=registration.handler_version,
                     wake=self._wake_session,
                 )
+                if self._observer_cursors.get(sid, 0) >= store.lease_status(sid)[0]:
+                    self._notify_session(sid)
+                    continue
                 self._deliver_projected_events(store, sid, runtime)
             except Conflict as exc:
                 if not self._is_deleted_session_conflict(exc):
