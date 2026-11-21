@@ -1219,6 +1219,7 @@ class SessionDriver:
                     continue
                 config = registration.config
                 if config.event_store is None and config.stream is None and not trace_processors(config):
+                    self._observer_cursors[sid] = store.lease_status(sid)[0]
                     self._notify_session(sid)
                     continue
                 runtime = _ProjectionRuntime(
