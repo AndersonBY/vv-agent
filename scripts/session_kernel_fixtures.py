@@ -647,7 +647,7 @@ class Fixtures:
         sid = "endpoint-routing"
         routes = {"m": ["B"], "selected": ["A", "B"]}
         selection = {"model": "selected", "route": {}}
-        calls, preferences = [], []
+        calls, preferences, dispatched_metadata = [], [], []
 
         class HostOrder(VvLlmClient):
             def ordered_targets(self, preferred_endpoint_id=None):
@@ -691,7 +691,9 @@ class Fixtures:
         self.kernel._register_runtime(sid, rt)
 
         def complete(current, request):
-            calls.append(current.endpoint_targets[0].endpoint_id)
+            endpoint_id = current.endpoint_targets[0].endpoint_id
+            calls.append(endpoint_id)
+            dispatched_metadata.append(deepcopy(request.metadata))
             return LLMResponse("done" if request.model == "selected" else "first", raw={"usage": USAGE})
 
         with patch.object(VvLlmClient, "complete", complete):
@@ -713,6 +715,7 @@ class Fixtures:
             payload for record, payload in records if record.kind == "turn_ended" and record.turn_id == f"{sid}/turn/followup"
         )
         assert calls == ["B", "B"] and preferences == [None, "B", "B"]
+        assert [metadata["vv_session"]["endpoint_id"] for metadata in dispatched_metadata] == calls
         assert selected_plans[0]["request"]["metadata"]["vv_session"]["endpoint_order"] == ["A", "B"]
         assert not missing["execution_started"] and missing["usage"] == {} and missing["evidence"] == []
         assert not any(
@@ -728,6 +731,7 @@ class Fixtures:
                 "session_id": sid,
                 "calls": calls,
                 "preferences": preferences,
+                "dispatched_metadata": dispatched_metadata,
                 "missing": missing_record.to_dict(),
             }
         )
@@ -2286,6 +2290,12 @@ def coverage(vectors, semantics, logical_records):
         if r["kind"] == "op_planned"
     ]
     metadata += [case["metadata"]["vv_session"] for case in semantics if case["case"] == "dispatch_request"]
+    metadata += [
+        request_metadata["vv_session"]
+        for case in semantics
+        if case["case"] == "endpoint_routing"
+        for request_metadata in case.get("dispatched_metadata", [])
+    ]
     for key in REQUEST_SESSION_METADATA["properties"]:
         optional["request.metadata.vv_session." + key] = sum(key in m for m in metadata)
     assert all(optional.values()), optional
