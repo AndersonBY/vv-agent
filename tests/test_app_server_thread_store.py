@@ -15,6 +15,7 @@ from vv_agent.types import LLMResponse, ToolCall
 def server(tmp_path):
     with SQLiteStore.standalone(str(tmp_path / "threads.sqlite")) as store:
         store.install_schema()
+        store.configure_input_admission(allow_unsigned=True)
         bind_development_content(store)
         value = AppServer(
             transport=ChannelTransport(connection_id="owner"),

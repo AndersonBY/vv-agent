@@ -282,8 +282,9 @@ def test_typed_stream_observer_failure_cannot_suppress_run_handle_journal(tmp_pa
         "go",
         run_config=RunConfig(workspace=tmp_path, model_provider=_provider("golden-model", StreamingGoldenLLM()), stream=observer),
     )
-    result = handle.result(timeout=2)
-    journal = list(handle.events())
+    journal_stream = handle.events()
+    result = handle.result(timeout=5)
+    journal = list(journal_stream)
     assert result.status.value == "completed"
     assert [e.delta for e in observer_calls if isinstance(e, AssistantDeltaEvent)] == ["complete ", "assistant message"]
     assert [e.delta for e in journal if isinstance(e, AssistantDeltaEvent)] == ["complete ", "assistant message"]

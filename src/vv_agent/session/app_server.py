@@ -1063,6 +1063,33 @@ class _KernelRunAdapter(RunAdapter):
             if record.kind == "turn_started":
                 self._ensure_turn_connection(sid, record.turn_id)
                 notifications.append((stored.seq, "turn/started", {"threadId": sid, "turnId": record.turn_id}))
+            elif record.kind == "op_parked" and record._payload["handle"]["kind"] in {"approval", "user"}:
+                result = project_result(store, sid, record.turn_id, runtime=runtime, snapshot=(state, all_records, 0))
+                notifications.append(
+                    (
+                        stored.seq,
+                        "thread/status/changed",
+                        thread_status(
+                            self.kernel,
+                            sid,
+                            snapshot=(state, all_records, 0),
+                            clock=self.clock,
+                            store=store,
+                        ),
+                    )
+                )
+                notifications.append(
+                    (
+                        stored.seq,
+                        "turn/completed",
+                        {
+                            "threadId": sid,
+                            "turnId": record.turn_id,
+                            "status": "interrupted",
+                            **_result_fields(result),
+                        },
+                    )
+                )
             elif record.kind == "turn_ended":
                 result = project_result(store, sid, record.turn_id, runtime=runtime, snapshot=(state, all_records, 0))
                 notifications.append(
@@ -1596,13 +1623,22 @@ class _KernelRunAdapter(RunAdapter):
                     self._turn_connections[key] = connection_id
             try:
                 self.subscribe(thread_id, connection_id, restore_errors_as_warning=True)
-                self.wake(thread_id)
-                self.recover(connection_id, thread_id)
             except (UnsupportedFeatureLevel, ModelError, Conflict, ValueError) as error:
                 if not self._warn_turn_start_support_error(thread_id, error):
                     raise
             if request_id is not None:
                 self._router.send_response(connection_id, request_id, replayed)
+            self._notify_subscribers(
+                thread_id,
+                "thread/status/changed",
+                self.public_thread_status(thread_id),
+            )
+            try:
+                self.wake(thread_id)
+                self.recover(connection_id, thread_id)
+            except (UnsupportedFeatureLevel, ModelError, Conflict, ValueError) as error:
+                if not self._warn_turn_start_support_error(thread_id, error):
+                    raise
             return replayed
         start_runtime = None
         if self.kernel._worker.support.drive is not None:
@@ -1633,12 +1669,21 @@ class _KernelRunAdapter(RunAdapter):
         )
         try:
             self.subscribe(thread_id, connection_id, restore_errors_as_warning=True)
-            self.recover(connection_id, thread_id)
         except (UnsupportedFeatureLevel, ModelError, Conflict, ValueError) as error:
             if not self._warn_turn_start_support_error(thread_id, error):
                 raise
         if request_id is not None:
             self._router.send_response(connection_id, request_id, payload)
+        self._notify_subscribers(
+            thread_id,
+            "thread/status/changed",
+            self.public_thread_status(thread_id),
+        )
+        try:
+            self.recover(connection_id, thread_id)
+        except (UnsupportedFeatureLevel, ModelError, Conflict, ValueError) as error:
+            if not self._warn_turn_start_support_error(thread_id, error):
+                raise
         return payload
 
     def _start(

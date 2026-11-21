@@ -672,6 +672,10 @@ def step(self: CoreDriver, *, one_turn: bool) -> Generator[object, Any, bool]:
             return True
         if turn.suspended or turn.wait is not None:
             return False
+        external_token = self.runtime.config.cancellation_token
+        if external_token is not None and external_token.cancelled:
+            yield from close(self, "cancelled", "cancelled")
+            return True
         if (yield Read.CANCELLED):
             yield Read.RESET_TOKEN
         if turn.start._payload["handler_version"] != (yield Read.HANDLER_VERSION):
