@@ -451,12 +451,14 @@ def test_post_release_check_and_scan_share_drive_predicate(transport, clock):
 
 
 @pytest.fixture
-def provider_wait(transport, clock):
+def provider_wait(transport, store, clock):
     @function_tool
     def effect() -> str:
         return "unused synchronous handler"
 
-    provider = PollingProvider(transport.database, now_ms=transport.store._now)
+    # PostgreSQL polls its committed virtual clock on its own connection.
+    now_ms = store.clock.now_ms if isinstance(store, SQLiteStore) else None
+    provider = PollingProvider(transport.database, now_ms=now_ms)
     provider.install()
     transport.create(steps=[LLMResponse("", [ToolCall("job", "effect", {})]), LLMResponse("done")], tools=[effect])
     transport.runtimes["s"].providers["effect"] = provider
