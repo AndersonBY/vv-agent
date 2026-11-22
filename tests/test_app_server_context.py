@@ -169,8 +169,10 @@ def test_compaction_during_running_turn_preserves_concurrent_input_or_cancel(tmp
         try:
             start = request(a, "turn", "turn/start", submission())["result"]
             assert entered.wait(5)
-            receipt = request(b, "compact", "thread/compact/start", {"threadId": "thread", "actionId": "compact"})
+            compact_params = {"threadId": "thread", "actionId": "compact"}
+            receipt = request(b, "compact", "thread/compact/start", compact_params)
             assert "result" in receipt, receipt
+            receipt = receipt["result"]
             if cancel:
                 answer = request(
                     b, "cancel", "turn/interrupt", {"threadId": "thread", "expectedTurnId": start["turnId"], "actionId": "stop"}
@@ -189,13 +191,32 @@ def test_compaction_during_running_turn_preserves_concurrent_input_or_cancel(tmp
             assert state.turns[start["turnId"]].ended
             assert next(r.record for r in reversed(records) if r.record.kind == "turn_ended")._payload["status"] == "cancelled"
             assert not any(r.record.kind == "context_compacted" for r in records)
-            assert any(m == "contextCompaction/failed" for m, _ in notices(a.kernel.store))
         else:
             from vv_agent.session.context import project_context
 
             assert any(m.content == "KEEP LATE INPUT" for m in project_context(records, state))
             assert any(r.record.kind == "context_compacted" for r in records)
             assert any("KEEP LATE INPUT" in str(req.messages) for req in calls[1:])
+    if cancel:
+        with ExitStack() as stack:
+            c = node(stack, tmp_path / "store", "C", provider)
+            status = request(c, "status", "thread/status", {"threadId": "thread"})["result"]
+            assert status["status"] == "terminal"
+            assert status["nextDriveAt"] is None
+            lifecycle = notices(c.kernel.store)
+            assert len(lifecycle) == 1
+            assert lifecycle[0][0] == "contextCompaction/failed"
+            assert lifecycle[0][1]["requestId"] == receipt["requestId"]
+            replay = request(c, "replay-compact", "thread/compact/start", compact_params)["result"]
+            assert replay == receipt | {"replayed": True}
+            accepted = request(
+                c,
+                "after-cancel",
+                "turn/start",
+                submission(identity="after-cancel", expected=start["turnId"]),
+            )
+            assert accepted["result"]["accepted"] is True, accepted
+            c.run_adapter.join()
 
 
 def test_model_catalog_capabilities_use_resolved_limits_and_explicit_unknowns(tmp_path):
