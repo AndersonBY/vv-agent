@@ -2330,6 +2330,7 @@ class _KernelRunAdapter(RunAdapter):
             pending_ids.add(session_id)
             pending_sessions.append(session_id)
 
+        quiet_passes = 0
         while True:
             while pending_sessions:
                 sid = pending_sessions.pop(0)
@@ -2344,6 +2345,14 @@ class _KernelRunAdapter(RunAdapter):
             self.kernel._worker.post_observation(self._observe_with_driver)
             self.kernel._worker.wait_idle()
             for wake_sid in self.kernel._worker.active_wake_sessions:
-                enqueue(wake_sid)
-            if not pending_sessions:
+                if self._join_drive_plan(wake_sid).state in {
+                    _JoinDriveState.DUE,
+                    _JoinDriveState.LOCAL_LEASE,
+                }:
+                    enqueue(wake_sid)
+            if pending_sessions:
+                quiet_passes = 0
+                continue
+            quiet_passes += 1
+            if quiet_passes >= 2:
                 break
