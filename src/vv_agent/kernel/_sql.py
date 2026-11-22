@@ -1192,12 +1192,10 @@ class SQLStore:
             if rows:
                 raise LedgerIntegrityError(f"ledger verifier is required to verify stored checkpoint at seq {rows[0][0]}")
             return
-        if len(rows) < len(chains):
-            raise LedgerIntegrityError(f"ledger checkpoint is missing at seq {len(rows) + 1}")
-        if len(rows) > len(chains):
-            raise LedgerIntegrityError(f"ledger checkpoint outlives the record chain at seq {len(chains) + 1}")
         assert verifier is not None
         for expected_seq in range(1, len(chains) + 1):
+            if expected_seq > len(rows):
+                raise LedgerIntegrityError(f"ledger checkpoint is missing at seq {expected_seq}")
             row = rows[expected_seq - 1]
             seq, stored_chain, key_id, signature, signed_ms = row
             if seq != expected_seq:
@@ -1213,6 +1211,8 @@ class SQLStore:
             message = _checkpoint_message(self.tenant_id, session_id, seq, stored_chain, key_id, signed_ms)
             if not verifier.verify(key_id, message, bytes(signature)):
                 raise LedgerIntegrityError(f"ledger checkpoint signature is invalid at seq {seq}")
+        if len(rows) > len(chains):
+            raise LedgerIntegrityError(f"ledger checkpoint outlives the record chain at seq {len(chains) + 1}")
 
     def _commit_payload(self, body: bytes, sequence_body: bytes) -> _CommitPayload:
         """Validate immutable commit bytes once while SQL metadata is checked on every pass."""
@@ -1506,12 +1506,7 @@ class SQLStore:
             tx._finalize_lease_fence()
 
     def _lock(self, session_id: str) -> tuple[Any, ...]:
-        return self._one(
-            "SELECT head_seq,inbox_seq,lease_epoch,lease_owner,lease_until_ms,drive_retry_at_ms,level,deletion_state,"
-            "handler_version,required_capabilities,active_turn_id "
-            f"FROM sk_session WHERE tenant_id=%s AND session_id=%s{self.lock_clause}",
-            (self.tenant_id, session_id),
-        )
+        return self._session_row(session_id, for_update=True)
 
     @staticmethod
     def _require_live_row(row: tuple[Any, ...]) -> None:
@@ -1519,15 +1514,18 @@ class SQLStore:
             raise SessionNotLive("session is fenced for deletion")
 
     def _require_live(self, session_id: str, *, for_update: bool = False) -> tuple[Any, ...]:
-        row = self._one(
+        row = self._session_row(session_id, for_update=for_update)
+        self._require_live_row(row)
+        return row
+
+    def _session_row(self, session_id: str, *, for_update: bool = False) -> tuple[Any, ...]:
+        return self._one(
             "SELECT head_seq,inbox_seq,lease_epoch,lease_owner,lease_until_ms,drive_retry_at_ms,level,deletion_state,"
             "handler_version,required_capabilities,active_turn_id "
             f"FROM sk_session WHERE tenant_id=%s AND session_id=%s"
             f"{self.lock_clause if for_update else ''}",
             (self.tenant_id, session_id),
         )
-        self._require_live_row(row)
-        return row
 
     def _check_lease(self, session_id: str, lease: Lease, row: tuple[Any, ...], now: int) -> None:
         self._require_live_row(row)
@@ -1913,10 +1911,22 @@ class SQLStore:
     ) -> tuple[int, str]:
         """Verify the complete stored ledger and the optional external head anchor."""
 
-        row = self._require_live(session_id)
+        row = self._session_row(session_id)
+        forgotten = row[7] == "forgotten"
+        if not forgotten:
+            self._require_live_row(row)
         self._require_reader_row(row)
         head, inbox = row[:2]
         chain_digest = self._chain_anchor(session_id, head)
+        self._require_input_integrity_gate()
+        if forgotten:
+            tombstone = self._tombstone(session_id)
+            if tombstone is None or tombstone.state is not TombstoneState.COMPLETE:
+                raise LedgerIntegrityError("forgotten session requires a complete tombstone")
+            _, allow_unsigned, verifier = self._input_admission_policy()
+            self._verify_tombstone_object(tombstone, verifier, allow_unsigned=allow_unsigned)
+            if (tombstone.final_seq, tombstone.chain_digest) != (head, chain_digest):
+                raise LedgerIntegrityError("completed tombstone does not match the forgotten session head")
         _require_expected_head(
             expected_head,
             tenant_id=self.tenant_id,
@@ -1925,7 +1935,6 @@ class SQLStore:
             chain_digest=chain_digest,
         )
         _stored_rows, chains = self._verified_records(session_id, head)
-        self._require_input_integrity_gate()
         self._stored_inputs(session_id, inbox)
         if not chains or chains[-1] != chain_digest:
             raise LedgerIntegrityError(f"ledger head chain mismatch at seq {head}")

@@ -700,15 +700,25 @@ Signed evidence cannot be exported under that mode. Export with a verifier that
 holds the relevant historical public keys; current writes use the active key
 identifier returned by the signer binding.
 
+For local signed stores, pass `Ed25519LedgerSigner` from
+`vv_agent.session.ledger` to `configure_input_admission`. Give it the active
+key identifier and Ed25519 private key, plus `retired_keys` for public keys
+needed to read existing proofs. Rotate by configuring each connection with a
+new signer, retaining the old public key under its original identifier.
+
 ### CLI verification
 
-The local SQLite verifier is an explicit hash-only inspection path:
+For a signed local SQLite ledger, supply the trusted Ed25519 public key for
+each signing key ID used by the target scope. Use PEM SubjectPublicKeyInfo and
+repeat `--public-key` for keys retained after rotation. Signature verification
+uses the retained ledger and admission proofs, without needing a content key.
 
 ```bash
-vv-agent ledger verify --sqlite ./sessions.sqlite --session SESSION_ID --allow-unsigned
-vv-agent ledger verify --sqlite ./sessions.sqlite --tenant TENANT_ID --allow-unsigned
-vv-agent ledger verify --sqlite ./sessions.sqlite --session SESSION_ID --allow-unsigned \
+vv-agent ledger verify --sqlite ./sessions.sqlite --session SESSION_ID \
+  --public-key current=./current.pub.pem --public-key retired=./retired.pub.pem \
   --expected-head SEQ,DIGEST
+
+vv-agent ledger verify --sqlite ./sessions.sqlite --tenant TENANT_ID --allow-unsigned
 ```
 
 `--session` reads the default tenant. `--tenant` enumerates only live sessions
@@ -718,24 +728,18 @@ SHA-256 value and must match that session's head exactly.
 
 Before enabling `--allow-unsigned`, the command performs a read-only metadata
 check for checkpoints or admission proofs in every target session. If any are
-present, it returns `signed_evidence_requires_host_verifier`, exits nonzero,
-and does not configure hash-only mode or run ledger verification. A host with
-the appropriate verifier must use its configured store to verify that evidence.
+present, it returns `signed_evidence_requires_host_verifier` and exits nonzero.
+Use `--allow-unsigned` for hash-only stores and `--public-key` for signed stores.
+Omitting both options fails with `unconfigured_verifier`.
 
 The command emits JSON on every executable verification attempt. Its checked
-scope and observed heads identify what was read; `authenticity` is `hash-only`,
-and `error` preserves the first ledger or input-proof failure. Exit status is
-zero only when every requested session verifies, one when verification fails,
-and two for command-line usage errors. Without `--expected-head`,
+scope and observed heads identify what was read. `authenticity` reports the
+proof mode, and `error` reports the first ledger or input-proof failure. Exit
+status is zero only when every requested session verifies, one when verification
+fails, and two for command-line usage errors. Without `--expected-head`,
 `suffix_completeness` is always false because the database cannot prove that a
 valid signed tail was not removed. An exact expected head sets it to true after
 verification succeeds.
-
-The CLI has no safe verifier or KMS credential loader. Without
-`--allow-unsigned` it fails closed with an unconfigured-verifier error instead of
-claiming a signed result. Hosts that need signature verification must perform it
-through their configured store, signer and retained public-key material; this
-CLI does not add a second unsigned fallback or signing path.
 
 ## What to keep in your own database
 

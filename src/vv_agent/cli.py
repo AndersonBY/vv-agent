@@ -13,6 +13,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, NoReturn
 
+from cryptography.exceptions import UnsupportedAlgorithm
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+from cryptography.hazmat.primitives.serialization import load_pem_public_key
+
 from vv_agent import Agent, RunConfig
 from vv_agent.app_server import AppServer, StdioJsonlTransport
 from vv_agent.app_server.client import run_debug_message
@@ -26,7 +30,9 @@ from vv_agent.kernel._store import DEFAULT_TENANT_ID, Conflict
 from vv_agent.model import ModelRef, VvLlmModelProvider
 from vv_agent.model_settings import ModelSettings
 from vv_agent.prompt import build_system_prompt_bundle
+from vv_agent.session.ledger import Ed25519LedgerVerifier
 from vv_agent.session.sqlite import SQLiteStore
+from vv_agent.session.surfaces import _read_snapshot
 from vv_agent.types import AgentResult, AgentTask
 
 _MAX_U32 = (1 << 32) - 1
@@ -61,6 +67,10 @@ class _StoreUnique(argparse.Action):
 
 
 class _LedgerCliUsageError(ValueError):
+    pass
+
+
+class _LedgerPublicKeyError(ValueError):
     pass
 
 
@@ -132,6 +142,28 @@ def _parse_ledger_expected_head(value: str) -> tuple[int, str]:
     if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
         raise argparse.ArgumentTypeError("digest must be 64 lowercase hexadecimal characters")
     return seq, digest
+
+
+def _parse_ledger_public_key(value: str) -> tuple[str, Path]:
+    key_id, separator, path = value.partition("=")
+    if not separator or not key_id.strip() or not path.strip():
+        raise argparse.ArgumentTypeError("must use KEY_ID=PEM_PATH")
+    return key_id, Path(path)
+
+
+def _load_ledger_verifier(public_key_paths: dict[str, Path]) -> Ed25519LedgerVerifier:
+    keys = {}
+    for key_id, path in public_key_paths.items():
+        try:
+            if not path.is_file():
+                raise OSError("not a file")
+            key = load_pem_public_key(path.read_bytes())
+        except (OSError, ValueError, UnsupportedAlgorithm):
+            raise _LedgerPublicKeyError("could not read an Ed25519 public key from the supplied PEM file") from None
+        if not isinstance(key, Ed25519PublicKey):
+            raise _LedgerPublicKeyError("supplied public key must be Ed25519")
+        keys[key_id] = key
+    return Ed25519LedgerVerifier(keys)
 
 
 def _build_app_server_parser() -> _AppServerArgumentParser:
@@ -252,7 +284,7 @@ def _build_app_server_host(
 def _build_ledger_verify_parser() -> _LedgerArgumentParser:
     parser = _LedgerArgumentParser(
         prog="vv-agent ledger verify",
-        description="Verify a local S1 SQLite ledger in explicit hash-only mode.",
+        description="Verify a local S1 SQLite ledger using trusted public keys or explicit hash-only mode.",
     )
     parser.add_argument(
         "--sqlite",
@@ -283,10 +315,19 @@ def _build_ledger_verify_parser() -> _LedgerArgumentParser:
         metavar="SEQ,DIGEST",
         help="Independent trusted head anchor; valid only with --session",
     )
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "--allow-unsigned",
         action="store_true",
         help="Allow local hash-only verification only when the target scope has no signed evidence",
+    )
+    mode.add_argument(
+        "--public-key",
+        default=[],
+        action="append",
+        type=_parse_ledger_public_key,
+        metavar="KEY_ID=PEM_PATH",
+        help="Trusted Ed25519 public key in PEM format. Repeat for retained key IDs.",
     )
     return parser
 
@@ -296,6 +337,10 @@ def _parse_ledger_verify_args(argv: list[str]) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if hasattr(args, "tenant") and hasattr(args, "expected_head"):
         parser.error("--expected-head requires --session and cannot be used with --tenant")
+    public_keys = dict(args.public_key)
+    if len(public_keys) != len(args.public_key):
+        parser.error("--public-key key IDs must be unique")
+    args.public_key = public_keys
     return args
 
 
@@ -335,6 +380,8 @@ def _ledger_result_payload(args: argparse.Namespace) -> dict[str, Any]:
 
 def _ledger_error_object(exc: Exception) -> dict[str, str]:
     message = str(exc).strip() or type(exc).__name__
+    if isinstance(exc, _LedgerPublicKeyError):
+        return {"code": "invalid_public_key", "message": message}
     if isinstance(exc, ContentBindingMismatch):
         return {"code": "expected_head_mismatch", "message": message}
     if isinstance(exc, InputAdmissionProofError):
@@ -404,11 +451,13 @@ def _populate_ledger_verification(args: argparse.Namespace, payload: dict[str, A
     tenant_id = payload["checked_scope"]["tenant_id"]
     session_id = getattr(args, "session", None)
     expected_head = getattr(args, "expected_head", None)
-    with SQLiteStore.standalone(str(path)) as root:
+    verifier = _load_ledger_verifier(args.public_key) if not args.allow_unsigned else None
+    with SQLiteStore.standalone(str(path)) as root, _read_snapshot(root):
+        root.connection.execute("PRAGMA query_only=ON")
         store = root.for_tenant(tenant_id)
         sessions = (session_id,) if session_id is not None else _tenant_sessions(store)
         payload["checked_scope"]["session_count"] = len(sessions)
-        if _has_signed_evidence(store, sessions):
+        if args.allow_unsigned and _has_signed_evidence(store, sessions):
             payload["authenticity"] = "signed"
             payload["error"] = {
                 "code": "signed_evidence_requires_host_verifier",
@@ -419,7 +468,7 @@ def _populate_ledger_verification(args: argparse.Namespace, payload: dict[str, A
             }
             return
 
-        root.configure_input_admission(allow_unsigned=True)
+        root.configure_input_admission(verifier, allow_unsigned=args.allow_unsigned)
 
         for current_session_id in sessions:
             try:
@@ -447,12 +496,12 @@ def _run_ledger_cli(argv: list[str]) -> int:
         raise _LedgerCliUsageError("Supported ledger command: vv-agent ledger verify")
     args = _parse_ledger_verify_args(argv[1:])
     payload = _ledger_result_payload(args)
-    if not args.allow_unsigned:
+    if not args.allow_unsigned and not args.public_key:
         payload["error"] = {
             "code": "unconfigured_verifier",
             "message": (
-                "signed ledger verification requires a host-configured verifier; this CLI does not load verifier "
-                "or KMS credentials. Use --allow-unsigned only for local SQLite hash-only verification."
+                "signed ledger verification requires --public-key KEY_ID=PEM_PATH. "
+                "Use --allow-unsigned only for local SQLite hash-only verification."
             ),
         }
     else:
