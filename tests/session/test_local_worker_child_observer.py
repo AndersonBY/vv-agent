@@ -13,7 +13,7 @@ from vv_agent import RunConfig
 from vv_agent.kernel._sql import SessionNotLive
 from vv_agent.session.store import Conflict, SessionStore
 from vv_agent.session.surfaces import SessionDriver
-from vv_agent.session.worker import _DriveCompletion
+from vv_agent.session.worker import LocalWorker, _DriveCompletion
 
 
 class _FakeStore:
@@ -92,7 +92,9 @@ def test_observer_wakes_known_child_only_for_new_head_or_first_discovery(monkeyp
         store.heads["child-one"] = 4
         monkeypatch.setattr(driver, "_runtime_lineage", lambda _store, _sid: (root, ()))
         monkeypatch.setattr(driver, "_registration_for_cursor", lambda _sid, store=None: None)
-        monkeypatch.setattr(driver._worker, "wake", wakes.append)
+        worker = driver._worker
+        assert isinstance(worker, LocalWorker)
+        monkeypatch.setattr(worker, "wake", wakes.append)
 
         driver._observe_registered_handles(cast(SessionStore, store))
         assert wakes == ["child-one"]
@@ -102,11 +104,11 @@ def test_observer_wakes_known_child_only_for_new_head_or_first_discovery(monkeyp
         assert wakes == ["child-one"]
 
         store.runnable.add("child-one")
-        driver._worker._inflight = Future[_DriveCompletion]()
+        worker._inflight = Future[_DriveCompletion]()
         driver._observe_registered_handles(cast(SessionStore, store))
         assert wakes == ["child-one"]
 
-        driver._worker._inflight = None
+        worker._inflight = None
         driver._observe_registered_handles(cast(SessionStore, store))
         assert wakes == ["child-one", "child-one"]
 

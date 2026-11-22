@@ -26,6 +26,7 @@ from vv_agent.session.sqlite import SQLiteStore
 from vv_agent.session.store import LeaseLost, LeaseRetryExhausted
 from vv_agent.session.surfaces import SessionDriver
 from vv_agent.session.timing import ThreadLeaseKeeper
+from vv_agent.session.worker import LocalWorker
 from vv_agent.tools.builtins import build_default_registry
 from vv_agent.tools.function import function_tool
 from vv_agent.tools.registry import ToolRegistry
@@ -148,8 +149,10 @@ def test_event_page_uses_one_captured_head_and_observer_cursor(database, monkeyp
         try:
             assert initial.result(timeout=8).status == AgentStatus.WAIT_USER
             captured = first.read("event-page", limit=1).head_seq
-            driver._worker.stop()
-            assert driver._worker.join(5)
+            worker = driver._worker
+            assert isinstance(worker, LocalWorker)
+            worker.stop()
+            assert worker.join(5)
             original_status = driver._snapshot_status
 
             def paused_status(store, sid, state, requested_turn_id, *, captured_head=None):

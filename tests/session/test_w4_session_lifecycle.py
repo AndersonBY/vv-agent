@@ -37,10 +37,10 @@ from vv_agent.session.runtime import (
 )
 from vv_agent.session.sqlite import SQLiteStore
 from vv_agent.session.store import Conflict
-from vv_agent.session.surfaces import SessionDriver
+from vv_agent.session.surfaces import SessionDriver, _KnownSessionOwner
 from vv_agent.tools.base import ToolContext
 from vv_agent.tools.function import function_tool
-from vv_agent.types import AgentStatus, LLMResponse, SubAgentConfig, ToolCall
+from vv_agent.types import AgentStatus, CompletionReason, LLMResponse, SubAgentConfig, ToolCall
 
 from .conftest import open_store as configured_open_store
 from .helpers import (
@@ -944,11 +944,13 @@ def test_known_session_claim_miss_delays_only_that_session(monkeypatch, fault) -
         first = start("first")
         assert first_failed.wait(3)
         assert start("second").result(timeout=4).final_output == "second"
+        owner = driver._worker
+        assert isinstance(owner, _KnownSessionOwner)
         for _ in range(3):
-            driver._worker.request_observation(wait=True)
+            owner.request_observation(wait=True)
         assert attempts == [10.0]
         now += 1
-        driver._worker.wake("first")
+        owner.wake("first")
         assert first.result(timeout=4).final_output == "first"
         assert retried.is_set()
 
@@ -958,6 +960,7 @@ def test_known_session_owner_self_close_leaves_observer_running() -> None:
         driver = SessionDriver(_known_sessions=True)
         stack.callback(driver.close)
         owner = driver._worker
+        assert isinstance(owner, _KnownSessionOwner)
         observed = Event()
 
         def observe(_store):
@@ -1003,7 +1006,7 @@ def test_runner_closes_after_local_cancellation(cooperative) -> None:
         assert handle.cancel()
         assert not handle.cancel()
         result = handle.result(timeout=6)
-        assert result.completion_reason.value == "cancelled"
+        assert result.completion_reason is CompletionReason.CANCELLED
         assert [event.type for event in handle.events()].count("run_cancelled") == 1
         handle.close()
         assert not path.exists()

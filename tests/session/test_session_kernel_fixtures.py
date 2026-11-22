@@ -1436,8 +1436,10 @@ def test_commit_verification_rejects_tampered_sql_after_warmed_pass(tamper, erro
             ),
         )
         handle.result(timeout=30)
-        kernel._worker.stop()
-        assert kernel._worker.join(5)
+        worker = kernel._worker
+        assert isinstance(worker, LocalWorker)
+        worker.stop()
+        assert worker.join(5)
 
         sid = handle.session_id
         raw = _tenant_bound_sql_store(kernel.store)
@@ -1526,8 +1528,10 @@ def test_commit_verification_reads_fresh_inventories_in_one_query_per_pass():
             ),
         )
         handle.result(timeout=30)
-        kernel._worker.stop()
-        assert kernel._worker.join(5)
+        worker = kernel._worker
+        assert isinstance(worker, LocalWorker)
+        worker.stop()
+        assert worker.join(5)
 
         sid = handle.session_id
         raw = _tenant_bound_sql_store(kernel.store)
@@ -1592,8 +1596,10 @@ def test_projection_280_pages_share_one_verified_snapshot_frame():
                 ),
             )
             handle.result(timeout=60)
-        kernel._worker.stop()
-        assert kernel._worker.join(5)
+        worker = kernel._worker
+        assert isinstance(worker, LocalWorker)
+        worker.stop()
+        assert worker.join(5)
 
         sid = handle.session_id
         store = kernel.store

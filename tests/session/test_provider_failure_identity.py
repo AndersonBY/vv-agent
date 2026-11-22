@@ -20,6 +20,7 @@ from .conftest import open_store
 from .test_worker_surface_failures import (
     _force_due,
     _InvalidQueryProvider,
+    _local_worker,
     _push_in_transaction_and_wake,
     _runtime_factory_for,
     _wait_for,
@@ -61,7 +62,7 @@ def test_provider_result_callback_recovers_original_failure(database: str | Any,
                 "go",
             )
             _wait_for(lambda: bool(provider.handle))
-            driver._worker.wait_idle(timeout=5)
+            _local_worker(driver).wait_idle(timeout=5)
             _force_due(driver, sid)
             _wait_for(
                 lambda: (
@@ -70,7 +71,7 @@ def test_provider_result_callback_recovers_original_failure(database: str | Any,
                     and failure.terminal
                 )
             )
-            driver._worker.wait_idle(timeout=5)
+            _local_worker(driver).wait_idle(timeout=5)
             state, _, _ = driver.store.read_state(sid)
             turn = state.turns[state.active_turn_id or ""]
             _push_in_transaction_and_wake(
@@ -138,7 +139,7 @@ def test_provider_failure_observer_reconciles_remote_terminal(database: str | An
             first.create(sid, "")
             first.start(sid, agent, config, "go")
             _wait_for(lambda: bool(provider.handle))
-            first._worker.wait_idle(timeout=5)
+            _local_worker(first).wait_idle(timeout=5)
             _force_due(first, sid)
             _wait_for(
                 lambda: (
@@ -147,13 +148,13 @@ def test_provider_failure_observer_reconciles_remote_terminal(database: str | An
                     and failure.terminal
                 )
             )
-            first._worker.wait_idle(timeout=5)
+            _local_worker(first).wait_idle(timeout=5)
             failure = first._errors[sid]
             failure.warning_sent = True
             old_key = (provider.handle["operation_id"], provider.handle["attempt"])
             assert failure.fenced_operations == frozenset({old_key})
-            first._worker.stop()
-            assert first._worker.join(5)
+            _local_worker(first).stop()
+            assert _local_worker(first).join(5)
 
             state, _, _ = first.store.read_state(sid)
             turn = state.turns[failure.turn_id or ""]
@@ -192,9 +193,9 @@ def test_provider_failure_observer_reconciles_remote_terminal(database: str | An
                 return current_turn is not None and current_turn.ended
 
             _wait_for(remote_terminal, timeout=8)
-            second._worker.wait_idle(timeout=5)
-            second._worker.stop()
-            assert second._worker.join(5)
+            _local_worker(second).wait_idle(timeout=5)
+            _local_worker(second).stop()
+            assert _local_worker(second).join(5)
 
             observed_state, _, _ = first._read_observed_state(first.store, sid)
             _, _, error = first._snapshot_status(

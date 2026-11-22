@@ -23,6 +23,7 @@ from vv_agent.session.records import InboxItem
 from vv_agent.session.runtime import RuntimeNotReady, static_model_selection_requirements
 from vv_agent.session.supervisor import _tick
 from vv_agent.session.surfaces import SessionDriver, _SessionFailure
+from vv_agent.session.worker import LocalWorker
 from vv_agent.tools.function import function_tool
 from vv_agent.types import AgentStatus, CompletionReason, LLMResponse, ToolCall, ToolExecutionResult
 
@@ -59,6 +60,12 @@ def _temporary_driver(tmp_path: Path, name: str, *, worker_level: int = 1) -> It
                 driver.close()
     finally:
         provider.close()
+
+
+def _local_worker(driver: SessionDriver) -> LocalWorker:
+    worker = driver._worker
+    assert isinstance(worker, LocalWorker)
+    return worker
 
 
 def _config(responses: list[LLMResponse]) -> RunConfig:
@@ -212,7 +219,7 @@ def _induce_provider_invalid(
         "go",
     )
     _wait_for(lambda: bool(provider.handle))
-    driver._worker.wait_idle(timeout=3)
+    _local_worker(driver).wait_idle(timeout=3)
     _force_due(driver, sid)
     _wait_for(
         lambda: (
@@ -221,7 +228,7 @@ def _induce_provider_invalid(
             and failure.terminal
         )
     )
-    driver._worker.wait_idle(timeout=3)
+    _local_worker(driver).wait_idle(timeout=3)
     return handle, model, driver._errors[sid]
 
 
@@ -308,7 +315,7 @@ def test_external_wait_held_steer_backs_off_and_does_not_starve_another_session(
             "go",
         )
         _wait_for(lambda: bool(provider.handle))
-        driver._worker.wait_idle(timeout=3)
+        _local_worker(driver).wait_idle(timeout=3)
         driver._worker.scan_interval = 1.0
 
         state, _, _ = driver.store.read_state(held)
@@ -618,7 +625,7 @@ def test_provider_invalid_fence_survives_unrelated_inputs_until_real_recovery(
             "go",
         )
 
-        driver._worker.wait_idle(timeout=3)
+        _local_worker(driver).wait_idle(timeout=3)
         _force_due(driver, sid)
         _wait_for(
             lambda: (
@@ -627,7 +634,7 @@ def test_provider_invalid_fence_survives_unrelated_inputs_until_real_recovery(
                 and failure.terminal
             )
         )
-        driver._worker.wait_idle(timeout=3)
+        _local_worker(driver).wait_idle(timeout=3)
         failure = driver._errors[sid]
         assert provider.queries == 1
 
@@ -644,18 +651,18 @@ def test_provider_invalid_fence_survives_unrelated_inputs_until_real_recovery(
             ),
         )
         driver.push(sid, selection)
-        driver._worker.wait_idle(timeout=3)
+        _local_worker(driver).wait_idle(timeout=3)
         assert driver._errors.get(sid) is failure
         assert provider.queries == 1
 
         replay = driver.push(sid, selection)
         assert replay.replayed
-        driver._worker.wait_idle(timeout=3)
+        _local_worker(driver).wait_idle(timeout=3)
         assert driver._errors.get(sid) is failure
         assert provider.queries == 1
 
         driver.push(sid, InboxItem("stale-control", "control", {"action": "cancel"}, "stale-turn"))
-        driver._worker.wait_idle(timeout=3)
+        _local_worker(driver).wait_idle(timeout=3)
         assert driver._errors.get(sid) is failure
         assert provider.queries == 1
 
@@ -672,7 +679,7 @@ def test_provider_invalid_fence_survives_unrelated_inputs_until_real_recovery(
                 turn.start._payload["generation"],
             ),
         )
-        driver._worker.wait_idle(timeout=3)
+        _local_worker(driver).wait_idle(timeout=3)
         assert driver._errors.get(sid) is failure
         assert provider.queries == 1
 
@@ -686,12 +693,12 @@ def test_provider_invalid_fence_survives_unrelated_inputs_until_real_recovery(
                 turn.start._payload["generation"] + 1,
             ),
         )
-        driver._worker.wait_idle(timeout=3)
+        _local_worker(driver).wait_idle(timeout=3)
         assert driver._errors.get(sid) is failure
         assert provider.queries == 1
 
         _force_due(driver, sid)
-        driver._worker.wait_idle(timeout=3)
+        _local_worker(driver).wait_idle(timeout=3)
         assert driver._errors.get(sid) is failure
         assert provider.queries == 1
 
@@ -778,7 +785,7 @@ def test_tx_push_archive_preserves_provider_failure_and_ack(tmp_path: Path) -> N
                 for stored in driver.store.read(sid, limit=100).records
             )
         )
-        driver._worker.wait_idle(timeout=3)
+        _local_worker(driver).wait_idle(timeout=3)
 
         assert driver._errors.get(sid) is failure
         assert failure.warning_sent is True
@@ -823,7 +830,7 @@ def test_tx_push_forged_provider_result_keeps_failure_and_advances_progress_head
                 for stored in driver.store.read(sid, limit=100).records
             )
         )
-        driver._worker.wait_idle(timeout=3)
+        _local_worker(driver).wait_idle(timeout=3)
 
         assert driver._errors.get(sid) is failure
         assert failure.warning_sent is True
@@ -860,7 +867,7 @@ def test_provider_invalid_observer_keeps_failure_before_worker_head_update(
         monkeypatch.setattr(kernel_module, "drive", drive_then_observe)
         _push_in_transaction_and_wake(driver, sid, InboxItem("archive", "control", {"action": "archive"}))
         _wait_for(lambda: bool(observed))
-        driver._worker.wait_idle(timeout=3)
+        _local_worker(driver).wait_idle(timeout=3)
 
         assert observed == [True]
         assert driver._errors.get(sid) is failure
@@ -918,7 +925,7 @@ def test_provider_failure_identity_does_not_rebind_to_new_wait_across_workers(tm
         first.start(sid, agent, config, "go")
 
         _wait_for(lambda: bool(bad_provider.handle))
-        first._worker.wait_idle(timeout=3)
+        _local_worker(first).wait_idle(timeout=3)
         _force_due(first, sid)
         _wait_for(
             lambda: (
@@ -927,7 +934,7 @@ def test_provider_failure_identity_does_not_rebind_to_new_wait_across_workers(tm
                 and failure.terminal
             )
         )
-        first._worker.wait_idle(timeout=3)
+        _local_worker(first).wait_idle(timeout=3)
         failure = first._errors[sid]
         failure.warning_sent = True
 
@@ -937,8 +944,8 @@ def test_provider_failure_identity_does_not_rebind_to_new_wait_across_workers(tm
         assert failure.error._query_operation_key == original_key
         assert failure.fenced_operations == frozenset({original_key})
 
-        first._worker.stop()
-        assert first._worker.join(5)
+        _local_worker(first).stop()
+        assert _local_worker(first).join(5)
 
         second.runtime_factory = _runtime_factory_for(second, providers)
         second._runtimes[sid] = second._static_registration(
@@ -971,9 +978,9 @@ def test_provider_failure_identity_does_not_rebind_to_new_wait_across_workers(tm
         )
 
         _wait_for(lambda: healthy_provider.queries == 1)
-        second._worker.wait_idle(timeout=3)
-        second._worker.stop()
-        assert second._worker.join(5)
+        _local_worker(second).wait_idle(timeout=3)
+        _local_worker(second).stop()
+        assert _local_worker(second).join(5)
 
         recovered_state, _, _ = first.store.read_state(sid)
         healthy_key = (
@@ -1059,7 +1066,7 @@ def test_provider_query_error_fences_only_the_failing_same_batch_operation(tmp_p
         )
 
         _wait_for(lambda: bool(bad_provider.handle))
-        driver._worker.wait_idle(timeout=3)
+        _local_worker(driver).wait_idle(timeout=3)
         _force_due(driver, sid)
         _wait_for(
             lambda: (
@@ -1108,7 +1115,7 @@ def test_provider_query_error_fences_only_the_failing_same_batch_operation(tmp_p
             ),
         )
         _wait_for(lambda: healthy_provider.queries == 1 and sid not in driver._errors)
-        driver._worker.wait_idle(timeout=3)
+        _local_worker(driver).wait_idle(timeout=3)
         healthy_state, _, _ = driver.store.read_state(sid)
         submitted_healthy_key = (
             healthy_provider.handle["operation_id"],
@@ -1145,7 +1152,7 @@ def test_provider_query_boundary_replaces_preexisting_private_operation_key(
             "go",
         )
         _wait_for(lambda: bool(provider.handle))
-        driver._worker.wait_idle(timeout=3)
+        _local_worker(driver).wait_idle(timeout=3)
         _force_due(driver, sid)
         _wait_for(
             lambda: (failure := driver._errors.get(sid)) is not None and failure.error is provider.error and failure.terminal
@@ -1195,7 +1202,7 @@ def test_provider_failure_observer_reconciles_remote_terminal_without_local_clai
         first.create(sid, "")
         first.start(sid, agent, config, "go")
         _wait_for(lambda: bool(provider.handle))
-        first._worker.wait_idle(timeout=3)
+        _local_worker(first).wait_idle(timeout=3)
         _force_due(first, sid)
         _wait_for(
             lambda: (
@@ -1204,13 +1211,13 @@ def test_provider_failure_observer_reconciles_remote_terminal_without_local_clai
                 and failure.terminal
             )
         )
-        first._worker.wait_idle(timeout=3)
+        _local_worker(first).wait_idle(timeout=3)
         failure = first._errors[sid]
         failure.warning_sent = True
         old_key = (provider.handle["operation_id"], provider.handle["attempt"])
         assert failure.fenced_operations == frozenset({old_key})
-        first._worker.stop()
-        assert first._worker.join(5)
+        _local_worker(first).stop()
+        assert _local_worker(first).join(5)
 
         state, _, _ = first.store.read_state(sid)
         turn = state.turns[failure.turn_id or ""]
@@ -1249,9 +1256,9 @@ def test_provider_failure_observer_reconciles_remote_terminal_without_local_clai
             return turn is not None and turn.ended
 
         _wait_for(remote_terminal)
-        second._worker.wait_idle(timeout=3)
-        second._worker.stop()
-        assert second._worker.join(5)
+        _local_worker(second).wait_idle(timeout=3)
+        _local_worker(second).stop()
+        assert _local_worker(second).join(5)
 
         observed_state, _, _ = first._read_observed_state(first.store, sid)
         _, _, error = first._snapshot_status(
@@ -1317,7 +1324,7 @@ def test_recovered_operation_new_query_failure_gets_independent_identity_and_ack
         first.create(sid, "")
         first.start(sid, agent, config, "go")
         _wait_for(lambda: bool(old_provider.handle))
-        first._worker.wait_idle(timeout=3)
+        _local_worker(first).wait_idle(timeout=3)
         _force_due(first, sid)
         _wait_for(
             lambda: (
@@ -1326,13 +1333,13 @@ def test_recovered_operation_new_query_failure_gets_independent_identity_and_ack
                 and old_failure.terminal
             )
         )
-        first._worker.wait_idle(timeout=3)
+        _local_worker(first).wait_idle(timeout=3)
         old_failure = first._errors[sid]
         old_failure.warning_sent = True
         old_key = (old_provider.handle["operation_id"], old_provider.handle["attempt"])
         assert old_failure.fenced_operations == frozenset({old_key})
-        first._worker.stop()
-        assert first._worker.join(5)
+        _local_worker(first).stop()
+        assert _local_worker(first).join(5)
 
         state, _, _ = first.store.read_state(sid)
         turn = state.turns[old_failure.turn_id or ""]
@@ -1459,7 +1466,7 @@ def test_provider_batch_approval_scope_is_hydrated_by_the_core(tmp_path: Path) -
             RunConfig(model_provider=model, approval_provider=AskApproval()),
             "go",
         )
-        driver._worker.wait_idle(timeout=3)
+        _local_worker(driver).wait_idle(timeout=3)
 
         def approval_wait():
             try:
@@ -1495,7 +1502,7 @@ def test_provider_batch_approval_scope_is_hydrated_by_the_core(tmp_path: Path) -
             "approval-answer",
         )
         _wait_for(lambda: calls == ["approved"])
-        driver._worker.wait_idle(timeout=3)
+        _local_worker(driver).wait_idle(timeout=3)
 
         applied = next(
             stored.record

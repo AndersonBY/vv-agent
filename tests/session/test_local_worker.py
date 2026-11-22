@@ -172,10 +172,12 @@ def test_session_driver_schedules_run_handle_on_worker(tmp_path, monkeypatch):
         def run_on_worker(*_args):
             called.set()
 
-        monkeypatch.setattr(driver._worker, "_periodic_scan", run_on_worker)
+        worker = driver._worker
+        assert isinstance(worker, LocalWorker)
+        monkeypatch.setattr(worker, "_periodic_scan", run_on_worker)
         handle.start()
         assert called.wait(3)
-        assert driver._worker.started
+        assert worker.started
         assert not any(thread.name == "session-surface-driver" for thread in thread_enumerate())
     finally:
         driver.close()
