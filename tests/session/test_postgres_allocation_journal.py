@@ -43,6 +43,8 @@ def provisioned(database):
             ("key_b", JournalRole("key-intent", "tenant-b")),
             ("tenant_a", JournalRole("scope", "tenant-a")),
             ("tenant_b", JournalRole("scope", "tenant-b")),
+            ("cleanup_a", JournalRole("cleanup", "tenant-a")),
+            ("cleanup_b", JournalRole("cleanup", "tenant-b")),
         )
     }
     outside_role = f"aj_outside_{token_hex(8)}"
@@ -195,6 +197,7 @@ def test_bound_row_survives_primary_rollback_and_requires_exact_claim(provisione
     admin, identity, journals, _, _ = provisioned
     anonymous, binder = journals[JournalRole("anonymous")], journals[JournalRole("binder")]
     scope, foreign = journals[JournalRole("scope", "tenant-a")], journals[JournalRole("scope", "tenant-b")]
+    cleanup, foreign_cleanup = journals[JournalRole("cleanup", "tenant-a")], journals[JournalRole("cleanup", "tenant-b")]
     allocation_id = bytes(32)
     with psycopg.connect(postgres_admin_dsn, autocommit=True) as primary, primary.transaction(force_rollback=True):
         primary.execute("CREATE TEMP TABLE journal_test_business (id integer)")
@@ -212,19 +215,50 @@ def test_bound_row_survives_primary_rollback_and_requires_exact_claim(provisione
     assert scope.scoped_allocations("tenant-a", ("child",)) == (bound,)
     assert bound.reservation_etag == ETAG
     assert not binder.bind(allocation_id, replace(OWNER, key_id="new"), reservation_etag=ETAG)
-    assert scope.claim_bound(replace(bound, journal_id="other")) is None
-    assert scope.claim_bound(replace(bound, reservation_etag='"wrong"')) is None
-    assert scope.claim_bound(replace(bound, owner=replace(OWNER, key_id="new"))) is None
-    claim = scope.claim_bound(bound)
-    assert claim is not None and claim.state == "reaping"
     assert scope.claim_bound(bound) is None
-    assert scope.claim_bound(claim) == claim
+    assert foreign_cleanup.claim_bound(bound) is None
+    assert cleanup.claim_bound(replace(bound, journal_id="other")) is None
+    assert cleanup.claim_bound(replace(bound, reservation_etag='"wrong"')) is None
+    assert cleanup.claim_bound(replace(bound, owner=replace(OWNER, key_id="new"))) is None
+    claim = cleanup.claim_bound(bound)
+    assert claim is not None and claim.state == "reaping" and not claim.delete_confirmed
+    assert cleanup.claim_bound(bound) is None
+    assert cleanup.claim_bound(claim) == claim
     with pytest.raises(ContentCleanupUnavailable):
-        scope.finish_reap(claim, remote_terminal=False)
-    assert not scope.finish_reap(replace(claim, owner=None), remote_terminal=True)
-    assert not foreign.finish_reap(claim, remote_terminal=True)
-    assert scope.finish_reap(claim, remote_terminal=True)
-    assert not scope.finish_reap(claim, remote_terminal=True)
+        cleanup.finish_reap(claim, remote_terminal=False)
+    assert not cleanup.finish_reap(claim, remote_terminal=True)
+    assert not cleanup.finish_reap(replace(claim, delete_confirmed=True), remote_terminal=True)
+    with pytest.raises(ContentCleanupUnavailable, match="claim changed"):
+        cleanup.confirm_bound_delete(replace(claim, delete_confirmed=True))
+    for mismatch in (
+        replace(claim, journal_id="other"),
+        replace(claim, pin_until_ms=claim.pin_until_ms + 1),
+        replace(claim, reservation_etag='"wrong"'),
+        replace(claim, owner=replace(OWNER, key_id="different")),
+        replace(claim, owner=replace(OWNER, admission_session_id="different")),
+        replace(claim, owner=None),
+    ):
+        with pytest.raises(ContentCleanupUnavailable):
+            cleanup.confirm_bound_delete(mismatch)
+    for unauthorized in (scope, foreign_cleanup, anonymous, binder):
+        with pytest.raises(ContentCleanupUnavailable, match="exact cleanup claim"):
+            unauthorized.confirm_bound_delete(claim)
+    assert scope.get(allocation_id) == claim
+    confirmed = cleanup.confirm_bound_delete(claim)
+    assert confirmed == replace(claim, delete_confirmed=True)
+    cleanup_role = JournalRole("cleanup", "tenant-a")
+    reopened = PostgresAllocationJournal(provisioned[3][cleanup_role], identity, cleanup_role)
+    assert reopened.scoped_allocations("tenant-a", ("parent",)) == (confirmed,)
+    assert reopened.confirm_bound_delete(claim) == confirmed
+    assert reopened.confirm_bound_delete(confirmed) == confirmed
+    assert reopened.claim_bound(confirmed) == confirmed
+    assert reopened.claim_bound(claim) is None
+    assert not reopened.finish_reap(claim, remote_terminal=True)
+    assert not reopened.finish_reap(replace(confirmed, owner=None), remote_terminal=True)
+    assert not scope.finish_reap(confirmed, remote_terminal=True)
+    assert not foreign_cleanup.finish_reap(confirmed, remote_terminal=True)
+    assert reopened.finish_reap(confirmed, remote_terminal=True)
+    assert not reopened.finish_reap(confirmed, remote_terminal=True)
     assert scope.get(allocation_id) is None
     with pytest.raises(ContentUnavailable, match="role"):
         PostgresAllocationJournal(
@@ -240,6 +274,7 @@ def test_database_grants_and_rls_limit_authenticated_logins(provisioned):
     admin, identity, journals, logins, outside_dsn = provisioned
     anonymous_role, binder_role = JournalRole("anonymous"), JournalRole("binder")
     scope_role = JournalRole("scope", "tenant-a")
+    cleanup_role = JournalRole("cleanup", "tenant-a")
     bound, pending = bytes(32), bytes([1]) * 32
     for allocation_id in (bound, pending):
         assert journals[anonymous_role].reserve(allocation_id, pin_until_ms=_now(admin) + 10_000)
@@ -264,14 +299,27 @@ def test_database_grants_and_rls_limit_authenticated_logins(provisioned):
     with psycopg.connect(logins[scope_role], autocommit=True) as connection:
         connection.execute("SELECT set_config('vv.tenant_id','tenant-b',false)")
         assert connection.execute(f"SELECT allocation_id FROM {TABLE}").fetchall() == [(bound,)]
-        assert connection.execute(f"DELETE FROM {TABLE} WHERE allocation_id=%s", (bound,)).rowcount == 0
-        assert connection.execute(f"UPDATE {TABLE} SET state='reaping' WHERE allocation_id=%s", (pending,)).rowcount == 0
-        with pytest.raises(psycopg.errors.InsufficientPrivilege):
-            connection.execute(f"UPDATE {TABLE} SET tenant_id='tenant-b'")
+        for command in ("DELETE FROM", "UPDATE"):
+            statement = f"{command} {TABLE}"
+            if command == "UPDATE":
+                statement += " SET state='reaping'"
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                connection.execute(statement)
         with pytest.raises(psycopg.errors.InsufficientPrivilege):
             connection.execute(f"TRUNCATE {TABLE}")
+    with psycopg.connect(logins[cleanup_role], autocommit=True) as connection:
+        assert connection.execute(f"UPDATE {TABLE} SET state='reaping' WHERE allocation_id=%s", (pending,)).rowcount == 0
+        with pytest.raises(psycopg.errors.InsufficientPrivilege, match="invalid bound deletion confirmation"):
+            connection.execute(f"UPDATE {TABLE} SET state='reaping',delete_confirmed=true WHERE allocation_id=%s", (bound,))
         with pytest.raises(psycopg.errors.InsufficientPrivilege):
-            connection.execute(f"UPDATE {TABLE} SET state='unbound' WHERE allocation_id=%s", (bound,))
+            connection.execute(f"UPDATE {TABLE} SET tenant_id='tenant-b'")
+        assert connection.execute(f"UPDATE {TABLE} SET state='reaping' WHERE allocation_id=%s", (bound,)).rowcount == 1
+        assert connection.execute(f"DELETE FROM {TABLE} WHERE allocation_id=%s", (bound,)).rowcount == 0
+        with pytest.raises(psycopg.errors.InsufficientPrivilege, match="row-level security"):
+            connection.execute(f"UPDATE {TABLE} SET state='bound' WHERE allocation_id=%s", (bound,))
+        assert connection.execute(f"UPDATE {TABLE} SET delete_confirmed=true WHERE allocation_id=%s", (bound,)).rowcount == 1
+        assert connection.execute(f"UPDATE {TABLE} SET delete_confirmed=false WHERE allocation_id=%s", (bound,)).rowcount == 0
+        assert connection.execute(f"DELETE FROM {TABLE} WHERE allocation_id=%s", (bound,)).rowcount == 1
     with pytest.raises(ContentUnavailable, match="role"):
         PostgresAllocationJournal(logins[scope_role], identity, JournalRole("scope", "tenant-b"))
 
@@ -378,9 +426,11 @@ def test_exact_key_readback_mutations_and_cleanup_require_authority(provisioned)
     assert not reopened.finish_key_intent(retired)
     bound = scope.get(allocation_id)
     assert bound is not None
-    object_claim = scope.claim_bound(bound)
+    cleanup = journals[JournalRole("cleanup", "tenant-a")]
+    object_claim = cleanup.claim_bound(bound)
     assert object_claim is not None
-    assert scope.finish_reap(object_claim, remote_terminal=True)
+    confirmed = cleanup.confirm_bound_delete(object_claim)
+    assert cleanup.finish_reap(confirmed, remote_terminal=True)
     assert reopened.finish_key_intent(retired)
     assert reopened.get_key_intent(intent.provider_instance_id, intent.key_id) is None
 

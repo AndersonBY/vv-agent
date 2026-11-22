@@ -28,10 +28,14 @@ _TABLE = f"{_SCHEMA}.allocation"
 _IDENTITY = f"{_SCHEMA}.identity"
 _KEY_TABLE = f"{_SCHEMA}.key_intent"
 _OWNER = "tenant_id,session_id,content_id,admission_session_id,admission_id,provider_instance_id,key_id"
-_COLUMNS = f"allocation_id,state,pin_until_ms,reservation_etag,{_OWNER}"
+_COLUMNS = f"allocation_id,state,pin_until_ms,reservation_etag,delete_confirmed,{_OWNER}"
 _KEY_OWNER = "key_id,provider_instance_id,tenant_id,session_id,admission_root_id,admission_id"
 _KEY_COLUMNS = f"{_KEY_OWNER},state,pin_until_ms,evidence_id"
-_VERSION = 3
+_VERSION = 4
+_OWNER_MATCH = " AND ".join(f"{column} IS NOT DISTINCT FROM %s" for column in _OWNER.split(","))
+_CLAIM_MATCH = (
+    f"allocation_id=%s AND state='reaping' AND pin_until_ms=%s AND reservation_etag IS NOT DISTINCT FROM %s AND {_OWNER_MATCH}"
+)
 
 _DDL = (
     f"""CREATE TABLE {_IDENTITY} (
@@ -54,6 +58,9 @@ _DDL = (
         provider_instance_id text CHECK (length(provider_instance_id) > 0),
         key_id text CHECK (length(key_id) > 0),
         reservation_etag text CHECK (length(reservation_etag) > 0),
+        delete_confirmed boolean NOT NULL DEFAULT false CHECK (
+            NOT delete_confirmed OR (state='reaping' AND tenant_id IS NOT NULL)
+        ),
         CHECK (
             (state IN ('unbound','reaping') AND num_nonnulls({_OWNER},reservation_etag) = 0)
             OR
@@ -118,6 +125,18 @@ _DDL = (
         $$""",
     f"CREATE TRIGGER validate_exact_binding BEFORE UPDATE ON {_TABLE} "
     f"FOR EACH ROW EXECUTE FUNCTION {_SCHEMA}.validate_exact_binding()",
+    f"""CREATE FUNCTION {_SCHEMA}.validate_delete_confirmation() RETURNS trigger
+        LANGUAGE plpgsql SET search_path=pg_catalog AS $$
+        BEGIN
+            IF OLD.state<>'reaping' OR OLD.tenant_id IS NULL OR OLD.delete_confirmed
+                OR NEW.state<>'reaping' OR NOT NEW.delete_confirmed THEN
+                RAISE EXCEPTION 'invalid bound deletion confirmation' USING ERRCODE='42501';
+            END IF;
+            RETURN NEW;
+        END
+        $$""",
+    f"CREATE TRIGGER validate_delete_confirmation BEFORE UPDATE OF delete_confirmed ON {_TABLE} "
+    f"FOR EACH ROW EXECUTE FUNCTION {_SCHEMA}.validate_delete_confirmation()",
 )
 
 _SECURITY_DEFINITION = """
@@ -144,11 +163,11 @@ WHERE n.nspname=%s AND allocation.relname='allocation' AND allocation.relkind='r
 
 @dataclass(frozen=True, slots=True)
 class JournalRole:
-    mode: Literal["anonymous", "binder", "scope", "key-intent"]
+    mode: Literal["anonymous", "binder", "scope", "key-intent", "cleanup"]
     tenant_id: str | None = None
 
     def __post_init__(self) -> None:
-        if self.mode in {"scope", "key-intent", "binder"} and self.tenant_id is not None:
+        if self.mode in {"scope", "key-intent", "binder", "cleanup"} and self.tenant_id is not None:
             _require_text(self.tenant_id)
         elif self.tenant_id is not None or self.mode not in {"anonymous", "binder"}:
             raise ValueError("invalid allocation journal role binding")
@@ -216,13 +235,19 @@ def _install_role(connection: Connection[Any], login: str, role: JournalRole, id
         install(_TABLE, ("SELECT(provider_instance_id,exact_key_id)",), (("SELECT", tenant_scope, None),))
         return
     if role.mode == "scope":
-        visible = tenant_scope
         install(_KEY_TABLE, ("SELECT",), (("SELECT", tenant_scope, None),))
-        grants = ("SELECT", "UPDATE(state)", "DELETE")
+        install(_TABLE, ("SELECT",), (("SELECT", tenant_scope, None),))
+        return
+    if role.mode == "cleanup":
+        grants = ("SELECT", "UPDATE(state,delete_confirmed)", "DELETE")
         transitions = (
-            ("SELECT", visible, None),
-            ("UPDATE", visible + sql.SQL(" AND state='bound'"), visible + sql.SQL(" AND state='reaping'")),
-            ("DELETE", visible + sql.SQL(" AND state='reaping'"), None),
+            ("SELECT", tenant_scope, None),
+            (
+                "UPDATE",
+                tenant_scope + sql.SQL(" AND state IN ('bound','reaping') AND NOT delete_confirmed"),
+                tenant_scope + sql.SQL(" AND state='reaping'"),
+            ),
+            ("DELETE", tenant_scope + sql.SQL(" AND state='reaping' AND delete_confirmed"), None),
         )
     elif role.mode == "binder":
         visible = authority + sql.SQL(" AND tenant_id IS NULL")
@@ -277,8 +302,9 @@ class PostgresAllocationJournal:
 
         if admin.info.transaction_status != TransactionStatus.IDLE:
             raise ValueError("journal provisioning requires an idle admin connection")
-        if {role.mode for role in roles.values()} != {"anonymous", "binder", "scope", "key-intent"}:
-            raise ValueError("journal provisioning requires all four authorities")
+        required_modes = {"anonymous", "binder", "scope", "key-intent"}
+        if not required_modes.issubset(role.mode for role in roles.values()):
+            raise ValueError("journal provisioning requires the four publication authorities")
         identity = JournalIdentity(secrets.token_hex(32), database_id, namespace)
         with admin.transaction():
             admin.execute("SET LOCAL search_path = pg_catalog")
@@ -368,8 +394,9 @@ class PostgresAllocationJournal:
                 pin,
                 AllocationOwner(*owner) if owner[0] is not None else None,
                 etag,
+                delete_confirmed,
             )
-            for allocation_id, state, pin, etag, *owner in rows
+            for allocation_id, state, pin, etag, delete_confirmed, *owner in rows
         )
 
     def _get(self, connection: Connection[Any], allocation_id: bytes, *, lock: bool = False) -> Allocation | None:
@@ -484,11 +511,16 @@ class PostgresAllocationJournal:
             return None
 
     def claim_bound(self, expected: Allocation) -> Allocation | None:
+        """Claim only the exact binding the caller found safe under the primary fence."""
         _require_id(expected.allocation_id)
-        if expected.journal_id != self._identity.journal_id or expected.state == "unbound" or expected.owner is None:
+        if (
+            expected.journal_id != self._identity.journal_id
+            or expected.state == "unbound"
+            or expected.owner is None
+            or self._role != JournalRole("cleanup", expected.owner.tenant_id)
+        ):
             return None
         with self._transaction() as connection:
-            # Reaping rows cannot be row-locked by this role's UPDATE policy.
             actual = self._get(connection, expected.allocation_id, lock=expected.state == "bound")
             if actual != expected:
                 return None
@@ -502,20 +534,51 @@ class PostgresAllocationJournal:
                 )
             )[0]
 
+    def confirm_bound_delete(self, claim: Allocation) -> Allocation:
+        """Persist terminal provider evidence for the exact claim under the primary fence."""
+        _require_id(claim.allocation_id)
+        if (
+            claim.state != "reaping"
+            or claim.owner is None
+            or claim.journal_id != self._identity.journal_id
+            or type(claim.delete_confirmed) is not bool
+            or self._role != JournalRole("cleanup", claim.owner.tenant_id)
+        ):
+            raise ContentCleanupUnavailable("terminal bound deletion requires the exact cleanup claim")
+        confirmed = replace(claim, delete_confirmed=True)
+        with self._transaction() as connection:
+            rows = _query_rows(
+                connection,
+                f"UPDATE {_TABLE} SET delete_confirmed=true WHERE {_CLAIM_MATCH} "
+                "AND NOT delete_confirmed AND NOT %s "
+                f"RETURNING {_COLUMNS}",
+                (claim.allocation_id, claim.pin_until_ms, claim.reservation_etag, *astuple(claim.owner), claim.delete_confirmed),
+            )
+            if rows:
+                return self._allocations(rows)[0]
+            if self._get(connection, claim.allocation_id) == confirmed:
+                return confirmed
+        raise ContentCleanupUnavailable("terminal bound deletion claim changed")
+
     def finish_reap(self, claim: Allocation, *, remote_terminal: bool) -> bool:
         _require_id(claim.allocation_id)
         if remote_terminal is not True:
             raise ContentCleanupUnavailable("allocation erasure has no terminal remote evidence")
         if claim.state != "reaping" or claim.journal_id != self._identity.journal_id:
             return False
-        owner = astuple(claim.owner) if claim.owner is not None else (None,) * 7
-        owner_match = " AND ".join(f"{column} IS NOT DISTINCT FROM %s" for column in _OWNER.split(","))
+        if claim.owner is None:
+            if self._role != JournalRole("anonymous") or claim.delete_confirmed is not False:
+                return False
+            owner = (None,) * 7
+        else:
+            if self._role != JournalRole("cleanup", claim.owner.tenant_id) or claim.delete_confirmed is not True:
+                return False
+            owner = astuple(claim.owner)
         with self._transaction() as connection:
             return (
                 connection.execute(
-                    f"DELETE FROM {_TABLE} WHERE allocation_id=%s AND state='reaping' AND pin_until_ms=%s "
-                    f"AND reservation_etag IS NOT DISTINCT FROM %s AND {owner_match}",
-                    (claim.allocation_id, claim.pin_until_ms, claim.reservation_etag, *owner),
+                    f"DELETE FROM {_TABLE} WHERE {_CLAIM_MATCH} AND delete_confirmed=%s",
+                    (claim.allocation_id, claim.pin_until_ms, claim.reservation_etag, *owner, claim.delete_confirmed),
                 ).rowcount
                 == 1
             )
