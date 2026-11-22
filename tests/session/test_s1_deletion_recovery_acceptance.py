@@ -167,6 +167,59 @@ def _signed_heartbeat_store(database: Any, signer: Signer):
         yield heartbeat
 
 
+@pytest.mark.persistent_store
+@pytest.mark.parametrize(
+    ("operation", "pending_state", "completed_state"),
+    [("forget_session", "forgetting", "forgotten"), ("purge_session", "purging", "purged")],
+)
+def test_deletion_requires_a_committed_fence_before_destroying_key(
+    store,
+    database,
+    operation: str,
+    pending_state: str,
+    completed_state: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = LocalKeyProvider(MASTER_KEY, state_path=tmp_path / "keys.sqlite3")
+    signer = Signer()
+    try:
+        store.configure_input_admission(signer)
+        wrapped = wrap_fixture_store(store, provider)
+        create_fixture_session(wrapped, "session")
+        actor = _actor(store, "session")
+        workspace = ContentRef.from_dict(store.read("session", limit=1).records[0].record.payload["workspace"])
+        adapter = durable_content_store(wrapped)
+        deletion = SessionDeletionStore(store, adapter)
+        delete = deletion.forget_session if operation == "forget_session" else deletion.purge_session
+
+        with open_store(database, allow_unsigned=False) as observer:
+            destroy_states: list[tuple[str, str | None]] = []
+            original_destroy = provider.destroy
+
+            def observed_destroy(tenant_id: str, key_id: str) -> KeyDestroyOutcome:
+                destroy_states.append(_session_state(observer, "session"))
+                return original_destroy(tenant_id, key_id)
+
+            monkeypatch.setattr(provider, "destroy", observed_destroy)
+            store.connection.execute("BEGIN")
+            try:
+                with pytest.raises(RuntimeError, match="requires an idle connection"):
+                    delete(TENANT, "session", actor=actor)
+            finally:
+                store.connection.execute("ROLLBACK")
+
+            assert destroy_states == []
+            assert _session_state(observer, "session") == ("live", None)
+            assert adapter.get(TENANT, "session", workspace) == b'"/tmp"'
+
+            assert delete(TENANT, "session", actor=actor).session_ids == ("session",)
+            assert destroy_states == [(pending_state, "pending")]
+            assert _session_state(observer, "session") == (completed_state, "complete")
+    finally:
+        provider.close()
+
+
 @pytest.mark.sqlite_file
 def test_sqlite_deletion_order_restore_convergence_and_identity_fence(
     tmp_path: Path,

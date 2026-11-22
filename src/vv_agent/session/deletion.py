@@ -79,7 +79,7 @@ class _ScopeMember:
 
 
 class SessionDeletionStore:
-    """Fence, erase, and converge one tenant's session without hidden retries."""
+    """Fence and erase a session on an idle SQL connection outside host transactions."""
 
     def __init__(
         self,
@@ -132,6 +132,12 @@ class SessionDeletionStore:
                 raise TypeError("deletion store requires a concrete SQL session store")
             scoped = bound
         return scoped
+
+    @staticmethod
+    def _require_idle_connection(scoped: SQLStore) -> None:
+        # The deletion fence must commit before provider destruction can begin.
+        if scoped._transaction_in_progress():
+            raise RuntimeError("session deletion requires an idle connection outside a host transaction")
 
     @staticmethod
     def _validate_scope_ids(root_session_id: str, session_ids: tuple[str, ...]) -> None:
@@ -381,6 +387,7 @@ class SessionDeletionStore:
         )
         scoped = self._scoped(tenant_id)
         authority = self._authority(scoped)
+        self._require_idle_connection(scoped)
         session_ids = scoped.begin_forget(
             session_id,
             actor,
@@ -426,6 +433,7 @@ class SessionDeletionStore:
         )
         scoped = self._scoped(tenant_id)
         authority = self._authority(scoped)
+        self._require_idle_connection(scoped)
         session_ids = scoped.begin_purge(
             session_id,
             actor,
