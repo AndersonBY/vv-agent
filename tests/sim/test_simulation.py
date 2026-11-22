@@ -379,6 +379,29 @@ def test_spawn_fallback_campaign_uses_real_independent_seed_processes():
     assert result["scenarios"] == {"tools": 2}
 
 
+def test_campaign_reports_requested_and_effective_postgres_workers(monkeypatch):
+    import multiprocessing
+
+    from . import report
+
+    executed_workers = []
+    mp_context = multiprocessing.get_context("spawn")
+    monkeypatch.setattr(report, "postgres_connection_counts", lambda _dsn: (96, 3, 4))
+    monkeypatch.setattr(report, "_worker_process_context", lambda _backend, _workers: ("spawn", mp_context))
+    monkeypatch.setattr(report, "_spawn_worker_limit", lambda: 4)
+
+    def fake_seed_results(**kwargs):
+        executed_workers.append(kwargs["workers"])
+        yield {"seed": 0, "scenario": "tools", "decisions": [], "covered": []}
+
+    monkeypatch.setattr(report, "_seed_results", fake_seed_results)
+    result = report.run_campaign(backend="postgres", seeds=1, workers=8)
+    plan = result["environment"]["postgres_worker_plan"]
+
+    assert result["workers"] == plan["requested_workers"] == 8
+    assert executed_workers == [plan["effective_workers"]] == [4]
+
+
 def test_seed_parse_cache_preserves_results_scope_and_mutable_isolation(sim_database, monkeypatch):
     from vv_agent.kernel._records import InboxItem, Record, _MessageCache
 
