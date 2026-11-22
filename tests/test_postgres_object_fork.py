@@ -214,7 +214,7 @@ def test_signed_postgres_object_root_fork_and_timeout(object_publication, rustfs
     destination = "fork/" + digest([_SOURCE, "stable"])
     timed_out = "fork/" + digest([_SOURCE, "timeout"])
 
-    with open_server(journal, owner=owner) as (server, store, adapter):
+    with open_server(journal, owner=owner) as (server, store, adapter), open_server(_reopen(journal)) as (peer, _, _):
         _seed_source(server, workspace)
         source = store.read(_SOURCE).records[0].record
         params = params | {"workspace": {"mode": "host-prepared"}}
@@ -232,6 +232,11 @@ def test_signed_postgres_object_root_fork_and_timeout(object_publication, rustfs
 
         with monkeypatch.context() as patch:
             patch.setattr(adapter._transport, "execute", observe)
+            with peer.kernel._root_publication_atomic():
+                busy = request(server, "busy", "thread/fork", params)
+            assert busy["error"]["code"] == -32001, busy
+            assert fenced_writes == []
+            assert journal.key_intents_for_admission(TENANT_A, destination, destination, "session/create") == ()
             response = request(server, "fork", "thread/fork", params)
         assert response.get("result", {}).get("threadId") == destination, response
         assert reads and fenced_writes
@@ -257,7 +262,8 @@ def test_signed_postgres_object_root_fork_and_timeout(object_publication, rustfs
             inspector, bucket, adapter._key(destination_locator[1:])
         )
         published = _keys(inspector, bucket)
-        assert request(server, "replay", "thread/fork", params)["result"] == result | {"replayed": True}
+        with peer.kernel._root_publication_atomic():
+            assert request(server, "replay", "thread/fork", params)["result"] == result | {"replayed": True}
         conflict = request(server, "conflict", "thread/fork", params | {"workspace": {"mode": "other"}})
         assert conflict["error"]["code"] == -32024
         assert _keys(inspector, bucket) == published
