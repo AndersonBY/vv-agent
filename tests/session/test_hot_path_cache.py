@@ -74,27 +74,28 @@ def test_two_session_prefixes_reuse_validated_bytes_with_bounded_eviction(store,
         store._root._previous_prefix = None
         for sid in ("parent", "child"):
             store.read_state(sid)
-        calls = []
-        stored = store._root._stored
+        parsed_sessions = []
+        parse = records.Record._parse
 
-        def counted(*args):
-            calls.append(True)
-            return stored(*args)
+        def counted(cls, body, messages=None):
+            parsed = parse(body, messages)
+            parsed_sessions.append(parsed.session_id)
+            return parsed
 
-        monkeypatch.setattr(store._root, "_stored", counted)
+        monkeypatch.setattr(records.Record, "_parse", classmethod(counted))
         for _ in range(3):
             for sid in ("parent", "child"):
                 store.read_state(sid)
-        assert not calls
+        assert not parsed_sessions
         store.read_state("third")
         assert {store._fold_cache.session_id, store._previous_prefix.session_id} == {"child", "third"}
-        calls.clear()
+        parsed_sessions.clear()
         store.read_state("parent")
-        assert calls, "the third session must evict the older prefix"
+        assert parsed_sessions == ["parent"], "the third session must evict the older prefix"
         clear_fixture_state_cache(store)
-        calls.clear()
+        parsed_sessions.clear()
         store.read_state("third")
-        assert calls and store._previous_prefix is None, "explicit disposal clears both slots"
+        assert parsed_sessions == ["third"] and store._previous_prefix is None, "explicit disposal clears both slots"
 
 
 @pytest.mark.parametrize("change", ["rollback", "same_head", "storage_digest", "schema"])
@@ -577,10 +578,10 @@ def test_recovered_completion_does_not_construct_a_second_receipt(store, databas
     completed = []
     make = core_driver.CoreDriver.record
 
-    def counted(driver, kind, payload, plan=None, *, tid=None):
+    def counted(driver, kind, payload, plan=None, **kwargs):
         if kind == "op_completed":
             completed.append(plan.operation_id if plan is not None else None)
-        return make(driver, kind, payload, plan, tid=tid)
+        return make(driver, kind, payload, plan, **kwargs)
 
     monkeypatch.setattr(core_driver.CoreDriver, "record", counted)
     start(store)
