@@ -19,7 +19,7 @@ FIXTURES = Path(__file__).parent / "fixtures" / "parity"
 def golden_vectors():
     def walk(value):
         if isinstance(value, dict):
-            if "canonical_json_base64" in value or "rfc8785_sha256" in value:
+            if isinstance(value.get("canonical_json_base64"), str) or isinstance(value.get("rfc8785_sha256"), str):
                 yield value
             for child in value.values():
                 yield from walk(child)
@@ -28,10 +28,9 @@ def golden_vectors():
                 yield from walk(child)
 
     for path in sorted(FIXTURES.glob("*.json")):
-        if path.name.endswith(".schema.json"):
-            continue
         fixture = json.loads(path.read_text(), parse_int=lambda s: int(s) if abs(int(s)) <= MAX_WIRE_INTEGER else float(s))
         for vector in walk(fixture):
+            vector_id = vector.get("name", vector.get("scenario_ref", "golden"))
             if "scenario_ref" in vector:
                 scenario = next(s for s in fixture["scenarios"] if s["id"] == vector["scenario_ref"])
                 value = [s for s in scenario["output"]["sections"] if s["stable"]]
@@ -64,8 +63,11 @@ def golden_vectors():
                     "command_digest_input",
                     "response_digest_input",
                 )
-                value = next(vector[field] for field in fields if field in vector)
-            yield pytest.param(value, vector, id=f"{path.stem}/{vector.get('name', vector.get('scenario_ref', 'golden'))}")
+                field = next((field for field in fields if field in vector), None)
+                if field is None:
+                    raise ValueError(f"{path.name}: vector {vector_id!r} has no canonical input field in {fields}")
+                value = vector[field]
+            yield pytest.param(value, vector, id=f"{path.stem}/{vector_id}")
 
 
 @pytest.mark.parametrize(("value", "vector"), list(golden_vectors()))
