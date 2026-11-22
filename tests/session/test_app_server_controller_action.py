@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 import pytest
-from session.app_server_s1_helpers import bind_development_content
 from support.interactions import displayed_target
 
 from vv_agent.app_server import AppServer
@@ -12,9 +10,7 @@ from vv_agent.app_server.host import DefaultAppServerHost
 from vv_agent.app_server.run_adapter import TurnResumeError
 from vv_agent.session.app_server import SubmissionConflict
 
-FIXTURE_DIR = Path(__file__).parent / "fixtures" / "parity"
-
-pytest_plugins = ["session.conftest"]
+from .app_server_s1_helpers import bind_development_content
 
 
 @pytest.mark.parametrize(
@@ -56,11 +52,10 @@ def test_turn_action_rejects_respond_unknown_fields_before_durable_lookup(surfac
 
 @pytest.mark.capability("app-server-turns")
 @pytest.mark.parametrize("terminal_action", ["cancel", "abort"])
-def test_kernel_controller_suspend_reply_resume_and_terminal_are_inbox_items(tmp_path, store_backend, store, terminal_action):
+def test_kernel_controller_suspend_reply_resume_and_terminal_are_inbox_items(tmp_path, store, terminal_action):
     from vv_agent import Agent, RunConfig, ScriptedModelProvider
     from vv_agent.types import LLMResponse, ToolCall
 
-    del store_backend
     store._rows("UPDATE sk_settings SET write_level=2 WHERE singleton=1")
     content_key_provider = bind_development_content(store)
     agent = Agent("assistant", "Ask.", model="m")

@@ -1,6 +1,7 @@
 """The C encoder is guarded by byte equivalence to the full RFC 8785 encoder."""
 
 import base64
+import hmac
 import json
 import random
 from collections import UserDict
@@ -27,11 +28,28 @@ def golden_vectors():
                 yield from walk(child)
 
     for path in sorted(FIXTURES.glob("*.json")):
+        if path.name.endswith(".schema.json"):
+            continue
         fixture = json.loads(path.read_text(), parse_int=lambda s: int(s) if abs(int(s)) <= MAX_WIRE_INTEGER else float(s))
         for vector in walk(fixture):
             if "scenario_ref" in vector:
                 scenario = next(s for s in fixture["scenarios"] if s["id"] == vector["scenario_ref"])
                 value = [s for s in scenario["output"]["sections"] if s["stable"]]
+            elif path.name == "execution_worker_w3.json":
+                if "identity" in vector:
+                    framing = fixture["framing"]["execution_id"]
+                    identity = vector["identity"]
+                    value = {field: framing[field] for field in ("domain", "framing_version")}
+                    value.update({field: identity[field] for field in ("operation_key", "tenant_id", "environment_id")})
+                else:
+                    framing = fixture["framing"]["command_digest"]
+                    value = {field: framing[field] for field in ("domain", "framing_version", "purpose")}
+                    value.update(
+                        {
+                            field: vector[field]
+                            for field in ("tenant_id", "session_id", "command_spec", "environment", "operational_policy")
+                        }
+                    )
             else:
                 fields = (
                     "definition",
@@ -58,7 +76,11 @@ def test_all_vendored_jcs_golden_vectors(value, vector):
     if "canonical_json_base64" in vector:
         assert reference == base64.b64decode(vector["canonical_json_base64"])
         assert len(reference) == vector["canonical_json_utf8_bytes"]
-    assert sha256(reference).hexdigest() == vector.get("sha256", vector.get("rfc8785_sha256"))
+    if "command_digest" in vector:
+        key = base64.b64decode(vector["session_data_key_base64"])
+        assert hmac.digest(key, reference, "sha256").hex() == vector["command_digest"]
+    else:
+        assert sha256(reference).hexdigest() == vector.get("sha256", vector.get("rfc8785_sha256", vector.get("execution_id")))
 
 
 def test_jcs_literal_escape_vector():
