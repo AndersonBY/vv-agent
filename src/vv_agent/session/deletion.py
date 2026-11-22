@@ -351,6 +351,7 @@ class SessionDeletionStore:
         erasure: _RootObjectErasure,
         atomic: Callable[[], AbstractContextManager[tuple[Callable[[], None], _ExternalRoot]]],
         verify_pending: Callable[[], bool],
+        deadline_ns: int,
     ) -> None:
         params = (scoped.tenant_id, session_id)
         for finish_journal in (False, True):
@@ -406,7 +407,9 @@ class SessionDeletionStore:
                     claim = erasure.journal.claim_bound(allocation)
                     if claim is None:
                         raise ContentCleanupUnavailable("external erasure object claim changed")
-                    erasure.content.objects.delete_claimed(claim, check_fence=check_fence)
+                    erasure.content.objects.delete_claimed(
+                        claim, check_fence=check_fence, deadline_ns=deadline_ns, clock_ns=time.monotonic_ns
+                    )
                     erasure.journal.confirm_bound_delete(claim)
                 if finish_journal:
                     if not erasure.journal.finish_key_intent(retired):
@@ -426,10 +429,10 @@ class SessionDeletionStore:
         binding = content_runtime_binding_for(scoped)
         if binding is None or binding._object_content is None:
             return None
-        deadline = time.monotonic() + 5
+        deadline_ns = time.monotonic_ns() + 5_000_000_000
 
         def check_deadline() -> None:
-            if time.monotonic() >= deadline:
+            if time.monotonic_ns() >= deadline_ns:
                 raise ContentCleanupUnavailable("external erasure persistence budget expired")
 
         tenant_id = scoped.tenant_id
@@ -514,7 +517,13 @@ class SessionDeletionStore:
                 return tombstone.state is TombstoneState.PENDING
 
             self._erase_external_content(
-                scoped, binding, session_id, erasure=erasure, atomic=atomic, verify_pending=verify_pending
+                scoped,
+                binding,
+                session_id,
+                erasure=erasure,
+                atomic=atomic,
+                verify_pending=verify_pending,
+                deadline_ns=deadline_ns,
             )
             with atomic() as (check_fence, external_root):
                 check_fence()

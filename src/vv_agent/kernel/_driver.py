@@ -532,7 +532,9 @@ class CoreDriver:
         timings: list[tuple[str, float, str, str | None]] = []
         atomic_start = self.clock.monotonic_ns()
         atomic_error = None
-        persistence_deadline: float | None = self.scope.safety_deadline
+        initial_deadline = self.scope.safety_deadline
+        persistence_deadline: float | None = initial_deadline
+        object_deadline = (int(initial_deadline * 1_000_000_000), lambda: int(self.clock.monotonic() * 1_000_000_000))
 
         def check_deadline() -> None:
             deadline = self.scope.safety_deadline if persistence_deadline is None else persistence_deadline
@@ -567,7 +569,9 @@ class CoreDriver:
             check_deadline()
             publication_atomic = getattr(self.store, "_leased_publication_atomic", None)
             transaction = (
-                publication_atomic(self.scope.lease, check_deadline) if callable(publication_atomic) else self.store.atomic()
+                publication_atomic(self.scope.lease, check_deadline, object_deadline)
+                if callable(publication_atomic)
+                else self.store.atomic()
             )
             with ExitStack() as latch, transaction as tx:
                 bind_deadline = getattr(tx, "_bind_persistence_deadline", None)
@@ -575,7 +579,7 @@ class CoreDriver:
                 # External allocations must share the deadline taken before prepare.
                 if (
                     callable(bind_deadline)
-                    and bind_deadline(check_deadline, freeze_deadline)
+                    and bind_deadline(check_deadline, freeze_deadline, object_deadline)
                     and not getattr(tx, "_requires_early_persistence_deadline", False)
                 ):
                     persistence_deadline = None

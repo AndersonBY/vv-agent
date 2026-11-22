@@ -16,7 +16,7 @@ from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from ._canonical_json import canonical_json_bytes, validate_sha256
 from ._content import (
@@ -44,6 +44,9 @@ from ._content_store import (
     SessionKeyState,
 )
 from ._external_content import _ContentJournal, _ObjectContent, _PostgresObjectContent
+
+if TYPE_CHECKING:
+    from ._sql import SQLSessionTx
 
 _DATA_KEY_BYTES = 32
 _NONCE_BYTES = 12
@@ -636,7 +639,7 @@ class CoreSQLContentStore:
             raise TypeError("object_locator_cleaner must be callable")
         self._object_locator_cleaner = object_locator_cleaner
         self._write_memo: _ContentWriteMemo | None = None
-        self._transaction_active: Callable[[], None] | None = None
+        self._transaction: SQLSessionTx | None = None
         self._object_content: _ObjectContent[_ContentJournal] | None = None
         self._check_object_write: Callable[[], None] | None = None
 
@@ -646,11 +649,11 @@ class CoreSQLContentStore:
         self._object_content = binding
         self._check_object_write = check_write
 
-    def bind_transaction(self, tx: Any, *, write_memo: _ContentWriteMemo | None = None) -> None:
+    def bind_transaction(self, tx: SQLSessionTx, *, write_memo: _ContentWriteMemo | None = None) -> None:
         """Bind caches to one caller-owned transaction and its active guard."""
 
         self._write_memo = write_memo if write_memo is not None else _ContentWriteMemo()
-        self._transaction_active = tx._active
+        self._transaction = tx
 
     def close(self) -> None:
         if self._write_memo is not None:
@@ -678,8 +681,8 @@ class CoreSQLContentStore:
     def _require_transaction(self) -> None:
         try:
             self._backend.require_transaction()
-            if self._transaction_active is not None:
-                self._transaction_active()
+            if self._transaction is not None:
+                self._transaction._active()
         except BaseException:
             if self._write_memo is not None:
                 self._write_memo.clear()
@@ -1094,8 +1097,9 @@ class CoreSQLContentStore:
         now_ms = self._backend.now_ms()
         locator = None
         if wrapped.key_id.startswith(_EXACT_KEY_ID_PREFIX):
-            if self._object_content is None or self._check_object_write is None:
+            if self._object_content is None or self._check_object_write is None or self._transaction is None:
                 raise KeyUnavailable("external content requires its bound object runtime")
+            deadline_ns, clock_ns = self._transaction._object_write_deadline()
             locator = self._object_content.put(
                 tenant_id,
                 session_id,
@@ -1104,6 +1108,8 @@ class CoreSQLContentStore:
                 ciphertext,
                 plaintext_size=size,
                 check_fence=self._check_object_write,
+                deadline_ns=deadline_ns,
+                clock_ns=clock_ns,
             )
         inserted = self._backend.run(
             "INSERT INTO sk_content(tenant_id,session_id,content_id,key_id,mac,size,labels,nonce,created_ms,state,"

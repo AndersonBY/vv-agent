@@ -52,11 +52,22 @@ class _ObjectStore(Protocol):
 
     def _uses_journal(self, journal: object) -> bool: ...
 
-    def put(self, owner: AllocationOwner, ciphertext: bytes, *, pin_until_ms: int, check_fence: Callable[[], None]) -> bytes: ...
+    def put(
+        self,
+        owner: AllocationOwner,
+        ciphertext: bytes,
+        *,
+        pin_until_ms: int,
+        check_fence: Callable[[], None],
+        deadline_ns: int,
+        clock_ns: Callable[[], int],
+    ) -> bytes: ...
 
     def get(self, owner: AllocationOwner, locator: bytes, *, ciphertext_size: int) -> bytes: ...
 
-    def delete_claimed(self, claim: Allocation, *, check_fence: Callable[[], None]) -> None: ...
+    def delete_claimed(
+        self, claim: Allocation, *, check_fence: Callable[[], None], deadline_ns: int, clock_ns: Callable[[], int]
+    ) -> None: ...
 
 
 class _ExactAllocator(KeyProvider, Protocol):
@@ -191,6 +202,8 @@ class _ObjectContent[JournalT: _ContentJournal]:
         *,
         plaintext_size: int,
         check_fence: Callable[[], None],
+        deadline_ns: int,
+        clock_ns: Callable[[], int],
     ) -> bytes:
         if len(ciphertext) != plaintext_size + _AES_GCM_TAG_BYTES:
             raise ContentUnavailable("external content requires AES-GCM ciphertext length")
@@ -199,7 +212,9 @@ class _ObjectContent[JournalT: _ContentJournal]:
         owner = self._owner(key, content_id)
         pin_until_ms = self.pin()
         check_fence()
-        return self.objects.put(owner, ciphertext, pin_until_ms=pin_until_ms, check_fence=check_fence)
+        return self.objects.put(
+            owner, ciphertext, pin_until_ms=pin_until_ms, check_fence=check_fence, deadline_ns=deadline_ns, clock_ns=clock_ns
+        )
 
     def get(self, tenant_id: str, session_id: str, content_id: str, key_id: str, locator: bytes, *, size: int) -> bytes:
         key = self._key(tenant_id, session_id, key_id).intent

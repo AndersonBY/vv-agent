@@ -3,6 +3,7 @@ from contextlib import contextmanager
 from dataclasses import astuple, replace
 from secrets import token_hex
 from threading import Event
+from time import monotonic_ns
 
 import pytest
 
@@ -150,11 +151,25 @@ def test_object_store_reconciles_lost_journal_commit_reply(provisioned, monkeypa
 
     if not matches:
         with pytest.raises(CiphertextTemporarilyUnavailable):
-            objects.put(owner, _CIPHERTEXT, pin_until_ms=pin, check_fence=client.fence)
+            objects.put(
+                owner,
+                _CIPHERTEXT,
+                pin_until_ms=pin,
+                check_fence=client.fence,
+                deadline_ns=monotonic_ns() + 5_000_000_000,
+                clock_ns=monotonic_ns,
+            )
         assert len(client.calls) == (0 if operation == "reserve" else 1)
         return
 
-    locator = objects.put(owner, _CIPHERTEXT, pin_until_ms=pin, check_fence=client.fence)
+    locator = objects.put(
+        owner,
+        _CIPHERTEXT,
+        pin_until_ms=pin,
+        check_fence=client.fence,
+        deadline_ns=monotonic_ns() + 5_000_000_000,
+        clock_ns=monotonic_ns,
+    )
     assert allocation_ids == [locator[1:]]
     assert len(client.calls) == 2
     reopened = PostgresObjectJournal(

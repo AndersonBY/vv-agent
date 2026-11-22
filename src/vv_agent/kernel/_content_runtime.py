@@ -55,7 +55,7 @@ from ._external_content import _PostgresObjectContent, _SQLiteObjectContent
 from ._lease_scope import Clock
 from ._postgres import CorePostgresContentStore, PostgresStore
 from ._records import SessionSpec
-from ._sql import SQLSessionTx, _TenantSQLStore
+from ._sql import SQLSessionTx, _ObjectDeadline, _TenantSQLStore
 from ._sqlite import CoreSQLiteContentStore, SQLiteStore
 from ._store import (
     CommitReceipt,
@@ -675,7 +675,9 @@ class SessionContentWriter:
                 if sqlite.clock.monotonic() >= deadline:
                     raise KeyUnavailable("external content persistence budget expired")
 
-            tx._bind_external_deadline(check_deadline)
+            tx._bind_external_deadline(
+                check_deadline, (int(deadline * 1_000_000_000), lambda: int(sqlite.clock.monotonic() * 1_000_000_000))
+            )
             sqlite._require_content_write_fence(tx)
             _verify_content_binding(tx.store, binding)
             sqlite._require_content_write_fence(tx)
@@ -930,8 +932,10 @@ class _ContentSessionTxAdapter:
     def bind_lease_guard(self, guard: Callable[[], Lease]) -> None:
         self._tx.bind_lease_guard(guard)
 
-    def _bind_persistence_deadline(self, check_deadline: Callable[[], None], freeze_deadline: Callable[[], None]) -> bool:
-        return self._tx._bind_persistence_deadline(check_deadline, freeze_deadline)
+    def _bind_persistence_deadline(
+        self, check_deadline: Callable[[], None], freeze_deadline: Callable[[], None], object_deadline: _ObjectDeadline
+    ) -> bool:
+        return self._tx._bind_persistence_deadline(check_deadline, freeze_deadline, object_deadline)
 
     def create(self, spec: SessionSpec, *, consumers: tuple[str, ...]) -> CreateReceipt:
         return self._tx.create(spec, consumers=consumers)
@@ -1023,13 +1027,19 @@ class _ContentSessionStoreAdapter:
             if clock.monotonic() >= deadline:
                 raise KeyUnavailable("external content persistence budget expired")
 
-        return self._publication_atomic(check_deadline)
+        return self._publication_atomic(
+            check_deadline, (int(deadline * 1_000_000_000), lambda: int(clock.monotonic() * 1_000_000_000))
+        )
 
-    def _leased_publication_atomic(self, lease: Lease, check_deadline: Callable[[], None]) -> AbstractContextManager[SessionTx]:
-        return self._publication_atomic(check_deadline, lease=lease)
+    def _leased_publication_atomic(
+        self, lease: Lease, check_deadline: Callable[[], None], object_deadline: _ObjectDeadline
+    ) -> AbstractContextManager[SessionTx]:
+        return self._publication_atomic(check_deadline, object_deadline, lease=lease)
 
     @contextmanager
-    def _publication_atomic(self, check_deadline: Callable[[], None], *, lease: Lease | None = None) -> Iterator[SessionTx]:
+    def _publication_atomic(
+        self, check_deadline: Callable[[], None], object_deadline: _ObjectDeadline, *, lease: Lease | None = None
+    ) -> Iterator[SessionTx]:
         objects = self._binding._object_content
         if not isinstance(objects, _PostgresObjectContent):
             with self.atomic() as tx:
@@ -1040,7 +1050,7 @@ class _ContentSessionStoreAdapter:
             raise ContentRuntimeUnavailable("PostgreSQL object publication requires its PostgreSQL store")
         digest = objects._binding_digest()
         with root._object_publication_atomic(
-            objects.journal, content_digest=digest, check_deadline=check_deadline, lease=lease
+            objects.journal, content_digest=digest, check_deadline=check_deadline, object_deadline=object_deadline, lease=lease
         ) as (tx, check_publication):
             if objects.verify_installation(objects.journal.identity.database_id, self._binding.key_provider) != digest:
                 raise ContentUnavailable("PostgreSQL object content binding changed during publication")

@@ -18,7 +18,7 @@ from vv_agent.kernel._content import ContentUnavailable, KeyProvider
 from vv_agent.kernel._content_sql import CoreSQLContentStore
 from vv_agent.kernel._content_store import ContentCipher
 from vv_agent.kernel._reducer import Fold
-from vv_agent.kernel._sql import SQLSessionTx, SQLStore, _TenantSQLStore
+from vv_agent.kernel._sql import SQLSessionTx, SQLStore, _ObjectDeadline, _TenantSQLStore
 from vv_agent.kernel._store import Conflict, Lease, LeaseLost, ObjectPublicationBusy, SessionStore
 
 if TYPE_CHECKING:
@@ -987,6 +987,7 @@ class PostgresStore(SQLStore):
         *,
         check_deadline: Callable[[], None],
         content_digest: str,
+        object_deadline: _ObjectDeadline | None = None,
         lease: Lease | None = None,
     ) -> Iterator[tuple[SQLSessionTx, Callable[[], None]]]:
         """Open the primary transaction that owns one tenant's publication lock."""
@@ -1031,7 +1032,7 @@ class PostgresStore(SQLStore):
                     self._check_lease(lease.session_id, lease, row, self._now())
                     self._require_object_root_session(lease.session_id)
                 tx = SQLSessionTx(self)
-                tx._bind_external_deadline(check_deadline)
+                tx._bind_external_deadline(check_deadline, object_deadline)
 
                 def check_fence() -> None:
                     tx._check_content_persistence_deadline()

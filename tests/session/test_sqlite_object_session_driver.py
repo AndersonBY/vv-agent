@@ -155,7 +155,7 @@ def test_object_installation_rejects_mismatched_components_before_publication(
         assert other._rows("SELECT session_id FROM sk_session") == []
 
 
-def test_sqlite_session_driver_object_round_trip(tmp_path: Path) -> None:
+def test_sqlite_session_driver_object_round_trip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     primary = tmp_path / "sessions.sqlite"
     sidecar = tmp_path / "allocation.sqlite"
     key_path = tmp_path / "keys.sqlite"
@@ -172,6 +172,15 @@ def test_sqlite_session_driver_object_round_trip(tmp_path: Path) -> None:
         journal = _provision_journal(raw, sidecar)
         client = S3Fixture(journal)
         objects = S3CiphertextStore(client, bucket="fixture", journal=journal)
+        deadlines: list[int] = []
+        put = objects.put
+
+        def observe_put(*args, deadline_ns, clock_ns, **kwargs):
+            assert 0 < deadline_ns - clock_ns() <= 5_000_000_000
+            deadlines.append(deadline_ns)
+            return put(*args, deadline_ns=deadline_ns, clock_ns=clock_ns, **kwargs)
+
+        monkeypatch.setattr(objects, "put", observe_put)
         external = _SQLiteObjectContent(journal, objects, provider_id)
         _provision_sqlite_object_content(raw, key_provider=provider, objects=external)
         bind_content_runtime(raw, key_provider=provider, cipher=AESGCMCipher(), _object_content=external)
@@ -185,6 +194,7 @@ def test_sqlite_session_driver_object_round_trip(tmp_path: Path) -> None:
             assert not client.calls
             assert journal.scoped_key_intents("default", ("host-transaction",)) == ()
             driver.create("objects", "/external", {"scope": "test"})
+            assert len(deadlines) > 1 and len(set(deadlines)) == 1
             created = driver.store.read("objects", limit=1).records[0].record
             workspace = ContentRef.from_dict(created.payload["workspace"])
             driver.push("objects", InboxItem("input", "user", {"content": "object payload"}))

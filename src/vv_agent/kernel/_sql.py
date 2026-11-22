@@ -20,6 +20,7 @@ from vv_agent.kernel._content import (
     ContentCleanupUnavailable,
     ContentUnavailable,
     ForgetTombstone,
+    KeyUnavailable,
     Principal,
     SessionHead,
     TombstoneState,
@@ -58,6 +59,7 @@ if TYPE_CHECKING:
 
 
 _ExternalRoot = bool | tuple["_RootObjectErasure", Callable[[], None]]
+type _ObjectDeadline = tuple[int, Callable[[], int]]
 
 
 _DRIVE_RUNNABLE_SQL = """
@@ -3058,19 +3060,34 @@ class SQLSessionTx:
         self._check_persistence_deadline: Callable[[], None] | None = None
         self._check_external_deadline: Callable[[], None] | None = None
         self._freeze_persistence_deadline: Callable[[], None] | None = None
+        self._external_object_deadline: _ObjectDeadline | None = None
+        self._leased_object_deadline: _ObjectDeadline | None = None
         self._pending_lease_fence: tuple[str, Lease] | None = None
 
     def bind_lease_guard(self, guard: Callable[[], Lease]) -> None:
         self._lease_guard = guard
 
-    def _bind_persistence_deadline(self, check_deadline: Callable[[], None], freeze_deadline: Callable[[], None]) -> bool:
+    def _bind_persistence_deadline(
+        self, check_deadline: Callable[[], None], freeze_deadline: Callable[[], None], object_deadline: _ObjectDeadline
+    ) -> bool:
         self._check_persistence_deadline = check_deadline
         self._freeze_persistence_deadline = freeze_deadline
+        self._leased_object_deadline = object_deadline
         return bool(self.store.lock_clause)
 
-    def _bind_external_deadline(self, check_deadline: Callable[[], None]) -> None:
+    def _bind_external_deadline(self, check_deadline: Callable[[], None], object_deadline: _ObjectDeadline | None = None) -> None:
         if self._check_external_deadline is None:
             self._check_external_deadline = check_deadline
+            self._external_object_deadline = object_deadline
+
+    def _object_write_deadline(self) -> _ObjectDeadline:
+        external = self._external_object_deadline
+        leased = self._leased_object_deadline
+        if external is None:
+            raise KeyUnavailable("external content requires a persistence deadline")
+        if leased is None:
+            return external
+        return min(external, leased, key=lambda bound: bound[0] - bound[1]())
 
     def _active(self) -> None:
         if self.store._transaction_id() != self.transaction_id:
