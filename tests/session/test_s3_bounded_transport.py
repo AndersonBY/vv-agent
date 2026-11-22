@@ -63,7 +63,14 @@ class _Server:
             def do_GET(self) -> None:
                 owner.calls.append("GET")
                 if self.path.endswith("?versioning"):
-                    self._reply(200, b"<VersioningConfiguration/>")
+                    metadata = b"<VersioningConfiguration/>"
+                    if owner.mode == "oversized-metadata":
+                        metadata += b" " * (65 * 1024)
+                    with suppress(BrokenPipeError, ConnectionResetError):
+                        self._reply(200, metadata)
+                    return
+                if owner.mode == "missing":
+                    self._reply(404, b"<Error><Code>NoSuchKey</Code><Message>missing key</Message></Error>")
                     return
                 if owner.mode == "large":
                     self.send_response(200)
@@ -222,6 +229,20 @@ def test_transport_gets_exact_large_ciphertext_without_a_fixed_content_cap() -> 
         reply = transport.execute(request, deadline_ns=_deadline(4))
         assert reply.body is not None and len(reply.body) == _LARGE_SIZE
         assert reply.body.count(b"x") == _LARGE_SIZE
+    assert server.calls == ["GET"]
+
+
+def test_real_botocore_parses_bounded_xml_errors() -> None:
+    with _Server("missing") as server, _transport(server) as transport:
+        reply = transport.execute(_get(), deadline_ns=_deadline(1))
+        assert reply.error == "missing"
+    assert server.calls == ["GET"]
+
+
+def test_real_botocore_rejects_oversized_response_metadata() -> None:
+    with _Server("oversized-metadata") as server, _transport(server) as transport:
+        reply = transport.execute(_S3Request("get_bucket_versioning", "fixture"), deadline_ns=_deadline(1))
+        assert reply.error == "unavailable"
     assert server.calls == ["GET"]
 
 
