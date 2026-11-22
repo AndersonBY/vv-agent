@@ -6,6 +6,7 @@ import json
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -18,6 +19,7 @@ from vv_agent.kernel._content import ContentRef, ContentSessionWriter
 from vv_agent.kernel._content_publication import make_record_before_publication, publish_turn_started
 from vv_agent.kernel._hydration import reference_digest
 from vv_agent.kernel._requirements import SessionRequirements
+from vv_agent.kernel._sql import SQLStore, _TenantSQLStore
 from vv_agent.session import _recovery_phase
 from vv_agent.session._driver_scope import _Scope
 from vv_agent.session.content_runtime import SessionContentWriter
@@ -68,7 +70,7 @@ def _trusted_binding(
     operational_policy: dict | None = None,
 ) -> TrustedEnvironmentBinding:
     return TrustedEnvironmentBinding(
-        capabilities=_restricted_capabilities() if capabilities is None else capabilities,
+        capabilities=_restricted_capabilities() if capabilities is None else cast(EnvironmentCapabilities, capabilities),
         descriptor={"kind": "test-environment", "route": "sandbox-plaintext-marker"},
         operational_policy=_operational_policy() if operational_policy is None else operational_policy,
     )
@@ -507,10 +509,12 @@ def test_default_store_factories_preserve_reader_and_worker_levels(
         source.configure_worker(level=worker_level, handler_versions=("1",), capabilities=())
 
         with source.drive_store_factory()() as drive:
+            assert isinstance(drive, _TenantSQLStore)
             assert drive.reader_level == reader_level
             assert drive.worker_level == worker_level
 
         with source.heartbeat_store_factory()() as heartbeat:
+            assert isinstance(heartbeat, (SQLStore, _TenantSQLStore))
             assert heartbeat.reader_level == reader_level
             assert heartbeat.worker_level == worker_level
 

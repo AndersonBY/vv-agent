@@ -155,6 +155,7 @@ def test_cross_execution_handle_is_rejected_at_the_lookup_boundary() -> None:
         tuple(vector["evidence"]),
         feature_level=3,
     )
+    assert isinstance(result.outcome, Accepted)
     result.outcome.handle["execution_id"] = "f" * 64
 
     with pytest.raises(InvalidProviderLookupResult, match="provider lookup result is invalid") as caught:

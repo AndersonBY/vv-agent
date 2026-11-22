@@ -42,6 +42,7 @@ from vv_agent.app_server.thread_store import ThreadStore
 from vv_agent.events import (
     ToolCallPlannedEvent,
 )
+from vv_agent.kernel._content_runtime import _ContentSessionStoreAdapter
 from vv_agent.runtime.cancellation import CancellationToken
 from vv_agent.session.app_server import _KernelThreadStore
 from vv_agent.session.content_store import LocalKeyProvider
@@ -746,6 +747,7 @@ def _real_turn(steps, *, agent=None, config=None, thread_number=1, store=None, c
         ),
     )
     store_capability = server.kernel.store
+    assert isinstance(store_capability, _ContentSessionStoreAdapter)
     root_store = store_capability._root
     assert isinstance(root_store, SQLiteStore)
     if store is not None:

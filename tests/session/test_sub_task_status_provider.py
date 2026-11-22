@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from vv_agent import Agent, RunConfig, SubAgentConfig
+from vv_agent.events import ToolCallCompletedEvent
 from vv_agent.session.delegation import ChildTasks, SubTaskStatusProvider
 from vv_agent.session.kernel import drive
 from vv_agent.session.projection import SessionHydration, hydrate_records, hydration_for_session_store, project_records
@@ -210,7 +211,7 @@ def test_message_unknown_task_is_definitive_not_found(store, database, tmp_path)
         store.read_state("parent")[1],
         hydration=hydration_for_session_store(store, "parent"),
     )
-    completed = next(event for event in events if event.type == "tool_call_completed" and event.tool_call_id == "status")
+    completed = next(event for event in events if isinstance(event, ToolCallCompletedEvent) and event.tool_call_id == "status")
     assert completed.error_code == "sub_task_not_found"
     assert not any(
         record.record.kind == "op_parked"

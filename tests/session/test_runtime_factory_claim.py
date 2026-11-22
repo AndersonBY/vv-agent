@@ -483,6 +483,7 @@ def test_custom_child_claim_rebuilds_with_child_identity_and_workspace(tmp_path:
             ("custom-child", "parent", tmp_path / "custom-child"),
         ]
         assert child_runtime.agent.name == "parent"
+        assert child_runtime.config.workspace is not None
         assert Path(child_runtime.config.workspace) == tmp_path / "custom-child"
         assert child_runtime.host_bindings["custom_host"] == inherited_host_binding
         assert getattr(child_runtime.heartbeat_store, "__self__", None) is child_claim_store

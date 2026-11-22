@@ -1665,7 +1665,7 @@ def test_projection_280_pages_share_one_verified_snapshot_frame():
         request_ref = ContentRef.from_dict(planned.record._payload["request"])
         with pytest.raises(MissingContentLink):
             hydration.read("record:1", "request", request_ref)
-        assert kernel.content_key_provider.destroy(store.tenant_id, request_ref.key_id).accepted
+        assert kernel.content_key_provider.destroy(kernel.tenant_id, request_ref.key_id).accepted
         with pytest.raises(KeyUnavailable):
             kernel._handle_event_page(
                 sid,
@@ -1755,7 +1755,7 @@ def _start_logical_driver(
     driver_store = sessions.store
     lease = driver_store.acquire(session_id, owner="logical-fold", ttl_ms=15_000)
     assert lease is not None
-    driver = _Driver(driver_store, session_id, runtime, _Scope(lease, runtime, now_ms=driver_store._now()))
+    driver = _Driver(driver_store, session_id, runtime, _Scope(lease, runtime, now_ms=store._now()))
     assert _recovery_phase.run(driver, inputs.apply_input(driver, one_turn=False))
     assert _recovery_phase.run(driver, inputs.start_turn(driver))
     return driver, lease
@@ -1812,7 +1812,7 @@ def projection_frame_bundle(tmp_path: Path):
                     sessions.store,
                     session_id,
                     driver.runtime,
-                    _Scope(lease, driver.runtime, now_ms=sessions.store._now()),
+                    _Scope(lease, driver.runtime, now_ms=store._now()),
                 )
                 request = {
                     "id": "projection-call",
@@ -1985,7 +1985,7 @@ def test_active_logical_fold_refreshes_same_batch_retry_records_once(tmp_path: P
                 sessions.store,
                 session_id,
                 driver.runtime,
-                _Scope(lease, driver.runtime, now_ms=sessions.store._now()),
+                _Scope(lease, driver.runtime, now_ms=store._now()),
             )
 
             request = {

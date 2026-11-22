@@ -16,6 +16,7 @@ from vv_agent.kernel._boundary_hydration import SessionHydration, hydrate_sessio
 from vv_agent.kernel._canonical_json import canonical_json_sha256
 from vv_agent.kernel._driver_planning import InvalidW3Command, InvalidW3CommandProvider
 from vv_agent.kernel._requirements import SessionRequirements
+from vv_agent.result import RunResult
 from vv_agent.runtime.hooks import BeforeToolCallEvent
 from vv_agent.session.content_runtime import SessionContentWriter
 from vv_agent.session.content_store import LocalKeyProvider
@@ -33,6 +34,7 @@ from vv_agent.session.runtime import (
     static_session_requirements,
     static_worker_supports,
 )
+from vv_agent.session.store import StoredRecord
 from vv_agent.session.surfaces import SessionDriver
 from vv_agent.tools import ToolRegistry, ToolSpec, build_default_registry
 from vv_agent.types import LLMResponse, ToolCall, ToolExecutionResult
@@ -248,7 +250,7 @@ def _run(
     hooks=None,
     metadata: dict[str, Any] | None = None,
     runtime_hook=None,
-) -> tuple[Any, list[Any], list[Any], list[list[str]], int]:
+) -> tuple[RunResult, list[StoredRecord], tuple[StoredRecord, ...], list[list[str]], int]:
     agent = _agent(hooks=hooks, metadata=metadata)
     config = _config(provider)
     _create_level_three_session(database, key_provider, agent, config)
@@ -345,6 +347,7 @@ def test_level_three_bash_is_bound_after_preparation_and_submitted_after_start(
     plan = next(
         record for record in hydrated if record.record.kind == "op_planned" and "/tool/" in str(record.record.operation_id)
     ).record
+    assert plan.operation_id is not None
     prepared = next(record for record in hydrated if record.record.kind == "op_prepared").record
     submitted = ToolCall.from_dict(provider.probe.submitted_plans[0].payload["request"])
     envelope = provider.probe.submitted_plans[0].payload["request"]["_vv_command_binding"]
@@ -421,6 +424,7 @@ def test_before_tool_rewrite_commits_and_submits_only_the_final_command(
     assert submitted._payload["request_digest"] == prepared._payload["request_digest"]
     assert prepared._payload["request_digest"] != plan._payload["request_digest"]
     assert submitted._payload["execution_identity"] == envelope["execution_identity"]
+    assert plan.operation_id is not None
     assert submitted._payload["execution_identity"]["execution_id"] == execution_id_for(
         TENANT_ID,
         _capabilities().environment_id,

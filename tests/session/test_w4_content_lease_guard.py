@@ -113,6 +113,7 @@ def test_content_tx_slow_encode_appends_with_renewed_lease_and_budget(store, dat
         future = pool.submit(kernel.drive, store, "s", runtime=rt)
         assert entered.wait(10), "drive did not reach content transaction encoding"
         with open_store(database) as observer:
+            assert isinstance(observer, PostgresStore)
             target_dbname = observer.connection.info.dbname
             target_owner = observer._one(
                 "SELECT lease_owner FROM sk_session WHERE tenant_id=%s AND session_id=%s",

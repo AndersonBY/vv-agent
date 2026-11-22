@@ -24,6 +24,7 @@ from vv_agent.session.environments import (
     stable_operation_key,
 )
 from vv_agent.session.providers import Accepted, Definitive, Unknown
+from vv_agent.session.records import Record
 from vv_agent.types import ToolExecutionResult
 
 TENANT = "tenant-a"
@@ -443,11 +444,14 @@ def test_terminal_process_maps_to_definitive_execution_result(tmp_path: Path, mo
     assert tool_result.metadata["exit_code"] == 0
     assert "terminal output" in tool_result.content
     validate_provider_result(
-        SimpleNamespace(
-            feature_level=3,
-            operation_id=binding.operation_id,
-            attempt=binding.attempt,
-            _payload={"op_kind": "tool", "request": {"id": "call-1"}},
+        cast(
+            Record,
+            SimpleNamespace(
+                feature_level=3,
+                operation_id=binding.operation_id,
+                attempt=binding.attempt,
+                _payload={"op_kind": "tool", "request": {"id": "call-1"}},
+            ),
         ),
         result.outcome,
     )
