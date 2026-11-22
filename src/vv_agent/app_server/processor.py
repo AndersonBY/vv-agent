@@ -656,6 +656,9 @@ class MessageProcessor:
         try:
             validate_params(params)
             result = self._run_adapter.fork_thread(params, principal=principal)
+        except ObjectPublicationBusy:
+            self._router.send_error(connection_id, request.id, AppServerError.server_overloaded())
+            return
         except KeyError:
             self._router.send_error(connection_id, request.id, AppServerError.thread_not_found())
             return
