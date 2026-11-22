@@ -12,6 +12,7 @@ import vv_agent.interactive as interactive_module
 from vv_agent import Agent, AgentSessionOptions, ScriptedModelProvider, create_agent_session
 from vv_agent.events import DiagnosticEvent
 from vv_agent.interactive import AgentSessionEventGapError, AgentSessionEventStreamClosed
+from vv_agent.session.bindings import MissingHostBinding
 from vv_agent.types import LLMResponse
 
 
@@ -38,6 +39,28 @@ def _background_started_event(session_id: str) -> DiagnosticEvent:
             "metadata": {"status": "running", "session_id": session_id},
         },
     )
+
+
+def test_failed_reopen_does_not_close_the_session(tmp_path, monkeypatch):
+    session = _session(tmp_path)
+    try:
+        session.prompt("first prompt", auto_follow_up=False)
+        baseline = session.driver.store.read(session.session_id)
+
+        def fail_projection(*_args, **_kwargs):
+            raise MissingHostBinding("missing runtime binding")
+
+        with monkeypatch.context() as failed_reopen:
+            failed_reopen.setattr(interactive_module, "project_result", fail_projection)
+            with pytest.raises(MissingHostBinding, match="missing runtime binding"):
+                session._client.create_session(
+                    agent=Agent("inline", "Answer."), workspace=tmp_path, session_id=session.session_id
+                )
+            gc.collect()
+        assert session.driver.store.read(session.session_id) == baseline
+        assert not session.driver.store.read_state(session.session_id)[0].closed
+    finally:
+        session.close()
 
 
 def test_pull_subscribers_are_independent_and_report_bounded_gaps(tmp_path: Path) -> None:

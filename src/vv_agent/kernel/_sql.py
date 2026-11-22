@@ -1612,6 +1612,7 @@ class SQLStore:
         *,
         verifier: Any = _CONFIGURED_VERIFIER,
         signed: bool | None = None,
+        parsed_records: dict[int, Record] | None = None,
     ) -> tuple[list[tuple[Any, ...]], tuple[str, ...]]:
         explicitly_unsigned = signed is False
         signed, verifier = self._resolve_ledger_verifier(verifier, signed)
@@ -1658,6 +1659,16 @@ class SQLStore:
                 if actual_digest != checksum:
                     raise LedgerIntegrityError(f"stored record digest mismatch at seq {seq}")
                 record = self._cached_record_for_body(cached, seq, body)
+                if record is None and parsed_records is not None:
+                    try:
+                        parsed = Record.parse(body)
+                    except Exception:
+                        # Report parser failures in the fold after it verifies the ledger and inbox.
+                        pass
+                    else:
+                        if parsed.encode() == body:
+                            record = parsed
+                            parsed_records[seq] = parsed
                 if record is None:
                     try:
                         value = json.loads(body)
@@ -1751,7 +1762,8 @@ class SQLStore:
         ):
             self._verify_level_cache(snapshot_prefix.records, snapshot_prefix.stored_inputs, cached_level)
             return snapshot_prefix
-        stored_rows, chains = self._verified_records(session_id, head)
+        parsed_records: dict[int, Record] = {}
+        stored_rows, chains = self._verified_records(session_id, head, parsed_records=parsed_records)
         stored_inputs = self._stored_inputs(session_id, row[1])
         cached = self._cached_prefix(session_id)
         if cached is not None:
@@ -1805,7 +1817,11 @@ class SQLStore:
             for row_data in rows:
                 if row_data[1] != cursor + 1:
                     raise LedgerIntegrityError("log sequence gap or reorder")
-                stored = self._stored(session_id, row_data, reducer._messages)
+                parsed = parsed_records.get(row_data[1])
+                if parsed is None:
+                    stored = self._stored(session_id, row_data, reducer._messages)
+                else:
+                    stored = StoredRecord(parsed, row_data[1], row_data[2], row_data[3], row_data[4])
                 stored.record._share_messages(reducer._messages)
                 records.append(stored)
                 bodies.append(row_data[0])

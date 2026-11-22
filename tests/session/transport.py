@@ -86,14 +86,18 @@ class WorkerKilled(BaseException):
 
 
 class PollingProvider(ControlledProvider):
-    def __init__(self, database):
+    def __init__(self, database, *, now_ms=None):
         super().__init__(database, "accepted")
+        self.now_ms = now_ms
         self.queries = []
         self.deadline = None
 
     def query(self, handle):
-        with open_store(self.database) as store:
-            now = store._now()
+        if self.now_ms is None:
+            with open_store(self.database) as store:
+                now = store._now()
+        else:
+            now = self.now_ms()
         self.queries.append(now)
         if self.deadline is not None and now >= self.deadline:
             return Definitive(

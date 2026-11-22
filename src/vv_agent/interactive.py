@@ -290,6 +290,7 @@ class AgentSession:
             if waits:
                 result.metadata["session_waits"] = [{"session_id": owner, **wait} for owner, _, wait in waits]
             self._latest_run = AgentSessionRun.from_run_result(result)
+        self._initialized = True
 
     def _close_subscriptions(self) -> bool:
         with self._lock:
@@ -395,8 +396,9 @@ class AgentSession:
         self.close()
 
     def __del__(self) -> None:
-        with suppress(Exception):
-            self.close()
+        if getattr(self, "_initialized", False):
+            with suppress(Exception):
+                self.close()
 
     def query(self, prompt: str, *, require_completed: bool = True) -> str:
         run = self.prompt(prompt)

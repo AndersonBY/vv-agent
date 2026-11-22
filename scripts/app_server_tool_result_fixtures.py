@@ -209,7 +209,8 @@ class ResultServer:
                 return wire
 
     def start(self, thread=THREAD):
-        assert "result" in self.rpc("thread/start", {"inputId": thread})
+        response = self.rpc("thread/start", {"inputId": thread})
+        assert "result" in response, response
         response = self.rpc(
             "turn/start",
             {
@@ -278,6 +279,7 @@ def produce():
         TemporaryDirectory(prefix="app-server-tool-result-") as directory,
         SQLiteStore.standalone(f"{directory}/session.sqlite") as store,
     ):
+        store.configure_input_admission(allow_unsigned=True)
         server = ResultServer(store, host)
         try:
             server.start()
