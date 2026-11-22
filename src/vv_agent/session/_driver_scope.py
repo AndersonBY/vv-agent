@@ -9,7 +9,7 @@ from contextlib import AbstractContextManager
 from typing import cast
 
 from vv_agent.kernel._lease_scope import HeartbeatStopped as HeartbeatStopped
-from vv_agent.kernel._lease_scope import LatchEntry, LeaseOwnership, apply_controls, cancel_if_lost
+from vv_agent.kernel._lease_scope import LatchEntry, LeaseOwnership, Signal, apply_controls, cancel_if_lost
 from vv_agent.kernel._postgres import PostgresStore
 from vv_agent.runtime.cancellation import CancellationToken
 
@@ -30,7 +30,7 @@ class _SQLiteLockRetryingStore:
         store: SessionStore,
         *,
         clock: Clock,
-        stop: threading.Event,
+        stop: Signal,
         retry_budget_seconds: float,
         retry_delay_seconds: float,
     ) -> None:

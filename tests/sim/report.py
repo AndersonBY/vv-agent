@@ -29,6 +29,9 @@ DEFAULT_WORKERS = min(5, len(AFFINITY) if AFFINITY is not None else (os.cpu_coun
 
 
 class _PostgresDatabase(str):
+    cleanup_evidence: dict[str, str | int | bool] | None
+    cleanup_error: dict[str, str] | None
+
     def __new__(cls, value):
         instance = super().__new__(cls, value)
         instance.cleanup_evidence = None
