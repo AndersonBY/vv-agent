@@ -38,7 +38,7 @@ from vv_agent.session.content_reader import record_owner
 from vv_agent.session.content_store import LocalKeyProvider
 from vv_agent.session.kernel import _Driver, drive
 from vv_agent.session.records import InboxItem, Record, digest, record_identity
-from vv_agent.session.sqlite import SQLiteStore
+from vv_agent.session.sql import SQLStore
 from vv_agent.session.surfaces import SessionDriver
 from vv_agent.tools.function import function_tool
 from vv_agent.types import LLMResponse
@@ -705,7 +705,7 @@ class _CountingHydration(SessionHydration):
         super().__init__(_CountingReader(), tenant_id="default", session_id="s")
 
 
-def _started_driver(sessions: SessionDriver, store: SQLiteStore) -> tuple[_Driver, Lease]:
+def _started_driver(sessions: SessionDriver, store: SQLStore) -> tuple[_Driver, Lease]:
     sessions.create(
         "s",
         "/workspace",
@@ -728,7 +728,7 @@ def _started_driver(sessions: SessionDriver, store: SQLiteStore) -> tuple[_Drive
     return driver, lease
 
 
-def _started_tool_driver(sessions: SessionDriver, store: SQLiteStore) -> tuple[_Driver, Lease]:
+def _started_tool_driver(sessions: SessionDriver, store: SQLStore) -> tuple[_Driver, Lease]:
     sessions.create(
         "s",
         "/workspace",
@@ -905,7 +905,7 @@ def test_completed_result_reuse_does_not_cross_independent_logical_scopes(tmp_pa
         assert sessions.store.release(lease)
 
 
-def _row_body(store: SQLiteStore, seq: int) -> bytes:
+def _row_body(store: SQLStore, seq: int) -> bytes:
     row = store._one(
         "SELECT body FROM sk_record WHERE tenant_id=%s AND session_id=%s AND seq=%s",
         ("default", "s", seq),
