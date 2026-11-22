@@ -922,6 +922,12 @@ class PostgresStore(SQLStore):
         if isolation not in {"read committed", "read uncommitted"}:
             raise Conflict("PostgreSQL session creation requires READ COMMITTED isolation")
 
+    def _lock_creation_identity(self, session_id: str) -> None:
+        self._require_create_isolation()
+        frame = canonical_json_bytes(["vv-agent/S1/postgres-session-creation/v1", self.tenant_id, session_id])
+        lock_id = int.from_bytes(sha256(frame).digest()[:8], "big", signed=True)
+        self._rows("SELECT pg_catalog.pg_advisory_xact_lock(%s::bigint)", (lock_id,))
+
     def _transaction_in_progress(self) -> bool:
         from psycopg.pq import TransactionStatus
 

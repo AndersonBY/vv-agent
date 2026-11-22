@@ -256,15 +256,15 @@ def fork_thread(kernel, host, params, principal: PrincipalInput | None = None):
     )
     try:
         with kernel.store.atomic() as tx:
-            # Serialize competing forks before either allocates destination session content.
-            tx.lock_session(source)
-            previous = _replay(kernel, sid, params)
-            if previous is not None:
-                return previous
             content_writer = getattr(tx, "content_writer", None)
             if not callable(content_writer):
                 raise ValueError("fork requires a transaction with trusted content capability")
             destination = content_writer(tenant_id=kernel.tenant_id, session_id=sid)
+            # Serialize competing forks without locking the source against its worker.
+            destination._lock_creation_identity()
+            previous = _replay(kernel, sid, params)
+            if previous is not None:
+                return previous
             source_content = content_writer(tenant_id=kernel.tenant_id, session_id=source)
             source_principal = page.records[0].record._payload["principal"]
             source_workspace = page.records[0].record._payload["workspace"]

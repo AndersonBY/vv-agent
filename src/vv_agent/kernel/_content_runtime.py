@@ -822,6 +822,13 @@ class SessionContentWriter:
         if self._binding._object_content is not None:
             raise ContentRuntimeUnavailable("external content child admission is unavailable")
 
+    def _lock_creation_identity(self) -> None:
+        # SQLite already serializes writers at the outer write transaction.
+        self.tx._active()
+        store = self.tx.store
+        if isinstance(store, PostgresStore):
+            store._lock_creation_identity(self.session_id)
+
     def create_session(
         self,
         spec_factory: Callable[[SessionContentWriter], SessionSpec],
