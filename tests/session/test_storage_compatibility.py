@@ -372,6 +372,7 @@ def test_postgres_worker_claim_skips_locked_session(store, database: str) -> Non
             (store.tenant_id,),
         )
         with open_store(database) as scanner:
+            assert isinstance(scanner, CorePostgresStore)
             scanner._runtime_binding = RuntimeBinding("worker")
             scanner.configure_worker(level=1, handler_versions=("1",), capabilities=())
             claimed = scanner.claim_runnable(owner="scanner", ttl_ms=10_000, limit=1)
@@ -381,6 +382,7 @@ def test_postgres_worker_claim_skips_locked_session(store, database: str) -> Non
     ]
     assert claimed[0].lease is not None
     with open_store(database) as releaser:
+        assert isinstance(releaser, CorePostgresStore)
         releaser._runtime_binding = RuntimeBinding("worker")
         assert releaser.release(claimed[0].lease)
 
