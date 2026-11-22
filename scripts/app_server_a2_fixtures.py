@@ -14,7 +14,6 @@ from vv_agent import Agent, RunConfig, ScriptedModelProvider
 from vv_agent.app_server import AppServer, ChannelTransport, DefaultAppServerHost
 from vv_agent.app_server.host import model_summary
 from vv_agent.config import resolve_model_endpoint
-from vv_agent.session.records import SessionSpec
 from vv_agent.tools.registry import ToolRegistry
 from vv_agent.types import LLMResponse, Message
 
@@ -76,30 +75,27 @@ def produce() -> dict:
         return wire
 
     with ExitStack() as stack:
-        stack.callback(server.kernel.close)
         stack.callback(fixtures.kernel.close)
+        stack.callback(server.kernel.close)
         stack.enter_context(patch("vv_agent.session.timing.time.monotonic_ns", return_value=100_000_000))
         stack.enter_context(patch("vv_agent.prompt.builder.datetime", FixedDatetime))
         assert request(0, "initialize", {"clientInfo": {"name": "fixture"}})["result"]["protocolVersion"] == "v5"
-        with fixtures.kernel.store.atomic() as tx:
-            tx.create(
-                SessionSpec(
-                    "a2",
-                    "test",
-                    "/fixture",
-                    attributes={
-                        "app_server": {"agent_key": "default", "cwd": "/fixture", "metadata": {}},
-                        "seed": {
-                            "messages": [
-                                Message("user", "request").to_dict(),
-                                Message("assistant", "old facts " * 1000).to_dict(),
-                            ],
-                            "shared_state": {},
-                        },
-                    },
-                ),
-                consumers=("events", "app_server", "traces"),
-            )
+        server.kernel.create(
+            "a2",
+            "/fixture",
+            {
+                "app_server": {"agent_key": "default", "cwd": "/fixture", "metadata": {}},
+                "seed": {
+                    "messages": [
+                        Message("user", "request").to_dict(),
+                        Message("assistant", "old facts " * 1000).to_dict(),
+                    ],
+                    "shared_state": {},
+                    "response_rejection": True,
+                    "unseen_input_protection": True,
+                },
+            },
+        )
         assert "result" in request(
             1,
             "turn/start",
@@ -119,11 +115,12 @@ def produce() -> dict:
         assert after["contextVersion"] != before["contextVersion"]
         assert after["lastCompaction"] and "Continue" in after["lastCompaction"]["summary"]
         from vv_agent.app_server.item_mapper import map_run_event
-        from vv_agent.session.projection import project_records
+        from vv_agent.session.projection import hydration_for_session_store, project_records
 
+        store = server.kernel.store
         lifecycle = [
             {"method": method, "params": params}
-            for event in project_records(fixtures.kernel.store.read_state("a2")[1])
+            for event in project_records(store.read_state("a2")[1], hydration=hydration_for_session_store(store, "a2"))
             for method, params in map_run_event(event, thread_id="a2", turn_id=event.run_id).additional_notifications
             if method.startswith("contextCompaction/")
         ]
@@ -132,7 +129,7 @@ def produce() -> dict:
         fork_replay = request("fork-replay", "thread/fork", fork_params)["result"]
         fork_conflict = request("fork-conflict", "thread/fork", fork_params | {"workspace": {}})["error"]
         fork_context = request("fork-context", "thread/context/read", {"threadId": fork["threadId"]})["result"]
-        fork_seed = fixtures.kernel.store.read(fork["threadId"]).records[0].record._payload["attributes"]["seed"]
+        fork_seed = server.kernel.session_attributes(fork["threadId"])["seed"]
         return {
             "fork": {
                 "params": fork_params,
