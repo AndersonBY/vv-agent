@@ -435,9 +435,10 @@ def test_thread_list_authorizes_before_loading_and_never_projects_full_snapshots
             reads.append(sid)
             return read_state(sid)
 
-        monkeypatch.setattr(server.kernel.store, "read_state", authorized_read)
-        monkeypatch.setattr(server.host, "authorize", lambda conn, method, params: params.get("threadId") != "thread0")
-        monkeypatch.setattr(server.store, "read_thread", lambda *a: pytest.fail("list projected full history"))
-        response = request(server, "list", "thread/list", {"offset": 1, "limit": 2})["result"]
-        assert [t["threadId"] for t in response["threads"]] == ["thread2", "thread3"]
-        assert reads == ["thread2", "thread3"]
+        with monkeypatch.context() as guards:
+            guards.setattr(server.kernel.store, "read_state", authorized_read)
+            guards.setattr(server.host, "authorize", lambda conn, method, params: params.get("threadId") != "thread0")
+            guards.setattr(server.store, "read_thread", lambda *a: pytest.fail("list projected full history"))
+            response = request(server, "list", "thread/list", {"offset": 1, "limit": 2})["result"]
+            assert [t["threadId"] for t in response["threads"]] == ["thread2", "thread3"]
+            assert reads == ["thread2", "thread3"]

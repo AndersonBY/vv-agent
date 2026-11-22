@@ -102,6 +102,9 @@ def _app_server(
 ) -> tuple[AppServer, ChannelTransport, SQLiteStore]:
     root_store = SQLiteStore(str(database))
     root_store.install_schema()
+    root_store.configure_input_admission(allow_unsigned=True)
+    with root_store.atomic():
+        root_store._rows("UPDATE sk_settings SET write_level=2 WHERE singleton=1")
     bind_development_content(root_store)
     store = root_store.for_tenant(principal["tenant_id"] if principal is not None else "tenant-a")
     transport = ChannelTransport(connection_id=connection_id)

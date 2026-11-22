@@ -2,26 +2,31 @@
 
 from __future__ import annotations
 
+import base64
+from dataclasses import replace
+from hashlib import sha256
 from pathlib import Path
+from queue import Empty
 from typing import Any, ClassVar, TypedDict, cast
 
 import pytest
 
+from scripts.app_server_interaction_fixtures import target_of
+from scripts.app_server_tool_result_fixtures import BINARY, ResultHost, VersionWorkspace
 from vv_agent import Agent, RunConfig, ScriptedModelProvider
 from vv_agent.app_server import AppServer, ChannelTransport, DefaultAppServerHost
 from vv_agent.app_server.host import ToolResultResourceAuthorizationRequest, TrustedPrincipal
 from vv_agent.app_server.processor import CLIENT_METHODS
-from vv_agent.app_server.protocol.tool_result import ToolResultRef
 from vv_agent.app_server.schema import CLIENT_METHOD_SPECS
-from vv_agent.kernel._content import ContentLabels, ContentRef, ContentUnavailable, Principal
+from vv_agent.kernel._content import ContentLabels, ContentRef, ContentUnavailable, ExportContentMode, ExportLineKind, Principal
 from vv_agent.kernel._sql import LedgerSigner
 from vv_agent.session.content_runtime import SessionContentWriter, durable_content_store
 from vv_agent.session.content_store import InMemoryEncryptedContentStore, LocalKeyProvider
 from vv_agent.session.deletion import DeletionAuthenticity, SessionDeletionStore
 from vv_agent.session.export import export_session
 from vv_agent.session.projection import hydrate_record_payload, hydration_for_session_store
-from vv_agent.types import LLMResponse
-from vv_agent.workspace.resources import ToolResultResourceRef
+from vv_agent.tools import build_default_registry
+from vv_agent.types import LLMResponse, ToolCall
 
 
 class _DeletionOverrides(TypedDict, total=False):
@@ -294,6 +299,7 @@ class _GrantHost(DefaultAppServerHost):
         "thread/context/read": "read",
         "thread/events/list": "read",
         "thread/status": "read",
+        "thread/list": "read",
         "thread/resume": "reconnect",
         "thread/toolResult/read": "artifact",
     }
@@ -301,13 +307,15 @@ class _GrantHost(DefaultAppServerHost):
     def __init__(
         self,
         *,
-        principals: dict[str, TrustedPrincipal],
+        tenant_id: str,
+        principals: dict[str, str],
         grants: set[tuple[str, str, str]],
-        resource_grants: set[tuple[str, str]],
+        resource_grants: set[tuple[str, str, str]],
         agent: Agent,
         run_config: RunConfig,
     ) -> None:
         super().__init__(agent=agent, run_config=run_config)
+        self.tenant_id = tenant_id
         self.principals = principals
         self.grants = grants
         self.resource_grants = resource_grants
@@ -318,109 +326,168 @@ class _GrantHost(DefaultAppServerHost):
         target = params.get("threadId") or params.get("inputId")
         action = self._ACTIONS.get(method, method)
         self.authorizations.append((connection_id, method, target))
-        return (connection_id, action, target) in self.grants
+        subject = self.principals.get(connection_id)
+        if subject is None:
+            return False
+        if method == "thread/list" and target is None:
+            return True
+        return (subject, action, target) in self.grants
 
     def resolve_principal(self, connection_id: str, method: str, params: dict[str, Any]) -> TrustedPrincipal | None:
         del method, params
-        return self.principals.get(connection_id)
+        subject = self.principals.get(connection_id)
+        if subject is None:
+            return None
+        tenant = self.tenant_id if subject != "foreign-user" else f"{self.tenant_id}-other"
+        return _principal(subject, tenant)
 
     def authorize_tool_result_resource(self, request: ToolResultResourceAuthorizationRequest) -> bool:
         self.resource_authorizations.append(request)
-        return (request.connection_id, request.thread_id) in self.resource_grants
+        subject = self.principals.get(request.connection_id)
+        return (subject, request.resource.owner, request.resource.sha256) in self.resource_grants
 
 
 def test_same_tenant_users_reuse_only_explicit_shared_resource_grants(store, tmp_path, monkeypatch):
-    tenant = store.tenant_id
-    user_a = _principal("user-a", tenant)
-    user_b = _principal("user-b", tenant)
-    user_c = _principal("user-c", tenant)
-    foreign = _principal("foreign-user", f"{tenant}-other")
+    backend = VersionWorkspace()
+    source, other = "source", "other"
+
+    def model(request):
+        if any(message.role == "tool" and message.tool_call_id == "ask" for message in request.messages):
+            return LLMResponse("source complete")
+        if any(message.role == "tool" for message in request.messages):
+            return LLMResponse("", [ToolCall("ask", "ask_user", {"question": "Source waiting"})])
+        return LLMResponse("", [ToolCall("file", "output", {"kind": "file"}), ToolCall("image", "output", {"kind": "image"})])
+
+    fixture = ResultHost(backend, model=model)
+    assert fixture._agent is not None and fixture._run_config is not None
     host = _GrantHost(
-        principals={"user-a": user_a, "user-b": user_b, "user-c": user_c, "foreign": foreign},
-        grants={("user-a", "create", "source")},
+        tenant_id=store.tenant_id,
+        principals={"user-a": "user-a", "user-b": "user-b", "b-reconnect": "user-b", "foreign": "foreign-user"},
+        grants={("user-a", action, source) for action in ("create", "control", "read", "reconnect", "artifact")}
+        | {("user-b", action, other) for action in ("create", "control", "read", "reconnect", "artifact")},
         resource_grants=set(),
-        agent=Agent("test", "Be precise."),
-        run_config=RunConfig(model_provider=ScriptedModelProvider.new("test", "m", []), workspace=tmp_path),
+        agent=fixture._agent,
+        run_config=replace(fixture._run_config, tool_registry_factory=build_default_registry),
     )
-    server, provider, user_a_client = _server(store, host, tmp_path / "authorization-keys.sqlite3")
+    server, provider, owner = _server(store, host, tmp_path / "authorization-keys.sqlite3")
     try:
-        user_b_client = _Client(server, "user-b")
-        user_b_client.initialize()
-        user_c_client = _Client(server, "user-c")
-        user_c_client.initialize()
-        foreign_client = _Client(server, "foreign")
-        foreign_client.initialize()
-
-        assert user_a_client.rpc("thread/start", {"inputId": "source"})["result"]["threadId"] == "source"
-        storage_reads: list[str] = []
-        read_thread = server.store.read_thread
-
-        def tracked_read_thread(thread_id: str, *args: Any, **kwargs: Any):
-            storage_reads.append(thread_id)
-            return read_thread(thread_id, *args, **kwargs)
-
-        monkeypatch.setattr(server.store, "read_thread", tracked_read_thread)
-        assert user_b_client.rpc("thread/read", {"threadId": "source"})["error"]["code"] == -32027
-        assert storage_reads == []
-
-        host.grants.update(
-            {
-                ("user-b", "read", "source"),
-                ("user-b", "reconnect", "source"),
-                ("user-b", "artifact", "source"),
-            }
-        )
-        read = user_b_client.rpc("thread/read", {"threadId": "source"})
-        resumed = user_b_client.rpc("thread/resume", {"threadId": "source", "subscribe": False})
-        artifact_route = user_b_client.rpc("thread/toolResult/read", {"threadId": "source"})
-        assert read["result"]["thread"]["threadId"] == "source"
-        assert resumed["result"]["thread"]["threadId"] == "source"
-        assert artifact_route["error"]["code"] == -32602
-        assert storage_reads
-
-        control = user_b_client.rpc(
+        user = _Client(server, "user-b")
+        user.initialize()
+        reconnect = _Client(server, "b-reconnect")
+        reconnect.initialize()
+        foreign = _Client(server, "foreign")
+        foreign.initialize()
+        assert owner.rpc("thread/start", {"inputId": source})["result"]["threadId"] == source
+        assert user.rpc("thread/start", {"inputId": other})["result"]["threadId"] == other
+        started = owner.rpc(
             "turn/start",
             {
-                "threadId": "source",
-                "inputId": "forbidden-control",
+                "threadId": source,
+                "inputId": "initial",
                 "expectedTurnId": None,
-                "input": [{"type": "text", "text": "change it"}],
+                "input": [{"type": "text", "text": "start"}],
             },
+        )["result"]
+        turn = started["turnId"]
+        server.run_adapter.join()
+        snapshot = owner.rpc("thread/read", {"threadId": source})["result"]
+        form = snapshot["state"]["pendingInteraction"]
+        summaries = {
+            item["payload"]["result"]["kind"]: item["payload"]["result"]
+            for item in snapshot["items"]
+            if item["type"] == "toolCall" and "result" in item["payload"]
+        }
+        file = summaries["file"]
+        image = summaries["image"]
+        file_page = {"threadId": source, "ref": file["ref"], "part": file["resources"][0]["id"], "offset": 7, "limit": 4}
+        image_page = file_page | {"ref": image["ref"], "part": image["resources"][0]["id"]}
+        answer = {
+            "threadId": source,
+            "turnId": turn,
+            "actionId": "reply",
+            "action": {"kind": "respond", "target": target_of(form), "answer": {"kind": "text", "text": "allow finish"}},
+        }
+        submit = {
+            "threadId": source,
+            "inputId": "forbidden-control",
+            "expectedTurnId": turn,
+            "input": [{"type": "text", "text": "change it"}],
+        }
+        unauthorized_controls = (
+            ("turn/start", submit | {"expectedTurnId": None}),
+            ("turn/steer", submit),
+            ("turn/followUp", submit),
+            ("turn/action", answer),
+            ("turn/interrupt", {"threadId": source, "expectedTurnId": turn, "actionId": "cancel"}),
+            ("thread/fork", {"threadId": source, "forkId": "forbidden-copy"}),
+            ("thread/archive", {"threadId": source}),
         )
-        fork = user_b_client.rpc("thread/fork", {"threadId": "source", "forkId": "forbidden-copy"})
-        assert control["error"]["code"] == -32027
-        assert fork["error"]["code"] == -32027
-        assert store.read_input("source", "forbidden-control") is None
-        assert _session_ids(store) == {"source"}
+        denied = (
+            *(
+                (method, {"threadId": source})
+                for method in ("thread/read", "thread/context/read", "thread/events/list", "thread/status")
+            ),
+            ("thread/resume", {"threadId": source, "subscribe": True}),
+            ("turn/resume", {"threadId": source, "turnId": turn}),
+            ("thread/toolResult/read", file_page),
+            *unauthorized_controls,
+        )
+        bound_store = server.kernel.store
+        before = bound_store.read_state(source)
+        subscribers = set(server.state_manager.subscribers(source))
+        storage_reads = []
+        with monkeypatch.context() as guards:
+            for name in ("read", "read_state", "read_input", "peek_inbox"):
+                original = getattr(bound_store, name)
 
-        assert user_c_client.rpc("thread/read", {"threadId": "source"})["error"]["code"] == -32027
-        host.grants.add(("foreign", "read", "source"))
-        reads_before_foreign = len(storage_reads)
-        assert foreign_client.rpc("thread/read", {"threadId": "source"})["error"]["code"] == -32027
-        assert len(storage_reads) == reads_before_foreign
+                def tracked(sid, *args, original=original, **kwargs):
+                    storage_reads.append(sid)
+                    return original(sid, *args, **kwargs)
 
-        resource = ToolResultResourceRef(
-            "a" * 64,
-            "b" * 64,
-            ".vv-agent/resources/" + "b" * 64 + "/object",
-            1,
-            "c" * 64,
-            "text/plain",
-            "result.txt",
-        )
-        request = ToolResultResourceAuthorizationRequest(
-            connection_id="user-b",
-            thread_id="source",
-            ref=ToolResultRef("source", "turn", "operation", 1, "call", 2, "d" * 64),
-            workspace_backend=object(),
-            resource=resource,
-        )
-        assert host.authorize_tool_result_resource(request) is False
-        host.resource_grants.add(("user-b", "source"))
-        assert host.authorize_tool_result_resource(request) is True
-        assert ("user-b", "thread/toolResult/read", "source") in host.authorizations
-        assert ("user-b", "turn/start", "source") in host.authorizations
-        assert ("user-b", "thread/fork", "source") in host.authorizations
+                guards.setattr(bound_store, name, tracked)
+            for method, params in denied:
+                assert reconnect.rpc(method, params)["error"]["code"] == -32027, method
+            assert storage_reads == []
+            listed = user.rpc("thread/list", {})["result"]["threads"]
+            assert [thread["threadId"] for thread in listed] == [other]
+            assert storage_reads and set(storage_reads) == {other}
+            host.grants.add(("foreign-user", "read", source))
+            assert foreign.rpc("thread/read", {"threadId": source})["error"]["code"] == -32027
+            assert set(storage_reads) == {other}
+
+        assert backend.opens == 0 and not host.resource_authorizations
+        assert set(server.state_manager.subscribers(source)) == subscribers
+        with pytest.raises(Empty):
+            reconnect.transport.receive_outbound(timeout=0)
+        assert bound_store.read_state(source)[1:] == before[1:]
+        assert bound_store.read_input(source, "forbidden-control") is None
+        assert _session_ids(store) == {source, other}
+
+        host.grants.update(("user-b", action, source) for action in ("read", "reconnect", "artifact"))
+        assert reconnect.rpc("thread/toolResult/read", file_page)["error"]["code"] == -32027
+        assert backend.opens == 0
+        request = host.resource_authorizations[-1]
+        host.resource_grants.add(("user-b", request.resource.owner, request.resource.sha256))
+        page = reconnect.rpc("thread/toolResult/read", file_page)["result"]
+        assert base64.b64decode(page["data"]) == BINARY[7:11] and page["sha256"] == sha256(BINARY).hexdigest()
+        assert reconnect.rpc("thread/toolResult/read", image_page)["error"]["code"] == -32027
+        assert backend.opens == 1
+
+        resumed = reconnect.rpc("thread/resume", {"threadId": source, "subscribe": True})["result"]
+        assert resumed["state"]["pendingInteraction"] == form
+        assert resumed["items"] == snapshot["items"]
+        assert "b-reconnect" in server.state_manager.subscribers(source)
+        for method, params in unauthorized_controls:
+            assert reconnect.rpc(method, params)["error"]["code"] == -32027, method
+        assert bound_store.read_state(source)[1:] == before[1:]
+
+        assert owner.rpc("turn/action", answer)["result"]["accepted"]
+        server.run_adapter.join()
+        while (notice := reconnect.transport.receive_outbound(timeout=10)).get("method") != "turn/completed":
+            continue
+        assert notice["params"]["threadId"] == source and notice["params"]["turnId"] == turn
+        assert notice["params"]["finalOutput"] == "source complete"
+        assert fixture.executions == ["file", "image"]
     finally:
         server.run_adapter.join()
         server.kernel.close()
@@ -448,9 +515,9 @@ def test_a14_export_and_delete_wire_surface_remains_contract_gated(store, tmp_pa
 
 def test_a14_export_forget_and_purge_authorization_matrix(store, tmp_path, monkeypatch):
     tenant = store.tenant_id
-    owner = _principal("user-a", tenant)
     host = _GrantHost(
-        principals={"user-a": owner},
+        tenant_id=tenant,
+        principals={"user-a": "user-a"},
         grants={("user-a", "create", "source")},
         resource_grants=set(),
         agent=Agent("test", "Be precise."),
@@ -502,6 +569,21 @@ def test_a14_export_forget_and_purge_authorization_matrix(store, tmp_path, monke
             return for_tenant(selected_tenant)
 
         monkeypatch.setattr(store, "for_tenant", tracked_for_tenant)
+
+        class DeniedContent:
+            def export_content_lines(self, *_args):
+                pytest.fail("unauthorized content export")
+
+        with pytest.raises(PermissionError, match="not authorized"):
+            export_session(
+                store,
+                "source",
+                actor=user_b,
+                authorize=authorize,
+                content_mode=ExportContentMode.INCLUDE_CONTENT,
+                content_store=DeniedContent(),
+            )
+        assert authorizations.pop() == ("user-b", "source", "export")
 
         for name in ("export", "forget", "purge"):
             with pytest.raises(PermissionError, match="requires an authorization hook"):
@@ -564,6 +646,11 @@ def test_a14_export_forget_and_purge_authorization_matrix(store, tmp_path, monke
         )
         document = export_session(store, "source", actor=user_b, authorize=authorize)
         assert document.header.session_id == "source"
+        with_content = export_session(
+            store, "source", actor=user_b, authorize=authorize, content_mode=ExportContentMode.INCLUDE_CONTENT
+        )
+        assert not any(line.kind is ExportLineKind.CONTENT for line in document.lines)
+        assert any(line.kind is ExportLineKind.CONTENT for line in with_content.lines)
         assert lock_calls > 0
 
         for session_id, actor in (("service-session", service), ("agent-session", agent)):
