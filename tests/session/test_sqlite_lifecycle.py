@@ -5,6 +5,7 @@ from threading import Barrier, Event, current_thread
 from time import monotonic
 
 import pytest
+from vv_llm.chat_clients.utils import get_gpt_4o_encoding
 
 from vv_agent.session import children, kernel
 from vv_agent.session.kernel import drive, read_state
@@ -144,6 +145,8 @@ def test_new_database_initialization_still_configures_wal_once(tmp_path):
 
 @pytest.mark.sqlite_file
 def test_file_heartbeat_recovers_from_sqlite_lock_without_duplicate_model_call(store, database, monkeypatch):
+    # Initialize the scripted model's counter before starting the short lease.
+    get_gpt_4o_encoding()
     start(store)
     write_lock_held, release_write_lock = Event(), Event()
     retried, renewed_after_lock = Event(), Event()
