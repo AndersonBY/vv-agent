@@ -19,6 +19,7 @@ from vv_agent.types import LLMResponse, ToolCall
 from vv_agent.workspace import LocalWorkspaceBackend, MemoryWorkspaceBackend
 
 from .conftest import open_store
+from .helpers import push_fixture_input, read_fixture_state
 
 PRODUCER = runpy.run_path(str(Path(__file__).parents[2] / "scripts/app_server_tool_result_fixtures.py"))
 ResultHost, ResultServer, VersionWorkspace = (PRODUCER[k] for k in ("ResultHost", "ResultServer", "VersionWorkspace"))
@@ -43,6 +44,18 @@ def events(server):
 def error(response, reason, code=-32602):
     assert response["error"]["code"] == code, response
     assert response["error"].get("data", {}).get("reason", response["error"]["message"]) == reason, response
+
+
+def logical_result(store, ref, *, thread=THREAD):
+    from vv_agent.session.projection import hydrate_record_payload, hydration_for_session_store
+
+    stored = store.read(thread, after_seq=ref["seq"] - 1, limit=1).records[0]
+    assert stored.seq == ref["seq"]
+    return hydrate_record_payload(stored, hydration_for_session_store(store, thread))["result"]
+
+
+def set_write_level(store, level):
+    store._rows("UPDATE sk_settings SET write_level=%s WHERE singleton=1", (level,))
 
 
 def test_five_kinds_artifact_cursor_unicode_all_projections_and_recreated_pages(store, database):
@@ -93,7 +106,7 @@ def test_five_kinds_artifact_cursor_unicode_all_projections_and_recreated_pages(
         from vv_agent.workspace.artifacts import bounded_text_preview
 
         unicode_ref = summaries[7]["ref"]
-        raw = store.read(THREAD, after_seq=unicode_ref["seq"] - 1, limit=1).records[0].record.payload["result"]
+        raw = logical_result(store, unicode_ref)
         assert bodies["unicode"] == bounded_text_preview(UNICODE, artifact_path=raw["artifact"]["path"]).content.encode()
         assert bodies["unicode-resource"] == UNICODE.encode()
         assert raw["metadata"]["vv_artifact"]["source_complete"] is True
@@ -160,8 +173,7 @@ def test_retained_file_survives_source_replace_and_delete_and_detects_resource_d
         else:
             del backend._client.objects[backend._key("output.bin")]
         assert server.all_bytes(summary["ref"], part="resource:0")[0] == BINARY
-        row = store.read(THREAD, after_seq=summary["ref"]["seq"] - 1, limit=1).records[0]
-        retained = row.record.payload["result"]["metadata"]["app_server_resources"][0]["ref"]
+        retained = logical_result(store, summary["ref"])["metadata"]["app_server_resources"][0]["ref"]
         path = retained["locator"]
         if workspace == "local":
             target = backend._artifact_root / path
@@ -343,6 +355,7 @@ def test_local_retention_rejects_escape_and_source_symlink(store, tmp_path):
 
 
 def test_child_results_require_real_admission_and_child_permission(store):
+    set_write_level(store, 2)
     backend = VersionWorkspace()
     host = ResultHost(backend, kinds=("file",))
     child = Agent("child", "Produce a file.", tools=[host.output_tool])
@@ -371,19 +384,32 @@ def test_child_results_require_real_admission_and_child_permission(store):
     server = ResultServer(store, host)
     try:
         server.start()
-        children = [
-            sid
-            for sid in store.list_sessions()
-            if store.read(sid, limit=1).records[0].record.payload["parent_session_id"] == THREAD
-        ]
+        from vv_agent.session.projection import hydrate_record_payload, hydration_for_session_store, project_records
+        from vv_agent.session.tool_result_read import validate_child_graph
+
+        children = []
+        for sid in store.list_sessions():
+            if sid == THREAD:
+                continue
+            stored = store.read(sid, limit=1).records[0]
+            created = hydrate_record_payload(stored, hydration_for_session_store(store, sid))
+            handle = created["attributes"].get("child_handle")
+            if handle is not None and handle["delivery_target"]["session_id"] == THREAD:
+                children.append((sid, handle))
         assert len(children) == 1
-        sid = children[0]
-        from vv_agent.session.projection import project_records
+        sid, handle = children[0]
 
         summaries = [
-            e.metadata["tool_result"] for e in project_records(store.read_state(sid)[1]) if e.type == "tool_call_completed"
+            e.metadata["tool_result"]
+            for e in project_records(
+                store.read_state(sid)[1],
+                hydration=hydration_for_session_store(store, sid),
+            )
+            if e.type == "tool_call_completed"
         ]
         assert len(summaries) == 1
+        child_chain, root_turn = validate_child_graph(store, THREAD, sid)
+        assert child_chain == [sid] and root_turn == handle["delivery_target"]["turn_id"]
         ref = summaries[0]["ref"]
         assert server.all_bytes(ref, part="resource:0")[0] == BINARY
         error(server.page(ref, thread=sid), "invalid_result_ref")
@@ -595,7 +621,7 @@ def test_duplicate_authenticated_file_receipt_does_not_retain_or_submit_again(st
             )
 
         def authenticate(self, item, plan):
-            return item.encode() == self.callback().encode()
+            return replace(item.item, actor=None).to_dict() == self.callback().to_dict()
 
         def query(self, handle):
             raise AssertionError("no query")
@@ -611,11 +637,10 @@ def test_duplicate_authenticated_file_receipt_does_not_retain_or_submit_again(st
         server.start()
         before = server.summaries()
         assert backend.retains == provider.submits == 1
-        with store.atomic() as tx:
-            tx.push(THREAD, provider.callback())
+        push_fixture_input(store, THREAD, provider.callback())
         server.server.wake(THREAD)
         server.server.run_adapter.join()
-        state = store.read_state(THREAD)[0]
+        state = read_fixture_state(store, THREAD)[0]
         assert state.applied_inputs["duplicate-file"].payload["disposition"] == "noop"
         assert server.summaries() == before
         assert backend.retains == provider.submits == 1
@@ -870,7 +895,7 @@ def test_64mib_resource_pages_read_at_most_twice_the_retained_bytes(store):
         assert read_bytes <= 2 * len(data), read_bytes
         assert read_bytes >= len(data)
         print(f"retained_bytes={len(data)} backend_bytes_read={read_bytes}")
-        raw = store.read(THREAD, after_seq=summary["ref"]["seq"] - 1, limit=1).records[0].record.payload["result"]
+        raw = logical_result(store, summary["ref"])
         ref = raw["metadata"]["app_server_resources"][0]["ref"]
         backend._client.objects[backend._key(ref["locator"])] = b"x" * len(data)
         error(server.page(summary["ref"], part="resource:0"), "stale_reference")
