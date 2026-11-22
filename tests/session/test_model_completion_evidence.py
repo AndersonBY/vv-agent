@@ -14,7 +14,7 @@ import pytest
 from vv_agent.kernel._content import ContentRef
 from vv_agent.llm.vv_llm_client import EndpointTarget, VvLlmClient
 from vv_agent.session.content_runtime import SessionContentWriter
-from vv_agent.session.context import project_context, protected_start
+from vv_agent.session.context import protected_start
 from vv_agent.session.kernel import drive
 from vv_agent.session.projection import (
     fold_hydrated_records,
@@ -23,7 +23,7 @@ from vv_agent.session.projection import (
     hydration_for_session_store,
     project_records,
 )
-from vv_agent.session.records import InboxItem, SessionSpec, make_record
+from vv_agent.session.records import InboxItem, SessionSpec
 from vv_agent.session.reducer import _fold_factory_for
 from vv_agent.session.result import project_result
 
@@ -169,27 +169,24 @@ def local_completion(case):
         worker.join()
 
 
-def run_completion_case(store, database, case, declared, *, create=True):
-    content_reader = None
-    hydrated_attributes = None
-    if create:
-        store = wrap_fixture_store(store)
-        # Unseen protection is independent: test both response policies with the same protected input.
-        attributes = {"seed": {"unseen_input_protection": True}}
-        if declared is not None:
-            attributes["seed"]["response_rejection"] = declared
-        create_fixture_session(store, "s", attributes=attributes)
-        push_fixture_input(store, "s", InboxItem("initial", "user", {"content": "go"}))
-        creation = store.read("s").records[0]
-        ContentRef.from_dict(creation.record._payload["attributes"])
-        hydration = hydration_for_session_store(store, "s")
-        hydrated_attributes = hydrate_record_payload(creation, hydration)["attributes"]
-        assert hydrated_attributes["seed"]["unseen_input_protection"] is True
-        if declared is None:
-            assert "response_rejection" not in hydrated_attributes["seed"]
-        else:
-            assert hydrated_attributes["seed"]["response_rejection"] is declared
-        content_reader = fixture_content_reader(store, "s")
+def run_completion_case(store, database, case, declared):
+    store = wrap_fixture_store(store)
+    # Unseen protection is independent: test both response policies with the same protected input.
+    attributes = {"seed": {"unseen_input_protection": True}}
+    if declared is not None:
+        attributes["seed"]["response_rejection"] = declared
+    create_fixture_session(store, "s", attributes=attributes)
+    push_fixture_input(store, "s", InboxItem("initial", "user", {"content": "go"}))
+    creation = store.read("s").records[0]
+    ContentRef.from_dict(creation.record._payload["attributes"])
+    hydration = hydration_for_session_store(store, "s")
+    hydrated_attributes = hydrate_record_payload(creation, hydration)["attributes"]
+    assert hydrated_attributes["seed"]["unseen_input_protection"] is True
+    if declared is None:
+        assert "response_rejection" not in hydrated_attributes["seed"]
+    else:
+        assert hydrated_attributes["seed"]["response_rejection"] is declared
+    content_reader = fixture_content_reader(store, "s")
     deltas = []
     with local_completion(case) as (server, calls):
         rt = runtime(database, [], content_reader=content_reader)
@@ -201,20 +198,18 @@ def run_completion_case(store, database, case, declared, *, create=True):
         )
         with patch.object(VvLlmClient, "_should_use_stream", return_value=not case.endswith("nonstream")):
             drive(store, "s", runtime=rt)
-    state, rows, _ = store.read_state("s")
+    _, rows, _ = store.read_state("s")
     retained_bodies = tuple(row.record.encode() for row in rows)
-    hydration = hydration_for_session_store(store, "s") if create else None
-    logical_state = state
-    if hydration is not None:
-        hydrated_rows = hydrate_records(rows, hydration)
-        logical_state = fold_hydrated_records(hydrated_rows, rows, _fold_factory_for(store), hydration)
+    hydration = hydration_for_session_store(store, "s")
+    hydrated_rows = hydrate_records(rows, hydration)
+    logical_state = fold_hydrated_records(hydrated_rows, rows, _fold_factory_for(store), hydration)
     completed = [row for row in rows if row.record.kind == "op_completed"]
     results = [hydrate_record_payload(row, hydration).get("result") for row in completed]
     unknown_rows = [row for row in rows if row.record.kind == "op_unknown"]
     unknown_reasons = [hydrate_record_payload(row, hydration).get("reason") for row in unknown_rows]
     terminal = hydrate_record_payload(next(row for row in reversed(rows) if row.record.kind == "turn_ended"), hydration)
-    projection = project_result(store, "s", "s/turn/initial") if create else None
-    projected_context = projection.raw_result.messages if projection is not None else project_context(rows, state)
+    projection = project_result(store, "s", "s/turn/initial")
+    projected_context = projection.raw_result.messages
     from vv_agent.events import event_from_dict
 
     events = [
@@ -234,7 +229,7 @@ def run_completion_case(store, database, case, declared, *, create=True):
             assert protected_start(rows, logical_state) == 1
     elif is_rejection:
         assert len(results) == 1 and not unknown_rows and len(calls) == 1
-        assert hydrated_attributes is not None and hydrated_attributes["seed"]["response_rejection"] is True
+        assert hydrated_attributes["seed"]["response_rejection"] is True
         assert terminal["reason"] == "model_request_rejected"
         failure = next(event for event in events if event["type"] == "model_call_failed")
         assert failure["outcome"] == "definitive" and failure["metadata"]["model_rejection"]["status_code"] == 200
@@ -248,7 +243,7 @@ def run_completion_case(store, database, case, declared, *, create=True):
             "message": "Model provider response was rejected.",
             "retryable": False,
         }
-        assert projection is not None and projection.error_code == "model_request_rejected"
+        assert projection.error_code == "model_request_rejected"
         assert PARTIAL not in json.dumps([row.record.to_dict() for row in rows])
         assert not any(m.role == "assistant" and m.content == PARTIAL for m in projected_context)
         if logical_state._protection is not None:
@@ -373,120 +368,6 @@ def test_response_policy_is_boolean(value):
         ).record()
 
 
-@pytest.mark.persistent_store
-@pytest.mark.parametrize("case", ["eof", "refusal_stream", "filter_stream"])
-def test_0333_rollback_real_store(database, case):
-    import os
-    import subprocess
-
-    from .conftest import open_store
-
-    python = os.environ.get("VV_AGENT_0333_PYTHON")
-    if not python:
-        pytest.skip("Set VV_AGENT_0333_PYTHON to an isolated PyPI 0.33.3 interpreter")
-    script = r"""
-import sys
-from pathlib import Path
-from importlib.metadata import version
-from vv_agent import Agent, RunConfig
-from vv_agent.types import LLMResponse
-from vv_agent.config import ResolvedModelConfig
-from vv_agent.llm.scripted import ScriptedLLM
-from vv_agent.session.kernel import Runtime, drive
-from vv_agent.session.records import InboxItem, SessionSpec
-from vv_agent.session.sqlite import SQLiteStore
-from vv_agent.session.postgres import PostgresStore
-assert version('vv-agent') == '0.33.3'
-kind, database, phase = sys.argv[1:]
-factory = SQLiteStore if kind == 'sqlite' else PostgresStore
-with factory.standalone(database) as store:
-    if phase == 'create':
-        store.install_schema()
-        with store.atomic() as tx:
-            tx.create(SessionSpec('s', 'test', '/tmp'), consumers=('events',))
-            tx.push('s', InboxItem('initial', 'user', {'content': 'go'}))
-    else:
-        state, rows, _ = store.read_state('s')
-        assert state.active_turn_id is None
-        before = [r.record.encode() for r in rows]
-        with store.atomic() as tx:
-            tx.push('s', InboxItem('continue', 'user', {'content': 'continue'}))
-        rt = Runtime(
-            agent=Agent(name='kernel', instructions='Be precise.'),
-            config=RunConfig(workspace=Path('/tmp'), session_memory_enabled=False),
-            resolved=ResolvedModelConfig('scripted','scripted','scripted','scripted',[]),
-            llm=ScriptedLLM([LLMResponse('old runtime continued')]),
-            heartbeat_store=lambda: factory.standalone(database),
-        )
-        drive(store, 's', runtime=rt)
-        state, rows, _ = store.read_state('s')
-        assert [r.record.encode() for r in rows[:len(before)]] == before
-        assert rows[-1].record.payload['status'] == 'completed'
-        assert rows[-1].record.payload['result'] == 'old runtime continued'
-print('0.33.3 ' + kind + ' ' + phase + ': PASS')
-"""
-    env = {k: v for k, v in os.environ.items() if k not in {"PYTHONPATH", "VV_AGENT_CONTRACT_SOURCE"}}
-    kind = "sqlite" if isinstance(database, Path) else "postgres"
-
-    def old(phase):
-        result = subprocess.run(
-            [python, "-c", script, kind, str(database), phase], cwd="/tmp", env=env, capture_output=True, text=True
-        )
-        assert result.returncode == 0, result.stdout + result.stderr
-        print(result.stdout.strip())
-
-    old("create")
-    with open_store(database) as store:
-        before = store.read("s").records[0].record.encode()
-        run_completion_case(store, database, case, None, create=False)
-        assert store.read("s").records[0].record.encode() == before
-    old("continue")
-    print(f"ROLLBACK {kind} {case}: 0.33.3 create -> 0.34.0 write -> 0.33.3 read/continue PASS")
-
-
-@pytest.mark.parametrize("enabled", [False, True])
-def test_0333_rejects_response_declaration_alone(enabled):
-    import os
-    import subprocess
-
-    python = os.environ.get("VV_AGENT_0333_PYTHON")
-    if not python:
-        pytest.skip("Set VV_AGENT_0333_PYTHON to isolated 0.33.3")
-    record = make_record(
-        "session_created",
-        session_id="new",
-        payload={
-            "principal": "test",
-            "workspace": "/tmp",
-            "parent_session_id": None,
-            "parent_operation_id": None,
-            "attributes": {"seed": {"response_rejection": enabled}},
-        },
-    )
-    script = """
-import sys
-from importlib.metadata import version
-from vv_agent.session.records import Record, RecordError
-assert version('vv-agent') == '0.33.3'
-try:
-    Record.parse(sys.stdin.buffer.read())
-except RecordError as error:
-    assert 'response_rejection' in str(error)
-    print('0.33.3 rejects response_rejection declaration: PASS')
-else:
-    raise AssertionError('old runtime accepted new policy')
-"""
-    result = subprocess.run(
-        [python, "-c", script],
-        input=record.encode(),
-        cwd="/tmp",
-        env={k: v for k, v in os.environ.items() if k not in {"PYTHONPATH", "VV_AGENT_CONTRACT_SOURCE"}},
-        capture_output=True,
-    )
-    assert result.returncode == 0, result.stdout + result.stderr
-    print(result.stdout.decode().strip())
-
-
 def test_children_from_undeclared_source_freeze_false(store, database):
     from vv_agent.session.children import ChildSession
 
@@ -515,12 +396,12 @@ def test_fork_from_undeclared_source_freezes_false(store, tmp_path):
 
     from .test_app_server_fork import run_turn, send, server_for
 
-    store = wrap_fixture_store(store)
     host = DefaultAppServerHost(
         agent=Agent("test", "test", model="test"),
         run_config=RunConfig(model_provider=ScriptedModelProvider.new("test", "test", [LLMResponse("done")])),
     )
     server = server_for(store, host, tmp_path / "fork-keys.sqlite3")
+    store = server.kernel.store
 
     try:
         create_fixture_session(
@@ -576,63 +457,3 @@ def test_response_rejection_in_output_repair_preserves_repair_failure(store, dat
         assert terminal["reason"] == "output_validation_failed"
     else:
         assert result["content"] == PARTIAL
-
-
-@pytest.mark.persistent_store
-@pytest.mark.parametrize("enabled", [False, True])
-def test_0333_store_read_rejects_response_policy(store, database, enabled):
-    import os
-    import subprocess
-
-    python = os.environ.get("VV_AGENT_0333_PYTHON")
-    if not python:
-        pytest.skip("Set VV_AGENT_0333_PYTHON to isolated 0.33.3")
-    creation = make_record(
-        "session_created",
-        session_id="declared",
-        payload={
-            "principal": "test",
-            "workspace": "/tmp",
-            "parent_session_id": None,
-            "parent_operation_id": None,
-            "attributes": {"seed": {"response_rejection": enabled}},
-        },
-    )
-    with patch.object(SessionSpec, "record", return_value=creation), store.atomic() as tx:
-        tx.create(
-            SessionSpec(
-                "declared",
-                principal(),
-                content_ref("workspace"),
-                attributes=content_ref("attributes"),
-            ),
-            consumers=("events",),
-        )
-    script = """
-import sys
-from importlib.metadata import version
-from vv_agent.session.records import RecordError
-from vv_agent.session.sqlite import SQLiteStore
-from vv_agent.session.postgres import PostgresStore
-assert version('vv-agent') == '0.33.3'
-kind, database = sys.argv[1:]
-factory = SQLiteStore if kind == 'sqlite' else PostgresStore
-with factory.standalone(database) as store:
-    try:
-        store.read_state('declared')
-    except RecordError as error:
-        assert 'response_rejection' in str(error)
-    else:
-        raise AssertionError('0.33.3 read a response-policy session')
-print('0.33.3 ' + kind + ' store rejects response_rejection: PASS')
-"""
-    kind = "sqlite" if isinstance(database, Path) else "postgres"
-    result = subprocess.run(
-        [python, "-c", script, kind, str(database)],
-        cwd="/tmp",
-        env={k: v for k, v in os.environ.items() if k not in {"PYTHONPATH", "VV_AGENT_CONTRACT_SOURCE"}},
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, result.stdout + result.stderr
-    print(result.stdout.strip())

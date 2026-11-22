@@ -74,6 +74,12 @@ jobs:
       - name: Require centrally verified contract adoption
         run: python3 scripts/contract_snapshot.py adoption --implementation python --revision "$(git rev-parse HEAD)"
 
+      - name: Install released pre-S1 reader
+        run: |
+          uv venv --python 3.12 "$RUNNER_TEMP/vv-agent-0.36.0"
+          uv pip install --python "$RUNNER_TEMP/vv-agent-0.36.0/bin/python" 'vv-agent[postgres]==0.36.0'
+          printf 'VV_AGENT_0360_PYTHON=%s\n' "$RUNNER_TEMP/vv-agent-0.36.0/bin/python" >> "$GITHUB_ENV"
+
       - name: Run full tests
         run: TMPDIR=/tmp uv run pytest -k 'not simulation_smoke'
 
