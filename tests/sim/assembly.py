@@ -1429,8 +1429,11 @@ class SimDriver(CoreDriver):
     def _outcome_read(self, request):
         if request is outcomes.OutcomeRead.CANCELLATION_REASON:
             return self.scope.token.reason
-        if request is outcomes.OutcomeRead.SCOPE_CANCELLED or request is outcomes.OutcomeRead.HOST_CANCELLED:
+        if request is outcomes.OutcomeRead.SCOPE_CANCELLED:
             return self.scope.token.cancelled
+        if request is outcomes.OutcomeRead.HOST_CANCELLED:
+            token = self.runtime.config.cancellation_token
+            return token is not None and token.cancelled
         if request is outcomes.OutcomeRead.ACTIVE_INTERVAL_NS:
             return self.clock.monotonic_ns()
         if request is outcomes.OutcomeRead.APPROVAL_TIMEOUT:
