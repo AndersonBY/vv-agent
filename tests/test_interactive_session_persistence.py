@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -21,9 +22,10 @@ from vv_agent import (
     handoff,
 )
 from vv_agent.kernel._budget_values import RunBudgetLimits
+from vv_agent.session.projection import hydrate_record_payload, hydration_for_session_store
 from vv_agent.session.records import digest
 from vv_agent.session.store import Conflict
-from vv_agent.types import LLMResponse, ToolCall
+from vv_agent.types import LLMResponse, ToolCall, ToolExecutionResult
 
 
 def client(tmp_path, steps, store=None, *, model_provider=None):
@@ -172,7 +174,7 @@ def test_cold_reopen_projects_typed_handoff_result(tmp_path, monkeypatch):
     key_provider = fixture_key_provider()
     store = file_store(database, key_provider)
     store._rows("UPDATE sk_settings SET write_level=2 WHERE singleton=1")
-    writer = Agent("writer", "Write a JSON object.", model="writer")
+    writer = Agent("writer", "Write a JSON object.", model="writer", output_type=dict)
     triage = Agent("triage", "Transfer.", model="triage", handoffs=[handoff(agent=writer, description="Write.")])
     owner = client(
         tmp_path,
@@ -185,7 +187,20 @@ def test_cold_reopen_projects_typed_handoff_result(tmp_path, monkeypatch):
     try:
         first = owner.create_session(agent=triage, session_id="handoff")
         result = first.prompt("go")
-        assert result.final_output == '{"answer":"done"}'
+        assert result.final_output == {"answer": "done"}
+        assert result.agent_name == "writer" and result.status == AgentStatus.COMPLETED
+        _, records, _ = owner.driver.store.read_state(first.session_id)
+        (receipt,) = (
+            row
+            for row in records
+            if row.record.kind == "op_completed" and row.record.operation_id is not None and "/tool/" in row.record.operation_id
+        )
+        payload = hydrate_record_payload(receipt, hydration_for_session_store(owner.driver.store, first.session_id))
+        tool_result = ToolExecutionResult.from_dict(payload["result"])
+        assert tool_result.tool_call_id == "transfer"
+        assert tool_result.directive.value == "finish"
+        assert tool_result.content == result.raw_result.final_answer
+        assert json.loads(tool_result.content) == result.final_output
     finally:
         owner.driver.close()
         store.connection.close()
@@ -193,7 +208,6 @@ def test_cold_reopen_projects_typed_handoff_result(tmp_path, monkeypatch):
     store = file_store(database, key_provider)
     owner = client(tmp_path, [], store)
     try:
-        writer.output_type = dict
 
         def forbidden(*_args, **_kwargs):
             pytest.fail("opening a completed handoff tried to call its provider")

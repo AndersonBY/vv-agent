@@ -424,9 +424,11 @@ def result_for_children(
         h = handles[0]
         rt = reconstruct(runtime, store, h["session_id"])
         projected = project_result(store, h["session_id"], h["turn_id"], runtime=rt, snapshot=first)
+        # The receipt carries text. SDK projection recovers the typed value from the child.
+        content = projected.raw_result.final_answer if projected.status == AgentStatus.COMPLETED else projected.final_output
         result = ToolExecutionResult(
             "",
-            projected.final_output or "",
+            content or "",
             metadata={
                 "agent": admission["definition"]["agent_name"],
                 "mode": mode,

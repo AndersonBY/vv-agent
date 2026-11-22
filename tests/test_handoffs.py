@@ -105,7 +105,12 @@ def test_handoff_run_emits_lifecycle_events(tmp_path: Path) -> None:
         }
     )
 
-    result = Runner.run_sync(triage, "please write", run_config=RunConfig(workspace=tmp_path, model_provider=model_provider))
+    with Runner.start(triage, "please write", run_config=RunConfig(workspace=tmp_path, model_provider=model_provider)) as handle:
+        result = handle.result(timeout=25)
+        store = handle.kernel.store
+        child_id = next(sid for sid in store.list_sessions() if sid != result.raw_result.session_id)
+        child_rows = store.read_state(child_id)[1]
+        child_terminal = next(r for r in child_rows if r.record.kind == "turn_ended")
 
     started = [event for event in result.events if isinstance(event, HandoffStartedEvent)]
     completed = [event for event in result.events if isinstance(event, HandoffCompletedEvent)]
@@ -125,10 +130,6 @@ def test_handoff_run_emits_lifecycle_events(tmp_path: Path) -> None:
     assert started[0].metadata["routing_group"] == "writing"
     assert completed[0].metadata["routing_group"] == "writing"
 
-    driver = result._session_driver
-    child_id = next(sid for sid in driver.store.list_sessions() if sid != result.raw_result.session_id)
-    child_rows = driver.store.read_state(child_id)[1]
-    child_terminal = next(r for r in child_rows if r.record.kind == "turn_ended")
     assert child_terminal.record.payload["status"] == "completed"
     assert completed[0].child_run_id == child_terminal.record.turn_id
     assert result.events.index(started[0]) < result.events.index(completed[0])
@@ -262,6 +263,7 @@ def test_handoff_chain_enforces_independent_max_handoffs(tmp_path: Path) -> None
                     )
                 ]
             ),
+            "final": ScriptedLLM(steps=[]),
         }
     )
 
