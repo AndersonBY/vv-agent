@@ -1981,13 +1981,14 @@ class Author:
                 released.set()
             outcome = cancelled.result()
             state, records, _ = kernel.store.read_state("handle-cancel")
-            end = next(r.record for r in records if r.record.kind == "turn_ended")
+            end = next(row for row in records if row.record.kind == "turn_ended")
+            payload = hydrate_record_payload(end, hydration_for_session_store(kernel.store, "handle-cancel"))
             cancellation = {
                 "accepted": accepted,
-                "terminal_status": end.payload["status"],
+                "terminal_status": payload["status"],
                 "repeated_request_accepted": repeated,
                 "late_request_accepted": cancelled.cancel(),
-                "reason": end.payload["reason"],
+                "reason": payload["reason"],
                 "read_only_phase": state.phase,
             }
             assert accepted and not repeated and not cancellation["late_request_accepted"]
