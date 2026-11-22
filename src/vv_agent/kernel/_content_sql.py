@@ -46,7 +46,7 @@ from ._content_store import (
 from ._external_content import _ContentJournal, _ObjectContent, _PostgresObjectContent
 
 if TYPE_CHECKING:
-    from ._sql import SQLSessionTx
+    from ._sql import SQLSessionTx, _ObjectDeadline
 
 _DATA_KEY_BYTES = 32
 _NONCE_BYTES = 12
@@ -639,7 +639,8 @@ class CoreSQLContentStore:
             raise TypeError("object_locator_cleaner must be callable")
         self._object_locator_cleaner = object_locator_cleaner
         self._write_memo: _ContentWriteMemo | None = None
-        self._transaction: SQLSessionTx | None = None
+        self._transaction_active: Callable[[], None] | None = None
+        self._object_write_deadline: Callable[[], _ObjectDeadline] | None = None
         self._object_content: _ObjectContent[_ContentJournal] | None = None
         self._check_object_write: Callable[[], None] | None = None
 
@@ -653,7 +654,8 @@ class CoreSQLContentStore:
         """Bind caches to one caller-owned transaction and its active guard."""
 
         self._write_memo = write_memo if write_memo is not None else _ContentWriteMemo()
-        self._transaction = tx
+        self._transaction_active = tx._active
+        self._object_write_deadline = tx._object_write_deadline
 
     def close(self) -> None:
         if self._write_memo is not None:
@@ -681,8 +683,8 @@ class CoreSQLContentStore:
     def _require_transaction(self) -> None:
         try:
             self._backend.require_transaction()
-            if self._transaction is not None:
-                self._transaction._active()
+            if self._transaction_active is not None:
+                self._transaction_active()
         except BaseException:
             if self._write_memo is not None:
                 self._write_memo.clear()
@@ -1097,9 +1099,9 @@ class CoreSQLContentStore:
         now_ms = self._backend.now_ms()
         locator = None
         if wrapped.key_id.startswith(_EXACT_KEY_ID_PREFIX):
-            if self._object_content is None or self._check_object_write is None or self._transaction is None:
+            if self._object_content is None or self._check_object_write is None or self._object_write_deadline is None:
                 raise KeyUnavailable("external content requires its bound object runtime")
-            deadline_ns, clock_ns = self._transaction._object_write_deadline()
+            deadline_ns, clock_ns = self._object_write_deadline()
             locator = self._object_content.put(
                 tenant_id,
                 session_id,
