@@ -8,7 +8,7 @@ import sqlite3
 from collections.abc import Iterable, Mapping
 from hashlib import sha256
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from support.s1_fixture_values import append_fixture_records
@@ -34,6 +34,7 @@ from vv_agent.kernel._records import make_record
 from vv_agent.session.content_runtime import SessionContentWriter
 from vv_agent.session.export import export_session
 from vv_agent.session.records import InboxItem
+from vv_agent.session.sqlite import SQLiteStore
 from vv_agent.session.surfaces import SessionDriver
 
 SESSION = "s1"
@@ -134,7 +135,7 @@ def test_low_entropy_plaintext_is_absent_from_clear_sql_bytes_export_logs_and_ru
             "artifact_path": artifact_path,
         }
         driver.create(SESSION, artifact_path, attributes)
-        driver.store.configure_input_admission(allow_unsigned=True)
+        cast(SQLiteStore, driver.store).configure_input_admission(allow_unsigned=True)
         driver.push(SESSION, InboxItem(INPUT_ID, "user", {"content": prompt}))
 
         definition = {
@@ -166,7 +167,7 @@ def test_low_entropy_plaintext_is_absent_from_clear_sql_bytes_export_logs_and_ru
             writer = SessionContentWriter.bind(tx, tenant_id=driver.tenant_id, session_id=SESSION)
             assert writer.get_json(definition_ref) == definition
 
-        connection = driver._root_store.connection
+        connection = cast(SQLiteStore, driver._root_store).connection
         clear_sql = _clear_sql_values(connection)
         record_bodies = [
             row[0]
@@ -367,7 +368,7 @@ def test_private_operational_hash_is_only_in_encrypted_reference_content(
     driver = SessionDriver()
     try:
         driver.create(SESSION, "/workspace", {"route": {"host": "h"}})
-        driver.store.configure_input_admission(allow_unsigned=True)
+        cast(SQLiteStore, driver.store).configure_input_admission(allow_unsigned=True)
         operational_ref, network_ref_digest, record_id = _append_turn_with_operational_policy(
             driver,
             policy_document=policy_document,
@@ -378,7 +379,7 @@ def test_private_operational_hash_is_only_in_encrypted_reference_content(
 
         skeleton = export_session(driver.store, SESSION).to_dict()
         encoded = canonical_json_bytes(skeleton)
-        connection = driver._root_store.connection
+        connection = cast(SQLiteStore, driver._root_store).connection
         clear_sql = _clear_sql_values(connection)
         record_bodies = [
             row[0]

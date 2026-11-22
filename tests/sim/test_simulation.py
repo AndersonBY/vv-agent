@@ -436,14 +436,17 @@ def test_seed_parse_cache_preserves_results_scope_and_mutable_isolation(sim_data
         assert second_fold._message_cache_id == id(second_messages)
         assert inbox is not inbox_repeated
         assert inbox.payload is not inbox_repeated.payload
-        assert inbox.actor is not inbox_repeated.actor
+        actor = inbox.actor
+        repeated_actor = inbox_repeated.actor
+        assert actor is not None and repeated_actor is not None
+        assert actor is not repeated_actor
 
         original_digest = second_fold._payload["definition_digest"]
         original_content = inbox_repeated.payload["content"]
-        original_actor = dict(inbox_repeated.actor)
+        original_actor = dict(repeated_actor)
         first_fold._payload["definition_digest"] = "polluted"
         inbox.payload["content"] = "polluted"
-        inbox.actor.clear()
+        actor.clear()
         assert second_fold._payload["definition_digest"] == original_digest
         assert repeated._payload["definition_digest"] == original_digest
         assert inbox_repeated.payload["content"] == original_content

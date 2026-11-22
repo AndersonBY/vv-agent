@@ -131,19 +131,21 @@ def test_selected_model_settings_limits_and_clear_are_frozen_default(store, tmp_
         first = run_turn(a, "source", "first")
         original_records = store.read_state("source")[1]
         source_routing, _ = _verified_routing_cache(store, "source")
+        handler_version = source_routing.requirements.handler_version
+        assert handler_version is not None
         selected_requirements = static_model_selection_requirements(
             {"model": "small", "route": {"opaque": "route"}},
             resolve_model=host.resolve_model,
-            handler_version=source_routing.requirements.handler_version,
+            handler_version=handler_version,
         )
         initial_requirements = static_model_selection_requirements(
             {"model": "base", "route": {}},
             resolve_model=host.resolve_model,
-            handler_version=source_routing.requirements.handler_version,
+            handler_version=handler_version,
         )
         expected_bootstrap = SessionRequirements.normalized(
             level=2,
-            handler_version=source_routing.requirements.handler_version,
+            handler_version=handler_version,
             capabilities={
                 capability for capability in source_routing.requirements.capabilities if not capability.startswith("model:")
             }

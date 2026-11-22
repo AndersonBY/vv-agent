@@ -6,7 +6,7 @@ import subprocess
 import sys
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -595,6 +595,7 @@ def test_prepared_producer_publishes_request_tool_hook_and_shared_state_refs(tmp
     from vv_agent.kernel._tool_values import ToolCall, ToolExecutionResult
     from vv_agent.session.content_runtime import SessionContentWriter
     from vv_agent.session.content_store import LocalKeyProvider
+    from vv_agent.session.sqlite import SQLiteStore
     from vv_agent.session.surfaces import SessionDriver
 
     @function_tool
@@ -602,6 +603,7 @@ def test_prepared_producer_publishes_request_tool_hook_and_shared_state_refs(tmp
         return text
 
     sessions = SessionDriver(tmp_path / "dispatch.sqlite", content_key_provider=LocalKeyProvider(b"k" * 32))
+    cast(SQLiteStore, sessions.store).configure_input_admission(allow_unsigned=True)
     sessions.create("s", "/workspace", {})
     runtime = sessions.runtime(
         Agent("dispatch", "Work.", tools=[effect], model="scripted"),
@@ -709,6 +711,7 @@ def test_prepared_producer_publishes_request_tool_hook_and_shared_state_refs(tmp
             plan: Record | None = None,
             *,
             tid: str | None = None,
+            feature_level: int = 1,
         ) -> Record:
             del tid
             return make_record_before_publication(
@@ -718,6 +721,7 @@ def test_prepared_producer_publishes_request_tool_hook_and_shared_state_refs(tmp
                 operation_id=plan.operation_id if plan else None,
                 attempt=plan.attempt if plan else None,
                 payload=payload,
+                feature_level=feature_level,
             )
 
     driver = object.__new__(Driver)

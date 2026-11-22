@@ -4,7 +4,7 @@ import io
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -23,7 +23,7 @@ from vv_agent.runtime.local_environment import (
 from vv_agent.session._dispatch_context import context as dispatch_context
 from vv_agent.session.environments import EnvironmentCapabilities, IsolationMode, NetworkMode
 from vv_agent.session.records import Record
-from vv_agent.session.runtime import TrustedEnvironmentBinding
+from vv_agent.session.runtime import Runtime, TrustedEnvironmentBinding
 from vv_agent.tools.base import ToolContext
 from vv_agent.tools.handlers import bash as bash_handler
 from vv_agent.tools.handlers import search as search_handler
@@ -98,7 +98,7 @@ def _tool_context(
         turn_environment_binding=lambda: environment,
     )
     return dispatch_context(
-        runtime,
+        cast(Runtime, runtime),
         task,
         plan,
         CancellationToken(),

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 
 import pytest
 from cryptography.exceptions import InvalidSignature
@@ -97,7 +98,7 @@ def test_unconfigured_strong_reads_and_idle_deferral_fail_closed(tmp_path: Path)
 def test_default_driver_and_runner_configure_only_their_temporary_store(tmp_path: Path) -> None:
     driver = SessionDriver()
     try:
-        assert driver._root_store._ledger_integrity_mode() == "hash-only"
+        assert cast(SQLiteStore, driver._root_store)._ledger_integrity_mode() == "hash-only"
         driver.create("driver-session", ".")
         assert driver.store.read_state("driver-session")[0].session_id == "driver-session"
     finally:
@@ -110,7 +111,7 @@ def test_default_driver_and_runner_configure_only_their_temporary_store(tmp_path
     key_provider = LocalKeyProvider(b"k" * 32, state_path=tmp_path / "keys.sqlite3")
     durable = SessionDriver(tmp_path / "durable.sqlite", content_key_provider=key_provider)
     try:
-        assert durable._root_store._ledger_integrity_mode() == "unconfigured"
+        assert cast(SQLiteStore, durable._root_store)._ledger_integrity_mode() == "unconfigured"
         with pytest.raises(LedgerIntegrityError, match=MESSAGE):
             durable.create("durable-session", ".")
     finally:

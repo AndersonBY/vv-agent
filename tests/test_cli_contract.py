@@ -5,13 +5,14 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 import vv_agent.cli as cli
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.events import DiagnosticEvent, RunStartedEvent
+from vv_agent.session.sqlite import SQLiteStore
 from vv_agent.types import AgentResult, AgentStatus
 
 CONTRACT_PATH = Path(__file__).parent / "fixtures" / "parity" / "cli_contract.json"
@@ -296,7 +297,7 @@ def test_cli_kernel_persistent_session_survives_owner_restart(monkeypatch, capsy
     path = tmp_path / "persistent.sqlite"
     for prompt in ("first", "second"):
         kernel = SessionDriver(path, content_key_provider=fixture_key_provider())
-        kernel.store.configure_input_admission(allow_unsigned=True)
+        cast(SQLiteStore, kernel.store).configure_input_admission(allow_unsigned=True)
         try:
             assert (
                 cli._run_task_cli(

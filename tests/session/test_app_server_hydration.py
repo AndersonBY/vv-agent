@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -115,7 +115,7 @@ def test_s1_projection_reopens_with_hydrated_thread_context_and_result(tmp_path:
     path = tmp_path / "session.sqlite"
     provider = LocalKeyProvider(MASTER_KEY)
     with open_store(path) as store:
-        sessions = _populate(store, provider)
+        sessions = _populate(cast(SQLiteStore, store), provider)
         try:
             records = store.read_state(THREAD)[1]
             creation = next(row for row in records if row.record.kind == "session_created")
@@ -170,7 +170,7 @@ def test_s1_projection_reopens_with_hydrated_thread_context_and_result(tmp_path:
 
 def test_projection_rejects_cross_tenant_content_binding(tmp_path: Path) -> None:
     with open_store(tmp_path / "session.sqlite") as store:
-        sessions = _populate(store, LocalKeyProvider(MASTER_KEY))
+        sessions = _populate(cast(SQLiteStore, store), LocalKeyProvider(MASTER_KEY))
         try:
             creation = store.read(THREAD, limit=1).records[0]
             wrong = hydration_for_store(store, tenant_id="other-tenant", session_id=THREAD)
@@ -182,7 +182,7 @@ def test_projection_rejects_cross_tenant_content_binding(tmp_path: Path) -> None
 
 def test_projection_fails_closed_when_linked_content_is_missing(tmp_path: Path) -> None:
     with open_store(tmp_path / "session.sqlite") as store:
-        sessions = _populate(store, LocalKeyProvider(MASTER_KEY))
+        sessions = _populate(cast(SQLiteStore, store), LocalKeyProvider(MASTER_KEY))
         try:
             records = store.read_state(THREAD)[1]
             ended = next(row for row in records if row.record.kind == "turn_ended")

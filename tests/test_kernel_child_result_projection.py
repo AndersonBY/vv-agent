@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
@@ -19,12 +20,12 @@ def test_configured_parent_copy_uses_injected_result_projector() -> None:
         SimpleNamespace(_payload={"request": {"id": "delegation-call", "arguments": {"agent_id": "worker"}}}),
     )
     completion = ChildCompletion("child", "child/turn/start", "completed", "child done", 7, "a" * 64, True)
-    received: list[tuple[list[SubTaskOutcome], dict]] = []
+    received: list[tuple[list[SubTaskOutcome], Mapping[str, Any]]] = []
 
     def project(
         received_plan: Record,
-        outcomes: list[SubTaskOutcome],
-        delegation: dict,
+        outcomes: Sequence[SubTaskOutcome],
+        delegation: Mapping[str, Any],
     ) -> ToolExecutionResult:
         assert received_plan is plan
         received.append((list(outcomes), delegation))
