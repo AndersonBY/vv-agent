@@ -18,6 +18,7 @@ concurrency:
 jobs:
   release:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     permissions:
       contents: write
       id-token: write
@@ -101,7 +102,7 @@ jobs:
       - name: Run full tests
         env:
           VV_AGENT_TEST_POSTGRES_DSN: postgresql://vv_agent:vv_agent_test@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/vv_agent_test
-        run: TMPDIR=/tmp uv run pytest -k 'not simulation_smoke'
+        run: TMPDIR=/tmp uv run pytest -o faulthandler_timeout=120 -k 'not simulation_smoke'
 
       - name: Run simulation smoke
         run: TMPDIR=/dev/shm timeout 60s uv run pytest tests/sim -k smoke -q -s
