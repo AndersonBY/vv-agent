@@ -16,7 +16,7 @@ from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 from ._canonical_json import canonical_json_bytes, validate_sha256
 from ._content import (
@@ -216,6 +216,26 @@ class _SQLContentBackend(Protocol):
     def now_ms(self) -> int: ...
 
 
+@runtime_checkable
+class _ExactContentReadBackend(Protocol):
+    """Optional backend capability for indexed exact identity reads."""
+
+    def fetch_exact_record_links(
+        self,
+        tenant_id: str,
+        session_id: str,
+        first_record_seq: int,
+        last_record_seq: int,
+    ) -> list[tuple[Any, ...]]: ...
+
+    def fetch_exact_content_rows(
+        self,
+        tenant_id: str,
+        session_id: str,
+        content_ids: tuple[str, ...],
+    ) -> list[tuple[Any, ...]]: ...
+
+
 def _blob(value: object, field_name: str) -> bytes:
     if isinstance(value, bytes):
         return value
@@ -282,6 +302,12 @@ def _owner_identity(
             raise ContentBindingMismatch("record_seq must be a positive integer")
         return "record_seq", record_seq
     return "input_id", _text(input_id, "input_id")
+
+
+def _dense_record_range(records: tuple[int, ...]) -> tuple[int, int] | None:
+    if len(records) < _READ_FRAME_OWNER_BATCH or records[-1] - records[0] + 1 != len(records):
+        return None
+    return records[0], records[-1]
 
 
 def _link_slot(value: object) -> str:
@@ -907,10 +933,11 @@ class CoreSQLContentStore:
 
         tenant_id = _text(tenant_id, "tenant_id")
         session_id = _text(session_id, "session_id")
-        records = tuple(sorted({_owner_identity(record_seq=value, input_id=None)[1] for value in record_seqs}))
+        records = tuple(sorted({cast(int, _owner_identity(record_seq=value, input_id=None)[1]) for value in record_seqs}))
         inputs = tuple(sorted({_owner_identity(record_seq=None, input_id=value)[1] for value in input_ids}))
         link_rows: list[tuple[Any, ...]] = []
         content_rows: list[tuple[Any, ...]] = []
+        exact_backend = self._backend if isinstance(self._backend, _ExactContentReadBackend) else None
         with self._read_snapshot():
             live_row = self._backend.fetchone(
                 "SELECT deletion_state FROM sk_session WHERE tenant_id={p} AND session_id={p}",
@@ -921,17 +948,21 @@ class CoreSQLContentStore:
             if live_row[0] != "live":
                 raise ContentUnavailable("content session is fenced for deletion")
             key_row = self._key_row(tenant_id, session_id)
-            for start in range(0, len(records), _READ_FRAME_OWNER_BATCH):
-                chunk = records[start : start + _READ_FRAME_OWNER_BATCH]
-                placeholders = ",".join("{p}" for _ in chunk)
-                link_rows.extend(
-                    self._backend.fetchall(
-                        "SELECT record_seq,input_id,slot,content_id FROM sk_content_link "
-                        f"WHERE tenant_id={{p}} AND session_id={{p}} AND record_seq IN ({placeholders}) "
-                        "ORDER BY record_seq,slot",
-                        (tenant_id, session_id, *chunk),
+            dense_range = _dense_record_range(records)
+            if dense_range is not None and exact_backend is not None:
+                link_rows.extend(exact_backend.fetch_exact_record_links(tenant_id, session_id, *dense_range))
+            else:
+                for start in range(0, len(records), _READ_FRAME_OWNER_BATCH):
+                    chunk = records[start : start + _READ_FRAME_OWNER_BATCH]
+                    placeholders = ",".join("{p}" for _ in chunk)
+                    link_rows.extend(
+                        self._backend.fetchall(
+                            "SELECT record_seq,input_id,slot,content_id FROM sk_content_link "
+                            f"WHERE tenant_id={{p}} AND session_id={{p}} AND record_seq IN ({placeholders}) "
+                            "ORDER BY record_seq,slot",
+                            (tenant_id, session_id, *chunk),
+                        )
                     )
-                )
             for start in range(0, len(inputs), _READ_FRAME_OWNER_BATCH):
                 chunk = inputs[start : start + _READ_FRAME_OWNER_BATCH]
                 placeholders = ",".join("{p}" for _ in chunk)
@@ -943,17 +974,21 @@ class CoreSQLContentStore:
                         (tenant_id, session_id, *chunk),
                     )
                 )
-            content_ids = sorted({row[3] for row in link_rows})
-            for start in range(0, len(content_ids), _READ_FRAME_OWNER_BATCH):
-                chunk = content_ids[start : start + _READ_FRAME_OWNER_BATCH]
-                placeholders = ",".join("{p}" for _ in chunk)
-                content_rows.extend(
-                    self._backend.fetchall(
-                        f"SELECT {_CONTENT_COLUMNS} FROM sk_content "
-                        f"WHERE tenant_id={{p}} AND session_id={{p}} AND content_id IN ({placeholders})",
-                        (tenant_id, session_id, *chunk),
+            content_ids = tuple(sorted({row[3] for row in link_rows}))
+            if exact_backend is not None:
+                if content_ids:
+                    content_rows.extend(exact_backend.fetch_exact_content_rows(tenant_id, session_id, content_ids))
+            else:
+                for start in range(0, len(content_ids), _READ_FRAME_OWNER_BATCH):
+                    chunk = content_ids[start : start + _READ_FRAME_OWNER_BATCH]
+                    placeholders = ",".join("{p}" for _ in chunk)
+                    content_rows.extend(
+                        self._backend.fetchall(
+                            f"SELECT {_CONTENT_COLUMNS} FROM sk_content "
+                            f"WHERE tenant_id={{p}} AND session_id={{p}} AND content_id IN ({placeholders})",
+                            (tenant_id, session_id, *chunk),
+                        )
                     )
-                )
 
         frame = _ContentReadFrame(
             tenant_id=tenant_id,
