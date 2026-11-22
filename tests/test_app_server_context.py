@@ -7,16 +7,15 @@ from threading import Event
 
 import pytest
 from jsonschema import Draft202012Validator
-from session.app_server_s1_helpers import bind_development_content, create_s1_session
-from test_app_server_distributed import request, submission
+from session.app_server_s1_helpers import create_s1_session, hydrate_stored_payload
+from support.s1_fixture_values import read_fixture_state
+from test_app_server_distributed import node, request, submission
 
-from vv_agent import Agent, RunConfig, ScriptedModelProvider
-from vv_agent.app_server import AppServer, ChannelTransport, DefaultAppServerHost
+from vv_agent import Agent, ScriptedModelProvider
 from vv_agent.app_server.item_mapper import map_run_event
 from vv_agent.app_server.schema import json_schema_bundle
 from vv_agent.session.projection import hydration_for_session_store, project_records
 from vv_agent.session.replay import list_events
-from vv_agent.session.sqlite import SQLiteStore
 from vv_agent.types import LLMResponse, Message
 
 SUMMARY = json.dumps({"original_user_messages": ["original request"], "current_work_state": "Continue the task"})
@@ -24,24 +23,6 @@ SUMMARY = json.dumps({"original_user_messages": ["original request"], "current_w
 
 def history():
     return [Message("user", "original request"), Message("assistant", "old facts " * 4000)]
-
-
-def node(stack, path, connection, provider, *, agent=None):
-    store = stack.enter_context(SQLiteStore.standalone(str(path)))
-    bind_development_content(store)
-    server = AppServer(
-        transport=ChannelTransport(connection_id=connection, outbound_capacity=10000),
-        store=store,
-        host=DefaultAppServerHost(
-            agent=agent or Agent("test", "Answer."),
-            run_config=RunConfig(model_provider=provider, approval_timeout_seconds=5),
-        ),
-    )
-    stack.callback(server.kernel.close)
-    stack.callback(server.run_adapter.join)
-    stack.callback(lambda: [handle.cancel("teardown") for handle in server.kernel.handles])
-    assert "result" in request(server, "init", "initialize", {"clientInfo": {"name": connection}})
-    return server
 
 
 def create(server, *, seeded=False):
@@ -203,7 +184,7 @@ def test_compaction_during_running_turn_preserves_concurrent_input_or_cancel(tmp
             release.set()
         a.run_adapter.join()
         b.run_adapter.join()
-        state, records, _ = a.kernel.store.read_state("thread")
+        state, records, _ = read_fixture_state(a.kernel.store, "thread")
         if cancel:
             assert state.turns[start["turnId"]].ended
             assert next(r.record for r in reversed(records) if r.record.kind == "turn_ended")._payload["status"] == "cancelled"
@@ -348,7 +329,7 @@ def test_input_arriving_during_summary_cannot_be_overwritten(tmp_path, cancel):
             release_summary.set()
         a.run_adapter.join()
         b.run_adapter.join()
-        state, records, _ = a.kernel.store.read_state("thread")
+        state, records, _ = read_fixture_state(a.kernel.store, "thread")
         if cancel:
             assert next(r.record for r in reversed(records) if r.record.kind == "turn_ended")._payload["status"] == "cancelled"
             assert not any(r.record.kind == "context_compacted" for r in records)
@@ -457,7 +438,7 @@ def test_creation_replay_uses_frozen_baseline_after_node_config_changes(tmp_path
 @pytest.mark.parametrize("baseline", [False, True])
 @pytest.mark.parametrize("seed", [{}, {"response_rejection": False}, {"unseen_input_protection": False}])
 def test_creation_conflict_retry_delegates_policy_and_consumers_to_transaction(tmp_path, baseline, seed):
-    from vv_agent.session.store import Conflict
+    from vv_agent.session.app_server import SubmissionConflict
 
     with ExitStack() as stack:
         server = node(stack, tmp_path / "store", "A", ScriptedModelProvider.new("test", "m", []))
@@ -473,16 +454,18 @@ def test_creation_conflict_retry_delegates_policy_and_consumers_to_transaction(t
             attributes,
             consumers=("events", "app_server", "traces"),
         )
-        creation = server.kernel.store.read("thread", limit=1).records[0].record
+        creation = server.kernel.store.read("thread", limit=1).records[0]
+        creation_payload = hydrate_stored_payload(server.kernel.store, "thread", creation)
         args = {
             "input_id": "thread",
             "agent_key": "default",
             "metadata": {"client": "same"},
             "context": {"different": "node config"},
+            "principal": creation_payload["principal"],
         }
         assert server.store.create_thread_receipt(**args)["replayed"] is True
-        assert server.kernel.store.read("thread", limit=1).records[0].record.encode() == creation.encode()
-        with pytest.raises(Conflict):
+        assert server.kernel.store.read("thread", limit=1).records[0].record.encode() == creation.record.encode()
+        with pytest.raises(SubmissionConflict, match="submission_conflict"):
             server.store.create_thread_receipt(**(args | {"metadata": {"client": "different"}}))
 
 
@@ -551,7 +534,7 @@ def test_steer_during_idle_compaction_is_preserved_for_next_request(tmp_path):
         server.run_adapter.join()
         from vv_agent.session.context import project_context
 
-        state, records, _ = server.kernel.store.read_state("thread")
+        state, records, _ = read_fixture_state(server.kernel.store, "thread")
         assert any(m.content == "MAINTENANCE INPUT" for m in project_context(records, state))
         assert "result" in request(server, "next", "turn/start", submission(identity="next", expected=tid))
         server.run_adapter.join()
