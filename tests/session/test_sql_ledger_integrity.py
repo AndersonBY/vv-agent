@@ -3,18 +3,21 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from hashlib import sha256
+from unittest.mock import Mock
 
 import pytest
 from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 
 from vv_agent.kernel._canonical_json import canonical_json_bytes
 from vv_agent.kernel._content import ContentBindingMismatch
 from vv_agent.kernel._records import InboxItem
-from vv_agent.kernel._sql import InputAdmissionProofError, LedgerIntegrityError
+from vv_agent.kernel._sql import InputAdmissionProofError, LedgerIntegrityError, SQLStore, _checkpoint_message
+from vv_agent.session.ledger import Ed25519LedgerSigner, Ed25519LedgerVerifier
 from vv_agent.session.records import SessionSpec
 from vv_agent.session.sqlite import SQLiteContentStore, SQLiteStore
 
+from .conftest import Database, open_store
 from .helpers import content_ref, item, principal, record
 
 EMPTY_CHAIN = "a2d9c7a09d36dc9a7d96c74bc641caa1d46fecffb66b884945e32c5d03cf2409"
@@ -56,7 +59,7 @@ class Signer:
         return True
 
 
-def create(store: SQLiteStore) -> None:
+def create(store: SQLStore) -> None:
     with store.atomic() as tx:
         tx.create(
             SessionSpec("s", principal(), content_ref("workspace"), attributes=content_ref("attributes")),
@@ -96,6 +99,46 @@ def test_chain_vector_uses_binary_length_framing_and_sequence(tmp_path):
         assert manifest["records"] == [{"record_id": record("turn_started").record_id, "digest": next_digest}]
         assert commit[0] == canonical_json_bytes(manifest)
         assert commit[1] == sha256(commit[0]).hexdigest()
+
+
+def test_ed25519_verifier_reuses_only_exact_successful_proofs_for_trusted_keys() -> None:
+    old_key, new_key = Ed25519PrivateKey.generate(), Ed25519PrivateKey.generate()
+    verifier = Ed25519LedgerVerifier({"old": old_key.public_key(), "new": new_key.public_key()})
+    message = _checkpoint_message("tenant", "session", 1, EMPTY_CHAIN, "old", 1)
+    signature = old_key.sign(message)
+    assert verifier.verify("old", message, signature)
+    assert verifier.verify("old", bytes(bytearray(message)), bytes(bytearray(signature)))
+    assert verifier._verify_cached.cache_info().hits == 1
+
+    assert not verifier.verify("new", message, signature)
+    assert not verifier.verify("old", _checkpoint_message("tenant", "session", 1, EMPTY_CHAIN, "old", 2), signature)
+    changed_signature = signature[:-1] + bytes([signature[-1] ^ 1])
+    assert not verifier.verify("old", message, changed_signature)
+    assert not verifier.verify("old", message, changed_signature)
+    assert verifier._verify_cached.cache_info().currsize == 1
+
+    replacement = Ed25519LedgerVerifier({"old": new_key.public_key()})
+    assert not replacement.verify("old", message, signature)
+
+    oversized_message = _checkpoint_message("tenant", "x" * 1024, 1, EMPTY_CHAIN, "old", 1)
+    assert verifier.verify("old", oversized_message, old_key.sign(oversized_message))
+    tombstone_message = b'{"actor":{"a":0,"domain":"vv-agent/S1/checkpoint","z":0},"domain":"vv-agent/S1/purge"}'
+    assert verifier.verify("old", tombstone_message, old_key.sign(tombstone_message))
+    assert verifier._verify_cached.cache_info().currsize == 1
+
+
+def test_ed25519_verifier_rechecks_custom_public_keys() -> None:
+    key = Ed25519PrivateKey.generate()
+    public_key = Mock(spec=Ed25519PublicKey)
+    public_key.verify.side_effect = key.public_key().verify
+    verifier = Ed25519LedgerVerifier({"key": public_key})
+    message = _checkpoint_message("tenant", "session", 1, EMPTY_CHAIN, "key", 1)
+    signature = key.sign(message)
+    assert verifier.verify("key", message, signature)
+
+    public_key.verify.side_effect = InvalidSignature
+    assert not verifier.verify("key", message, signature)
+    assert public_key.verify.call_count == 2
 
 
 @pytest.mark.parametrize(
@@ -140,9 +183,9 @@ def test_cached_record_body_requires_matching_fresh_sql_identity(tmp_path, colum
         ("commit", "commit body digest mismatch"),
     ],
 )
-def test_warm_record_bytes_still_revalidate_chain_checkpoints_and_commits(tmp_path, target, message):
-    signer = Signer()
-    with SQLiteStore.standalone(str(tmp_path / f"warm-{target}.sqlite")) as store:
+def test_warm_record_bytes_still_revalidate_chain_checkpoints_and_commits(database: Database, target: str, message: str) -> None:
+    signer = Ed25519LedgerSigner("ledger-key", Ed25519PrivateKey.generate())
+    with open_store(database, allow_unsigned=False) as store:
         store.install_schema()
         store.configure_input_admission(signer)
         create(store)
@@ -151,13 +194,14 @@ def test_warm_record_bytes_still_revalidate_chain_checkpoints_and_commits(tmp_pa
         with store.atomic() as tx:
             tx.append("s", lease=lease, expected_seq=1, commit_id="turn", records=(record("turn_started", sid="s"),))
         assert store.read("s").head_seq == 2
+        assert signer._verify_cached.cache_info().hits > 0
 
         if target == "chain":
-            store.connection.execute("UPDATE sk_record SET chain_digest=? WHERE seq=2", ("0" * 64,))
+            store._rows("UPDATE sk_record SET chain_digest=%s WHERE seq=2", ("0" * 64,))
         elif target == "checkpoint":
-            store.connection.execute("UPDATE sk_checkpoint SET signature=? WHERE seq=2", (b"forged",))
+            store._rows("UPDATE sk_checkpoint SET signature=%s WHERE seq=2", (b"forged",))
         else:
-            store.connection.execute("UPDATE sk_commit SET body=? WHERE commit_id='turn'", (b"{}",))
+            store._rows("UPDATE sk_commit SET body=%s WHERE commit_id='turn'", (b"{}",))
 
         with pytest.raises(LedgerIntegrityError, match=message):
             store.read("s")
