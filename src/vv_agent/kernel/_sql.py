@@ -65,6 +65,10 @@ _CHECKPOINT_DOMAIN = "vv-agent/S1/checkpoint"
 _RECORD_READ_PAGE_SIZE = 256
 _COMMIT_PARSE_CACHE_LIMIT = 1024
 _CONFIGURED_VERIFIER = object()
+_STORED_INBOX_COLUMNS = (
+    "body,input_seq,received_ms,consumed_seq,digest,admission_key_id,"
+    "admission_signature,admission_signed_ms,input_id,kind,available_ms"
+)
 
 
 @dataclass(frozen=True)
@@ -1412,10 +1416,12 @@ class SQLStore:
     ) -> StoredInput:
         """Validate and reconstruct one inbox row before any content hydration."""
 
-        body, seq, received, consumed, checksum, key_id, signature, signed_ms = row
+        body, seq, received, consumed, checksum, key_id, signature, signed_ms, input_id, kind, available_ms = row
         if sha256(body).hexdigest() != checksum:
             raise InputAdmissionProofError(f"stored input digest mismatch at input_seq {seq}")
         base = InboxItem.parse(body)
+        if (input_id, kind, available_ms) != (base.input_id, base.kind, base.available_ms):
+            raise InputAdmissionProofError(f"stored input metadata does not match its body at input_seq {seq}")
         if enforce_reader:
             self._require_reader_level(base.feature_level)
         if base.admission_proof is not None:
@@ -1465,7 +1471,7 @@ class SQLStore:
         # second statement at the watermark captured with the worker level so a
         # concurrent level-raising push cannot enter this snapshot.
         rows = self._rows(
-            "SELECT body,input_seq,received_ms,consumed_seq,digest,admission_key_id,admission_signature,admission_signed_ms "
+            f"SELECT {_STORED_INBOX_COLUMNS} "
             "FROM sk_inbox WHERE tenant_id=%s AND session_id=%s AND input_seq<=%s ORDER BY input_seq",
             (self.tenant_id, session_id, inbox_seq),
         )
@@ -1954,7 +1960,7 @@ class SQLStore:
         self._require_input_integrity_gate()
         self._stored_inputs(session_id, row[1])
         rows = self._rows(
-            "SELECT body,input_seq,received_ms,consumed_seq,digest,admission_key_id,admission_signature,admission_signed_ms "
+            f"SELECT {_STORED_INBOX_COLUMNS} "
             "FROM sk_inbox "
             "WHERE tenant_id=%s AND session_id=%s AND input_id=%s AND input_seq<=%s",
             (self.tenant_id, session_id, input_id, row[1]),
@@ -2120,7 +2126,7 @@ class SQLStore:
         through = row[1] if through_input_seq is None else min(through_input_seq, row[1])
         readiness = f"AND available_ms<={self.clock_sql} " if ready_only else ""
         rows = self._rows(
-            "SELECT body,input_seq,received_ms,consumed_seq,digest,admission_key_id,admission_signature,admission_signed_ms "
+            f"SELECT {_STORED_INBOX_COLUMNS} "
             "FROM sk_inbox "
             "WHERE tenant_id=%s AND session_id=%s "
             "AND consumed_seq IS NULL " + readiness + "AND input_seq<=%s ORDER BY input_seq LIMIT %s",
@@ -2182,8 +2188,7 @@ class SQLStore:
             controls = tuple(
                 self._stored_input(lease.session_id, r).item
                 for r in self._rows(
-                    "SELECT body,input_seq,received_ms,consumed_seq,digest,admission_key_id,"
-                    "admission_signature,admission_signed_ms "
+                    f"SELECT {_STORED_INBOX_COLUMNS} "
                     "FROM sk_inbox WHERE tenant_id=%s AND session_id=%s "
                     "AND consumed_seq IS NULL AND available_ms<=%s AND kind='control' ORDER BY input_seq",
                     (self.tenant_id, lease.session_id, now),
@@ -3205,9 +3210,7 @@ class SQLSessionTx:
             row = s._lock(session_id)
             s._require_live_row(row)
             old = s._rows(
-                "SELECT body,input_seq,received_ms,consumed_seq,digest,admission_key_id,admission_signature,admission_signed_ms "
-                "FROM sk_inbox "
-                "WHERE tenant_id=%s AND session_id=%s AND input_id=%s",
+                f"SELECT {_STORED_INBOX_COLUMNS} FROM sk_inbox WHERE tenant_id=%s AND session_id=%s AND input_id=%s",
                 (s.tenant_id, session_id, item.input_id),
             )
             if old:
@@ -3468,17 +3471,15 @@ class SQLSessionTx:
             now = s._now()
             for input_id in consume_input_ids:
                 incoming = s._one(
-                    "SELECT body,input_seq,received_ms,consumed_seq,digest,admission_key_id,"
-                    "admission_signature,admission_signed_ms,available_ms FROM sk_inbox "
-                    "WHERE tenant_id=%s AND session_id=%s AND input_id=%s",
+                    f"SELECT {_STORED_INBOX_COLUMNS} FROM sk_inbox WHERE tenant_id=%s AND session_id=%s AND input_id=%s",
                     (s.tenant_id, session_id, input_id),
                 )
-                stored = s._stored_input(session_id, incoming[:8])
+                stored = s._stored_input(session_id, incoming)
                 applied = applications[input_id][0]
                 applied_input = applied._payload["input"]
                 if (
                     stored.consumed_seq is not None
-                    or incoming[8] > now
+                    or stored.item.available_ms > now
                     or stored.item.to_dict() != applied_input
                     or stored_input_proof(stored) != applied._payload["input_proof"]
                 ):

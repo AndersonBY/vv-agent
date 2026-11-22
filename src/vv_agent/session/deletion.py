@@ -13,7 +13,7 @@ from typing import Any
 
 from vv_agent.kernel._content import ForgetTombstone, Principal, TombstoneState
 from vv_agent.kernel._content_sql import CoreSQLContentStore
-from vv_agent.kernel._sql import LedgerIntegrityError, LedgerSigner, SessionNotLive, SQLStore
+from vv_agent.kernel._sql import _STORED_INBOX_COLUMNS, LedgerIntegrityError, LedgerSigner, SessionNotLive, SQLStore
 from vv_agent.kernel._store import (
     SESSION_DELETION_INVENTORY,
     Conflict,
@@ -470,9 +470,7 @@ class SessionDeletionStore:
             verified, chains = scoped._verified_records(session_id, head_seq)
             records = tuple(scoped._stored(session_id, item) for item in verified)
             input_rows = scoped._rows(
-                "SELECT body,input_seq,received_ms,consumed_seq,digest,admission_key_id,"
-                "admission_signature,admission_signed_ms FROM sk_inbox "
-                "WHERE tenant_id=%s AND session_id=%s ORDER BY input_seq",
+                f"SELECT {_STORED_INBOX_COLUMNS} FROM sk_inbox WHERE tenant_id=%s AND session_id=%s ORDER BY input_seq",
                 (tenant_id, session_id),
             )
             inputs = tuple(scoped._stored_input(session_id, item) for item in input_rows)

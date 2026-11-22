@@ -18,7 +18,7 @@ from vv_agent.kernel._content import (
     TombstoneState,
     _declared_content_slots,
 )
-from vv_agent.kernel._sql import LedgerIntegrityError, SessionNotLive, _require_expected_head
+from vv_agent.kernel._sql import _STORED_INBOX_COLUMNS, LedgerIntegrityError, SessionNotLive, _require_expected_head
 from vv_agent.session._authorization import SessionResourceAuthorization, authorize_session_resource_access
 from vv_agent.session.content_store import ContentExportRef
 
@@ -154,9 +154,7 @@ def export_session(
             raise InvalidExport("export requires a complete non-empty session ledger")
 
         inbox_rows = store._rows(
-            "SELECT body,input_seq,received_ms,consumed_seq,digest,admission_key_id,"
-            "admission_signature,admission_signed_ms FROM sk_inbox "
-            "WHERE tenant_id=%s AND session_id=%s ORDER BY input_seq",
+            f"SELECT {_STORED_INBOX_COLUMNS} FROM sk_inbox WHERE tenant_id=%s AND session_id=%s ORDER BY input_seq",
             (tenant_id, session_id),
         )
         inboxes = tuple(store._stored_input(session_id, row, verifier=verifier, signed=signed) for row in inbox_rows)
