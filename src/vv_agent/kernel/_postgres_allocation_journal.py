@@ -689,6 +689,16 @@ class PostgresObjectJournal:
     def identity(self) -> JournalIdentity:
         return self._scope._identity
 
+    def verify_identity(self) -> JournalIdentity:
+        for role in (self._anonymous, self._binder, self._scope, self._keys):
+            with role._transaction():
+                pass
+        return self.identity
+
+    def _pin_until_ms(self, ttl_ms: int) -> int:
+        with self._scope._transaction() as connection:
+            return _query_rows(connection, f"SELECT {CLOCK}+%s", (ttl_ms,))[0][0]
+
     @property
     def tenant_id(self) -> str:
         return self._tenant_id

@@ -51,7 +51,8 @@ from ._content_publication import (
 from ._content_reader import _LinkValidatedContentStore, _OwnerBoundContentStore
 from ._content_sql import CoreSQLContentStore, _ContentWriteMemo
 from ._content_store import ContentCipher, DurableContentStore
-from ._external_content import _SQLiteObjectContent
+from ._external_content import _PostgresObjectContent, _SQLiteObjectContent
+from ._lease_scope import Clock
 from ._postgres import CorePostgresContentStore, PostgresStore
 from ._records import SessionSpec
 from ._sql import SQLSessionTx, _TenantSQLStore
@@ -92,7 +93,7 @@ class ContentRuntimeBinding:
 
     key_provider: KeyProvider
     cipher: ContentCipher
-    _object_content: _SQLiteObjectContent | None = None
+    _object_content: _SQLiteObjectContent | _PostgresObjectContent | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.key_provider, KeyProvider):
@@ -251,6 +252,7 @@ def _deferred_content_writer(writer: SessionContentWriter) -> tuple[SessionConte
         binding=writer._binding,
         _published_refs=writer._published_refs,
         _write_memo=writer._write_memo,
+        _check_publication=writer._durable._check_object_write,
     )
     deferred._durable = durable
     deferred.durable = cast(DurableContentStore, _ValidatedDurableContentStore(durable))
@@ -303,20 +305,35 @@ _INPUT_SLOT_SPECS: Mapping[str, int] = MappingProxyType(_input_slot_specs)
 
 def _verify_content_binding(store: object, binding: ContentRuntimeBinding | None) -> None:
     root = _root_store(store)
-    external = binding is not None and binding._object_content is not None
+    objects = None if binding is None else binding._object_content
+    if isinstance(root, PostgresStore):
+        if isinstance(objects, _PostgresObjectContent):
+            root._verify_object_journal(objects.journal, objects._binding_digest())
+            assert binding is not None
+            objects.verify_installation(objects.journal.identity.database_id, binding.key_provider)
+        elif objects is not None:
+            raise ContentUnavailable("PostgreSQL requires its PostgreSQL object journal")
+        else:
+            installation = root._object_installation()
+            if installation is not None and installation[1] is not None:
+                raise ContentUnavailable("PostgreSQL installation requires its external content binding")
+        return
     if not isinstance(root, SQLiteStore):
-        if external:
+        if objects is not None:
             raise ContentUnavailable("external content requires a file-backed SQLite store")
         return
     installation = root._object_installation()
-    if binding is None or binding._object_content is None:
+    if objects is None:
         if installation is not None and installation[1] is not None:
             raise ContentUnavailable("SQLite installation requires its external content binding")
         return
+    if not isinstance(objects, _SQLiteObjectContent):
+        raise ContentUnavailable("SQLite requires its SQLite object journal")
     if installation is None or installation[1] is None:
         raise ContentUnavailable("SQLite external content binding has not been provisioned")
     database_id, expected = installation
-    if binding._object_content.verify_installation(database_id, binding.key_provider) != expected:
+    assert binding is not None
+    if objects.verify_installation(database_id, binding.key_provider) != expected:
         raise ContentUnavailable("external content binding does not match the SQLite installation")
 
 
@@ -325,12 +342,19 @@ def _provision_sqlite_object_content(store: SQLiteStore, *, key_provider: KeyPro
     store._provision_object_content(lambda database_id: objects.verify_installation(database_id, key_provider))
 
 
+def _provision_postgres_object_content(
+    store: PostgresStore, *, key_provider: KeyProvider, objects: _PostgresObjectContent
+) -> None:
+    digest = objects.verify_installation(objects.journal.identity.database_id, key_provider)
+    store._provision_object_journal(objects.journal, content_digest=digest)
+
+
 def bind_content_runtime(
     store: SessionStore,
     *,
     key_provider: KeyProvider,
     cipher: ContentCipher,
-    _object_content: _SQLiteObjectContent | None = None,
+    _object_content: _SQLiteObjectContent | _PostgresObjectContent | None = None,
 ) -> ContentRuntimeBinding:
     """Attach one explicit provider/cipher pair to a store's process-local root."""
 
@@ -379,8 +403,6 @@ def durable_content_store(
             selected.key_provider,
             selected.cipher,
         )
-        if selected._object_content is not None:
-            durable._bind_object_content(selected._object_content)
     elif isinstance(root, PostgresStore):
         source = store._store if isinstance(store, _ContentSessionStoreAdapter) else store
         if not isinstance(source, (PostgresStore, _TenantSQLStore)):
@@ -388,6 +410,8 @@ def durable_content_store(
         durable = CorePostgresContentStore(source, selected.key_provider, selected.cipher)
     else:
         raise ContentRuntimeUnavailable("content reads require a durable SQLite or PostgreSQL store")
+    if selected._object_content is not None:
+        durable._bind_object_content(selected._object_content)
     return cast(DurableContentStore, _ValidatedDurableContentStore(durable))
 
 
@@ -410,6 +434,10 @@ def read_record_json(
     ref: ContentRef | Mapping[str, Any],
     slot: str,
 ) -> Any:
+    if _uses_postgres_objects(store):
+        reader = durable_content_reader(store, tenant_id=tenant_id, session_id=session_id)
+        with reader._read_frame(record_seqs=(record_seq,)) as frame:
+            return json.loads(frame.read(tenant_id, session_id, f"record:{record_seq}", slot, _content_ref(ref)))
     with store.atomic() as tx:
         writer = SessionContentWriter.bind(tx, tenant_id=tenant_id, session_id=session_id)
         verified = writer.assert_record(record_seq, ref, slot)
@@ -425,6 +453,10 @@ def read_input_json(
     ref: ContentRef | Mapping[str, Any],
     slot: str,
 ) -> Any:
+    if _uses_postgres_objects(store):
+        reader = durable_content_reader(store, tenant_id=tenant_id, session_id=session_id)
+        with reader._read_frame(input_ids=(input_id,)) as frame:
+            return json.loads(frame.read(tenant_id, session_id, f"input:{input_id}", slot, _content_ref(ref)))
     with store.atomic() as tx:
         writer = SessionContentWriter.bind(tx, tenant_id=tenant_id, session_id=session_id)
         verified = writer.assert_input(input_id, ref, slot)
@@ -441,6 +473,11 @@ def _root_store(store: object) -> object:
             return current
         current = parent
     return current
+
+
+def _uses_postgres_objects(store: object) -> bool:
+    binding = content_runtime_binding_for(store)
+    return binding is not None and isinstance(binding._object_content, _PostgresObjectContent)
 
 
 def _slot(value: str, specs: Mapping[str, int]) -> str:
@@ -590,6 +627,7 @@ class SessionContentWriter:
         binding: ContentRuntimeBinding,
         _published_refs: set[ContentRef] | None = None,
         _write_memo: _ContentWriteMemo | None = None,
+        _check_publication: Callable[[], None] | None = None,
     ) -> None:
         if not isinstance(tenant_id, str) or not tenant_id:
             raise ValueError("tenant_id must be a non-empty string")
@@ -619,7 +657,12 @@ class SessionContentWriter:
         self._durable: CoreSQLContentStore = durable
         self._write_memo = _write_memo if _write_memo is not None else _ContentWriteMemo()
         self._durable.bind_transaction(tx, write_memo=self._write_memo)
-        if binding._object_content is None:
+        if isinstance(binding._object_content, _PostgresObjectContent):
+            if _check_publication is None:
+                raise ContentRuntimeUnavailable("PostgreSQL object writes require the root session publication transaction")
+            _check_publication()
+            self._durable._bind_object_content(binding._object_content, check_write=_check_publication)
+        elif binding._object_content is None:
             _verify_content_binding(tx.store, binding)
         else:
             if not isinstance(tx.store, SQLiteStore):
@@ -848,11 +891,14 @@ class SessionContentWriter:
 class _ContentSessionTxAdapter:
     """Expose the session writer as an explicit kernel transaction capability."""
 
-    def __init__(self, tx: SessionTx, binding: ContentRuntimeBinding) -> None:
+    def __init__(
+        self, tx: SessionTx, binding: ContentRuntimeBinding, *, check_publication: Callable[[], None] | None = None
+    ) -> None:
         if not isinstance(tx, SQLSessionTx):
             raise ContentRuntimeUnavailable("content capability requires a caller-owned SQL transaction")
         self._tx = tx
         self._binding = binding
+        self._check_publication = check_publication
         self._published_refs: set[ContentRef] = set()
         self._write_memo = _ContentWriteMemo()
 
@@ -868,6 +914,7 @@ class _ContentSessionTxAdapter:
             binding=self._binding,
             _published_refs=self._published_refs,
             _write_memo=self._write_memo,
+            _check_publication=self._check_publication,
         )
 
     def lock_session(self, session_id: str) -> None:
@@ -948,13 +995,46 @@ class _ContentSessionStoreAdapter:
 
     @contextmanager
     def atomic(self) -> Iterator[SessionTx]:
-        with self._store.atomic() as tx:
-            adapter = _ContentSessionTxAdapter(tx, self._binding)
-            try:
-                yield cast(SessionTx, adapter)
-            finally:
-                adapter._write_memo.clear()
-                adapter._published_refs.clear()
+        if isinstance(self._binding._object_content, _PostgresObjectContent):
+            raise ContentRuntimeUnavailable("PostgreSQL object sessions require the root create or push entry point")
+        with self._store.atomic() as tx, self._adapt_transaction(tx) as adapter:
+            yield adapter
+
+    @contextmanager
+    def _adapt_transaction(self, tx: SessionTx, *, check_publication: Callable[[], None] | None = None) -> Iterator[SessionTx]:
+        adapter = _ContentSessionTxAdapter(tx, self._binding, check_publication=check_publication)
+        try:
+            yield cast(SessionTx, adapter)
+        finally:
+            adapter._write_memo.clear()
+            adapter._published_refs.clear()
+
+    @contextmanager
+    def _root_publication_atomic(self, clock: Clock) -> Iterator[SessionTx]:
+        objects = self._binding._object_content
+        if not isinstance(objects, _PostgresObjectContent):
+            with self.atomic() as tx:
+                yield tx
+            return
+        root = _root_store(self)
+        if not isinstance(root, PostgresStore):
+            raise ContentRuntimeUnavailable("PostgreSQL object publication requires its PostgreSQL store")
+        deadline = clock.monotonic() + 5
+
+        def check_deadline() -> None:
+            if clock.monotonic() >= deadline:
+                raise KeyUnavailable("external content persistence budget expired")
+
+        digest = objects._binding_digest()
+        with root._object_publication_atomic(objects.journal, content_digest=digest, check_deadline=check_deadline) as (
+            tx,
+            check_publication,
+        ):
+            if objects.verify_installation(objects.journal.identity.database_id, self._binding.key_provider) != digest:
+                raise ContentUnavailable("PostgreSQL object content binding changed during publication")
+            check_publication()
+            with self._adapt_transaction(tx, check_publication=check_publication) as adapter:
+                yield adapter
 
     def __getattr__(self, name: str):
         return getattr(self._store, name)

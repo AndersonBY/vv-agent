@@ -101,6 +101,10 @@ def _destination_principal(
 
 
 def fork_thread(kernel, host, params, principal: PrincipalInput | None = None):
+    from vv_agent.kernel._content_runtime import ContentRuntimeUnavailable, _uses_postgres_objects
+
+    if _uses_postgres_objects(kernel.store):
+        raise ContentRuntimeUnavailable("fork is unavailable for PostgreSQL object sessions")
     source = params["threadId"]
     sid = "fork/" + digest([source, params["forkId"]])
     previous = _replay(kernel, sid, params)

@@ -1,4 +1,4 @@
-"""Private SQLite content capabilities used by the object-backed runtime."""
+"""Private content capabilities used by the object-backed runtime."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 from typing import Protocol, cast
 
-from ._allocation_journal import Allocation, AllocationOwner, KeyIntent, SQLiteAllocationJournal
+from ._allocation_journal import Allocation, AllocationOwner, JournalIdentity, KeyIntent, SQLiteAllocationJournal
 from ._canonical_json import canonical_json_bytes
 from ._content import (
     _EXACT_KEY_ID_PREFIX,
@@ -31,7 +31,7 @@ class _ObjectStore(Protocol):
     @property
     def _storage_identity(self) -> tuple[str, str, str]: ...
 
-    def _uses_journal(self, journal: SQLiteAllocationJournal) -> bool: ...
+    def _uses_journal(self, journal: object) -> bool: ...
 
     def put(self, owner: AllocationOwner, ciphertext: bytes, *, pin_until_ms: int, check_fence: Callable[[], None]) -> bytes: ...
 
@@ -44,12 +44,30 @@ class _ExactAllocator(KeyProvider, Protocol):
     def _allocate_exact_key(self, intent: _ExactKeyIntent) -> WrappedDataKey: ...
 
 
+class _ContentJournal(Protocol):
+    @property
+    def identity(self) -> JournalIdentity: ...
+
+    def verify_identity(self) -> JournalIdentity: ...
+    def _pin_until_ms(self, ttl_ms: int) -> int: ...
+    def get_key_intent(self, provider_instance_id: str, key_id: str) -> KeyIntent | None: ...
+    def key_intents_for_admission(
+        self, tenant_id: str, session_id: str, admission_root_id: str, admission_id: str
+    ) -> tuple[KeyIntent, ...]: ...
+    def reserve_key_intent(self, intent: _ExactKeyIntent, *, pin_until_ms: int) -> KeyIntent | None: ...
+    def claim_key_allocation(self, expected: KeyIntent) -> KeyIntent | None: ...
+
+
+class _PostgresContentJournal(_ContentJournal, Protocol):
+    @property
+    def tenant_id(self) -> str: ...
+
+
 @dataclass(frozen=True, slots=True)
-class _SQLiteObjectContent:
-    journal: SQLiteAllocationJournal
+class _ObjectContent[JournalT: _ContentJournal]:
+    journal: JournalT
     objects: _ObjectStore
     provider_instance_id: str
-    terminal_bound_delete: bool = False
 
     def _binding_digest(self) -> str:
         identity = self.journal.identity
@@ -63,7 +81,8 @@ class _SQLiteObjectContent:
 
     def verify_installation(self, database_id: str, provider: KeyProvider) -> str:
         if self.journal.verify_identity().database_id != database_id:
-            raise ContentUnavailable("external content journal belongs to a different SQLite installation")
+            backend = "SQLite" if isinstance(self.journal, SQLiteAllocationJournal) else "PostgreSQL"
+            raise ContentUnavailable(f"external content journal belongs to a different {backend} installation")
         if not self.objects._uses_journal(self.journal):
             raise ContentUnavailable("external content object adapter requires the same allocation journal")
         provider_instance_id = getattr(provider, "_exact_key_provider_instance_id", None)
@@ -80,59 +99,6 @@ class _SQLiteObjectContent:
 
     def _key_prefix(self) -> str:
         return _EXACT_KEY_ID_PREFIX + self._binding_digest()[:32]
-
-    def require_erasure_binding(self, key_id: str) -> None:
-        if not self.terminal_bound_delete or not key_id.startswith(self._key_prefix()):
-            raise ContentCleanupUnavailable("external erasure requires the matching journal and terminal bound DELETE")
-
-    def erasure_inventory(self, tenant_id: str, session_id: str, key_id: str) -> tuple[KeyIntent | None, dict[bytes, Allocation]]:
-        self.require_erasure_binding(key_id)
-        expected_key = self._root_intent(tenant_id, session_id, key_id)
-        keys = self.journal.scoped_key_intents(tenant_id, (session_id,))
-        if keys and (len(keys) != 1 or keys[0].intent != expected_key):
-            raise ContentCleanupUnavailable("external key inventory does not match the frozen root")
-        allocations = {}
-        for row in self.journal.scoped_allocations(tenant_id, (session_id,)):
-            owner = row.owner
-            if owner is None or owner != self._owner(expected_key, owner.content_id):
-                raise ContentCleanupUnavailable("external object inventory does not match the frozen root")
-            allocations[b"\x01" + row.allocation_id] = row
-        return keys[0] if keys else None, allocations
-
-    def _root_intent(self, tenant_id: str, session_id: str, key_id: str) -> _ExactKeyIntent:
-        return _ExactKeyIntent(key_id, self.provider_instance_id, tenant_id, session_id, session_id, "session/create")
-
-    def verify_retired(self, provider: KeyProvider, tenant_id: str, session_id: str, key_id: str) -> None:
-        verify = getattr(provider, "_verify_exact_retirement", None)
-        if not callable(verify) or not verify(self._root_intent(tenant_id, session_id, key_id)):
-            raise ContentCleanupUnavailable("external key retirement evidence is unavailable")
-
-    def retire(self, provider: KeyProvider, key: KeyIntent, *, check_fence: Callable[[], None]) -> KeyIntent:
-        check_fence()
-        if key.state == "retired":
-            verify = getattr(provider, "_verify_exact_retirement", None)
-            if not callable(verify) or verify(key.intent) != key.evidence_id:
-                raise ContentCleanupUnavailable("external key retirement evidence changed")
-            check_fence()
-            return key
-        retire = getattr(provider, "_retire_exact_key", None)
-        if not callable(retire):
-            raise ContentCleanupUnavailable("external content requires exact key retirement")
-        claim = self.journal.claim_key_intent(key, require_expired_pin=False)
-        if claim is None:
-            raise ContentCleanupUnavailable("external key retirement claim changed")
-        check_fence()
-        outcome = retire(claim.intent)
-        check_fence()
-        if not isinstance(outcome, KeyDestroyOutcome) or outcome.status not in {
-            KeyDestroyStatus.DESTROYED,
-            KeyDestroyStatus.ALREADY_DESTROYED,
-        }:
-            raise ContentCleanupUnavailable("external key retirement is unconfirmed")
-        retired = self.journal.record_key_retirement(claim, outcome)
-        if retired is None:
-            raise ContentCleanupUnavailable("external key retirement record changed")
-        return retired
 
     @staticmethod
     def _owner(key: _ExactKeyIntent, content_id: str) -> AllocationOwner:
@@ -215,3 +181,65 @@ class _SQLiteObjectContent:
         if not isinstance(result, bytes) or len(result) != ciphertext_size:
             raise ContentUnavailable("external ciphertext is incomplete")
         return result
+
+
+class _PostgresObjectContent(_ObjectContent[_PostgresContentJournal]):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class _SQLiteObjectContent(_ObjectContent[SQLiteAllocationJournal]):
+    terminal_bound_delete: bool = False
+
+    def require_erasure_binding(self, key_id: str) -> None:
+        if not self.terminal_bound_delete or not key_id.startswith(self._key_prefix()):
+            raise ContentCleanupUnavailable("external erasure requires the matching journal and terminal bound DELETE")
+
+    def erasure_inventory(self, tenant_id: str, session_id: str, key_id: str) -> tuple[KeyIntent | None, dict[bytes, Allocation]]:
+        self.require_erasure_binding(key_id)
+        expected_key = self._root_intent(tenant_id, session_id, key_id)
+        keys = self.journal.scoped_key_intents(tenant_id, (session_id,))
+        if keys and (len(keys) != 1 or keys[0].intent != expected_key):
+            raise ContentCleanupUnavailable("external key inventory does not match the frozen root")
+        allocations = {}
+        for row in self.journal.scoped_allocations(tenant_id, (session_id,)):
+            owner = row.owner
+            if owner is None or owner != self._owner(expected_key, owner.content_id):
+                raise ContentCleanupUnavailable("external object inventory does not match the frozen root")
+            allocations[b"\x01" + row.allocation_id] = row
+        return keys[0] if keys else None, allocations
+
+    def _root_intent(self, tenant_id: str, session_id: str, key_id: str) -> _ExactKeyIntent:
+        return _ExactKeyIntent(key_id, self.provider_instance_id, tenant_id, session_id, session_id, "session/create")
+
+    def verify_retired(self, provider: KeyProvider, tenant_id: str, session_id: str, key_id: str) -> None:
+        verify = getattr(provider, "_verify_exact_retirement", None)
+        if not callable(verify) or not verify(self._root_intent(tenant_id, session_id, key_id)):
+            raise ContentCleanupUnavailable("external key retirement evidence is unavailable")
+
+    def retire(self, provider: KeyProvider, key: KeyIntent, *, check_fence: Callable[[], None]) -> KeyIntent:
+        check_fence()
+        if key.state == "retired":
+            verify = getattr(provider, "_verify_exact_retirement", None)
+            if not callable(verify) or verify(key.intent) != key.evidence_id:
+                raise ContentCleanupUnavailable("external key retirement evidence changed")
+            check_fence()
+            return key
+        retire = getattr(provider, "_retire_exact_key", None)
+        if not callable(retire):
+            raise ContentCleanupUnavailable("external content requires exact key retirement")
+        claim = self.journal.claim_key_intent(key, require_expired_pin=False)
+        if claim is None:
+            raise ContentCleanupUnavailable("external key retirement claim changed")
+        check_fence()
+        outcome = retire(claim.intent)
+        check_fence()
+        if not isinstance(outcome, KeyDestroyOutcome) or outcome.status not in {
+            KeyDestroyStatus.DESTROYED,
+            KeyDestroyStatus.ALREADY_DESTROYED,
+        }:
+            raise ContentCleanupUnavailable("external key retirement is unconfirmed")
+        retired = self.journal.record_key_retirement(claim, outcome)
+        if retired is None:
+            raise ContentCleanupUnavailable("external key retirement record changed")
+        return retired

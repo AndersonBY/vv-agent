@@ -12,7 +12,8 @@ from hashlib import sha256
 from threading import RLock
 from typing import TYPE_CHECKING, Any, Literal, LiteralString, cast
 
-from vv_agent.kernel._canonical_json import canonical_json_bytes
+from vv_agent.kernel._allocation_journal import JournalIdentity
+from vv_agent.kernel._canonical_json import canonical_json_bytes, validate_sha256
 from vv_agent.kernel._content import ContentUnavailable, KeyProvider
 from vv_agent.kernel._content_sql import CoreSQLContentStore
 from vv_agent.kernel._content_store import ContentCipher
@@ -23,7 +24,7 @@ from vv_agent.kernel._store import Conflict, Lease, SessionStore
 if TYPE_CHECKING:
     from psycopg import Connection
 
-    from vv_agent.kernel._postgres_allocation_journal import PostgresObjectJournal
+    from vv_agent.kernel._external_content import _PostgresContentJournal
 
 CLOCK = "floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint"
 STORAGE_MAJOR = "S1"
@@ -927,14 +928,20 @@ class PostgresStore(SQLStore):
         return self.connection.info.transaction_status != TransactionStatus.IDLE
 
     @staticmethod
-    def _object_journal_digest(journal: PostgresObjectJournal) -> str:
-        identity = journal.identity
+    def _object_journal_digest(identity: JournalIdentity, content_digest: str) -> str:
+        validate_sha256(content_digest, "PostgreSQL object content binding")
         binding = canonical_json_bytes(
-            ["vv-agent/S1/postgres-object-journal/v1", identity.database_id, identity.journal_id, identity.namespace]
+            [
+                "vv-agent/S1/postgres-object-journal/v1",
+                identity.database_id,
+                identity.journal_id,
+                identity.namespace,
+                content_digest,
+            ]
         )
         return sha256(binding).hexdigest()
 
-    def _provision_object_journal(self, journal: PostgresObjectJournal) -> None:
+    def _provision_object_journal(self, journal: _PostgresContentJournal, *, content_digest: str) -> None:
         """Pin the authenticated journal installation on a quiesced primary."""
 
         from psycopg import sql
@@ -961,19 +968,21 @@ class PostgresStore(SQLStore):
                     "WHERE singleton=1 AND database_id=%s AND object_journal_binding IS NULL RETURNING singleton"
                 ).format(sql.Identifier(schema))
                 with self.connection.cursor(row_factory=tuple_row) as cursor:
-                    cursor.execute(bind, (self._object_journal_digest(journal), journal.identity.database_id))
+                    identity = journal.identity
+                    cursor.execute(bind, (self._object_journal_digest(identity, content_digest), identity.database_id))
                     rows = cursor.fetchall()
                 if rows != [(1,)]:
                     raise ContentUnavailable("object journal does not match an unbound PostgreSQL installation")
 
     @contextmanager
     def _object_publication_atomic(
-        self, journal: PostgresObjectJournal, *, check_deadline: Callable[[], None]
+        self,
+        journal: _PostgresContentJournal,
+        *,
+        check_deadline: Callable[[], None],
+        content_digest: str,
     ) -> Iterator[tuple[SQLSessionTx, Callable[[], None]]]:
         """Open the primary transaction that owns one tenant's publication lock."""
-
-        from psycopg import sql
-        from psycopg.rows import tuple_row
 
         check_deadline()
         if not self._connection_lock.acquire(blocking=False):
@@ -992,16 +1001,7 @@ class PostgresStore(SQLStore):
                 )
                 if settings != ("read committed", "off", tenant_id):
                     raise ContentUnavailable("object publication requires the authenticated READ COMMITTED write transaction")
-                self.verify_tenant_connection(self.connection, tenant_id)
-                (schema,) = self._one("SELECT pg_catalog.current_schema()")
-                pinned_settings = sql.SQL(
-                    "SELECT database_id,object_journal_binding FROM {}.sk_settings WHERE singleton=1"
-                ).format(sql.Identifier(schema))
-                with self.connection.cursor(row_factory=tuple_row) as cursor:
-                    cursor.execute(pinned_settings)
-                    pinned = cursor.fetchall()
-                if pinned != [(journal.identity.database_id, self._object_journal_digest(journal))]:
-                    raise ContentUnavailable("object journal binding does not match the PostgreSQL installation")
+                self._verify_object_journal(journal, content_digest)
                 check_deadline()
                 frame = canonical_json_bytes(
                     ["vv-agent/S1/postgres-object-publication/v1", journal.identity.namespace, tenant_id]
@@ -1023,6 +1023,32 @@ class PostgresStore(SQLStore):
                 tx._finalize_lease_fence()
         finally:
             self._connection_lock.release()
+
+    def _verify_object_journal(self, journal: _PostgresContentJournal, content_digest: str) -> None:
+        if self.credential_tenant_id != journal.tenant_id or self.tenant_id != journal.tenant_id:
+            raise ContentUnavailable("object publication requires the authenticated journal tenant")
+        self.verify_tenant_connection(self.connection, journal.tenant_id)
+        identity = journal.identity
+        if self._object_installation() != (identity.database_id, self._object_journal_digest(identity, content_digest)):
+            raise ContentUnavailable("object journal binding does not match the PostgreSQL installation")
+
+    def _object_installation(self) -> tuple[str, str | None] | None:
+        from psycopg import sql
+        from psycopg.rows import tuple_row
+
+        with self._connection_lock, _read_only_probe(self.connection):
+            (schema,) = _query_rows(self.connection, "SELECT pg_catalog.current_schema()")[0]
+            qualified_table = sql.Identifier(schema, "sk_settings")
+            if not _query_rows(
+                self.connection, "SELECT pg_catalog.to_regclass(%s)", (qualified_table.as_string(self.connection),)
+            )[0][0]:
+                return None
+            pinned_settings = sql.SQL("SELECT database_id,object_journal_binding FROM {} WHERE singleton=1").format(
+                qualified_table
+            )
+            with self.connection.cursor(row_factory=tuple_row) as cursor:
+                cursor.execute(pinned_settings)
+                return cursor.fetchone()
 
     def _schema_tables(self) -> set[str]:
         return _schema_tables(self.connection)

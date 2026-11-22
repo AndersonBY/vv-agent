@@ -2820,11 +2820,12 @@ class SQLStore:
             self._reject_external_erasure(tuple(entry.session_id for entry in scope))
             return
         from ._content_runtime import _verify_content_binding, content_runtime_binding_for
+        from ._external_content import _SQLiteObjectContent
 
         binding = content_runtime_binding_for(self)
         if (
             binding is None
-            or binding._object_content is None
+            or not isinstance(binding._object_content, _SQLiteObjectContent)
             or any(entry.session_id != session_id or entry.parent_session_id is not None for entry in scope)
         ):
             raise ContentCleanupUnavailable("external erasure supports only a bound SQLite root")

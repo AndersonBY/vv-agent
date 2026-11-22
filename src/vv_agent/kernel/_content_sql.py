@@ -43,7 +43,7 @@ from ._content_store import (
     SessionKeyRecord,
     SessionKeyState,
 )
-from ._external_content import _SQLiteObjectContent
+from ._external_content import _ContentJournal, _ObjectContent, _PostgresObjectContent
 
 _DATA_KEY_BYTES = 32
 _NONCE_BYTES = 12
@@ -289,7 +289,7 @@ def _link_slot(value: object) -> str:
 
 
 def _read_ciphertext(
-    objects: _SQLiteObjectContent | None,
+    objects: _ObjectContent[_ContentJournal] | None,
     tenant_id: str,
     session_id: str,
     ref: ContentRef,
@@ -301,8 +301,10 @@ def _read_ciphertext(
         raise ContentIntegrityError("content nonce is malformed")
     if locator is not None:
         if objects is None:
-            raise ContentUnavailable("external content requires its bound SQLite runtime")
+            raise ContentUnavailable("external content requires its bound object runtime")
         return objects.get(tenant_id, session_id, ref.content_id, ref.key_id, locator, size=ref.size)
+    if isinstance(objects, _PostgresObjectContent):
+        raise ContentUnavailable("PostgreSQL object content requires an exact object locator")
     if ciphertext is None:
         raise ContentUnavailable("content ciphertext is unavailable")
     if len(ciphertext) < 16:
@@ -327,7 +329,7 @@ class _ContentReadFrame:
         cipher: ContentCipher,
         provider_id: str,
         validate_each_read: bool,
-        object_content: _SQLiteObjectContent | None = None,
+        object_content: _ObjectContent[_ContentJournal] | None = None,
     ) -> None:
         self.tenant_id = _text(tenant_id, "tenant_id")
         self.session_id = _text(session_id, "session_id")
@@ -635,10 +637,12 @@ class CoreSQLContentStore:
         self._object_locator_cleaner = object_locator_cleaner
         self._write_memo: _ContentWriteMemo | None = None
         self._transaction_active: Callable[[], None] | None = None
-        self._object_content: _SQLiteObjectContent | None = None
+        self._object_content: _ObjectContent[_ContentJournal] | None = None
         self._check_object_write: Callable[[], None] | None = None
 
-    def _bind_object_content(self, binding: _SQLiteObjectContent, *, check_write: Callable[[], None] | None = None) -> None:
+    def _bind_object_content(
+        self, binding: _ObjectContent[_ContentJournal], *, check_write: Callable[[], None] | None = None
+    ) -> None:
         self._object_content = binding
         self._check_object_write = check_write
 
@@ -754,9 +758,11 @@ class CoreSQLContentStore:
 
     def _check_external_key_write(self, key: SessionKeyRecord) -> None:
         if not key.key_id.startswith(_EXACT_KEY_ID_PREFIX):
+            if isinstance(self._object_content, _PostgresObjectContent):
+                raise KeyUnavailable("PostgreSQL object content requires an exact object key")
             return
         if self._object_content is None or self._check_object_write is None:
-            raise KeyUnavailable("external content requires its bound SQLite runtime")
+            raise KeyUnavailable("external content requires its bound object runtime")
         self._check_object_write()
         self._object_content._key(key.tenant_id, key.session_id, key.key_id)
         self._check_object_write()
@@ -808,7 +814,7 @@ class CoreSQLContentStore:
             wrapped = self._key_provider.generate_data_key(tenant_id, session_id)
         else:
             if self._check_object_write is None:
-                raise KeyUnavailable("external content requires a verified SQLite write transaction")
+                raise KeyUnavailable("external content requires a verified object write transaction")
             wrapped = self._object_content.allocate(
                 self._key_provider, tenant_id, session_id, check_fence=self._check_object_write
             )
@@ -1089,7 +1095,7 @@ class CoreSQLContentStore:
         locator = None
         if wrapped.key_id.startswith(_EXACT_KEY_ID_PREFIX):
             if self._object_content is None or self._check_object_write is None:
-                raise KeyUnavailable("external content requires its bound SQLite runtime")
+                raise KeyUnavailable("external content requires its bound object runtime")
             locator = self._object_content.put(
                 tenant_id,
                 session_id,

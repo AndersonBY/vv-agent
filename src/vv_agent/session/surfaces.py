@@ -41,7 +41,7 @@ from vv_agent.kernel._content_publication import (
     link_declared_input_content,
     publish_session_created_content,
 )
-from vv_agent.kernel._content_runtime import _verify_content_binding
+from vv_agent.kernel._content_runtime import _uses_postgres_objects, _verify_content_binding
 from vv_agent.kernel._driver_inputs import _pending_batch_in_state, _steer_held_in_state
 from vv_agent.kernel._postgres import PostgresStore as CorePostgresStore
 from vv_agent.kernel._postgres import _bind_tenant_context
@@ -75,6 +75,7 @@ from ._driver_scope import _sqlite_lock_error
 from .children import child_delivery, child_handles
 from .content_runtime import (
     INPUT_CONTENT,
+    ContentRuntimeUnavailable,
     SessionContentWriter,
     _ContentSessionStoreAdapter,
     bind_content_key_provider,
@@ -810,6 +811,8 @@ class SessionDriver:
 
     @contextmanager
     def _open_drive_store(self):
+        if _uses_postgres_objects(self.store):
+            raise ContentRuntimeUnavailable("worker execution is unavailable for PostgreSQL object sessions")
         manager = self.open_store() if self.open_store is not None else self._open_default_drive_store()
         with manager as store:
             if getattr(store, "tenant_id", None) != self.tenant_id:
@@ -2521,7 +2524,7 @@ class SessionDriver:
         if bootstrap is not None and bootstrap.level == 1:
             # L1 static capabilities bind the worker; only L2/L3 requirements are durable bootstrap.
             bootstrap = None
-        with self.store.atomic() as tx:
+        with self._root_publication_atomic() as tx:
             writer = SessionContentWriter.bind(tx, tenant_id=self.tenant_id, session_id=sid)
 
             def session_spec(content: SessionContentWriter) -> SessionSpec:
@@ -2621,6 +2624,8 @@ class SessionDriver:
         actor: PrincipalInput | None = None,
         actor_subject_id: str = "local",
     ) -> RunHandle:
+        if _uses_postgres_objects(self.store):
+            raise ContentRuntimeUnavailable("worker execution is unavailable for PostgreSQL object sessions")
         if self._closed:
             raise RuntimeError("SessionDriver is closed")
         state, source_records, inbox_seq = self.store.read_state(sid)
@@ -2783,6 +2788,8 @@ class SessionDriver:
     ) -> None:
         """Bind one initial input under the session's existing SQL admission lock."""
 
+        if _uses_postgres_objects(self.store):
+            raise ContentRuntimeUnavailable("worker execution is unavailable for PostgreSQL object sessions")
         armed = replace(registration, armed=True)
         with self.store.atomic() as tx:
             ceiling = cast(Any, self.store)._write_ceiling()
@@ -2920,6 +2927,11 @@ class SessionDriver:
             # apply records the stable rejection without changing the selection.
             return SessionRequirements(level=2, handler_version=handler_version, capabilities=())
 
+    def _root_publication_atomic(self):
+        if isinstance(self.store, _ContentSessionStoreAdapter):
+            return self.store._root_publication_atomic(SystemClock())
+        return self.store.atomic()
+
     def push(
         self,
         sid: str,
@@ -2928,7 +2940,18 @@ class SessionDriver:
         actor: PrincipalInput | None = None,
         actor_subject_id: str = "local",
     ):
-        with self.store.atomic() as tx:
+        pg_objects = _uses_postgres_objects(self.store)
+        if pg_objects and (
+            item.kind not in {"user", "follow_up"} or item.target_turn_id is not None or item.generation is not None
+        ):
+            raise ContentRuntimeUnavailable("PostgreSQL object sessions support root user input only")
+        with self._root_publication_atomic() as tx:
+            if pg_objects:
+                tx.lock_session(sid)
+                if cast(Any, self.store)._one(
+                    "SELECT parent_session_id FROM sk_session WHERE tenant_id=%s AND session_id=%s", (self.tenant_id, sid)
+                ) != (None,):
+                    raise ContentRuntimeUnavailable("child input is unavailable for PostgreSQL object sessions")
             receipt = self._push_in_transaction(
                 tx,
                 sid,
@@ -2938,8 +2961,9 @@ class SessionDriver:
             )
         if receipt.replayed:
             return receipt
-        self._worker.wake(sid)
-        self._notify_session(sid)
+        if not pg_objects:
+            self._worker.wake(sid)
+            self._notify_session(sid)
         return receipt
 
     def _push_in_transaction(
@@ -3022,6 +3046,8 @@ class SessionDriver:
         runtime: Runtime | None = None,
         actor: PrincipalInput | None = None,
     ):
+        if _uses_postgres_objects(self.store):
+            raise ContentRuntimeUnavailable("worker controls are unavailable for PostgreSQL object sessions")
         state, _, _ = self.store.read_state(sid)
         tid = None if action in {"archive", "close"} else state.active_turn_id
         registration = self._runtimes.get(sid) or self._registration_for_cursor(sid)
@@ -3215,6 +3241,8 @@ class SessionDriver:
         *,
         actor: PrincipalInput | None = None,
     ):
+        if _uses_postgres_objects(self.store):
+            raise ContentRuntimeUnavailable("interaction replies are unavailable for PostgreSQL object sessions")
         from vv_agent.interaction import InteractionAnswer, InteractionReplyTarget
 
         from .interactions import InteractionError, reply_content, validate_reply
@@ -3276,6 +3304,8 @@ class SessionDriver:
         *,
         actor: PrincipalInput | None = None,
     ):
+        if _uses_postgres_objects(self.store):
+            raise ContentRuntimeUnavailable("approval replies are unavailable for PostgreSQL object sessions")
         if isinstance(decision, str):
             decision = ApprovalDecision.from_input(decision)
         previous = self._retained_reply(sid, input_id)

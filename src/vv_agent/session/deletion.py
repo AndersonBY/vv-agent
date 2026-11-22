@@ -16,6 +16,7 @@ from typing import Any
 from vv_agent.kernel._content import ContentCleanupUnavailable, ForgetTombstone, Principal, TombstoneState
 from vv_agent.kernel._content_runtime import ContentRuntimeBinding, _verify_content_binding, content_runtime_binding_for
 from vv_agent.kernel._content_sql import CoreSQLContentStore
+from vv_agent.kernel._external_content import _SQLiteObjectContent
 from vv_agent.kernel._sql import _STORED_INBOX_COLUMNS, LedgerIntegrityError, LedgerSigner, SessionNotLive, SQLStore
 from vv_agent.kernel._sqlite import SQLiteStore
 from vv_agent.kernel._store import (
@@ -336,7 +337,7 @@ class SessionDeletionStore:
     ) -> None:
         params = (scoped.tenant_id, session_id)
         objects = binding._object_content
-        if objects is None:
+        if not isinstance(objects, _SQLiteObjectContent):
             raise ContentCleanupUnavailable("external erasure requires its configured binding")
         for finish_journal in (False, True):
             with scoped.atomic() as tx:
