@@ -178,6 +178,21 @@ def test_authorizer_rejects_before_dispatch() -> None:
     assert server.calls == ["GET"]
 
 
+def test_authorizer_timeout_cancels_before_dispatch_and_keeps_worker() -> None:
+    error = TimeoutError("authorization budget expired")
+
+    def expire() -> int:
+        raise error
+
+    with _Server("normal") as server, _transport(server) as transport:
+        with pytest.raises(TimeoutError) as raised:
+            transport.execute(_put(), deadline_ns=_deadline(), authorize=expire)
+        assert raised.value is error
+        assert server.calls == []
+        assert transport.execute(_get(), deadline_ns=_deadline()).body == _PAYLOAD
+    assert server.calls == ["GET"]
+
+
 def test_authorizer_can_tighten_deadline_before_dispatch() -> None:
     with _Server("trickle-put") as server, _transport(server) as transport, pytest.raises(_S3TransportTimeout) as raised:
         transport.execute(_put(), deadline_ns=_deadline(), authorize=monotonic_ns)

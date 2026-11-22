@@ -333,16 +333,17 @@ class _S3ProcessTransport:
             try:
                 if authorize is not None:
                     deadline_ns = min(deadline_ns, authorize())
-                _remaining(deadline_ns)
-            except TimeoutError:
-                self._invalidate()
-                raise _S3TransportTimeout(may_have_dispatched=False) from None
             except BaseException:
                 try:
                     _send(channel, b"C", deadline_ns)
                 except OSError:
                     self._invalidate()
                 raise
+            try:
+                _remaining(deadline_ns)
+            except TimeoutError:
+                self._invalidate()
+                raise _S3TransportTimeout(may_have_dispatched=False) from None
             try:
                 # The worker cannot dispatch before receiving the complete grant.
                 may_have_dispatched = True
