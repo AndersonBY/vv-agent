@@ -9,7 +9,15 @@ from contextlib import contextmanager
 from dataclasses import astuple, dataclass, replace
 from typing import TYPE_CHECKING, Any, Literal, LiteralString
 
-from ._allocation_journal import Allocation, AllocationOwner, JournalIdentity, KeyIntent, _require_id, _require_text
+from ._allocation_journal import (
+    Allocation,
+    AllocationOwner,
+    JournalIdentity,
+    KeyIntent,
+    _JournalTemporarilyUnavailable,
+    _require_id,
+    _require_text,
+)
 from ._content import (
     _EXACT_KEY_ID_PREFIX,
     ContentCleanupUnavailable,
@@ -371,6 +379,8 @@ class PostgresAllocationJournal:
     def _transaction(self) -> Iterator[Connection[Any]]:
         import psycopg
 
+        connection = None
+        body_completed = False
         try:
             with psycopg.connect(self._conninfo, autocommit=True, connect_timeout=3) as connection, connection.transaction():
                 connection.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
@@ -400,8 +410,18 @@ class PostgresAllocationJournal:
                 ) != [(_VERSION, *astuple(self._identity), definition[0][0] if definition else None)]:
                     raise ContentUnavailable("allocation journal identity or policy does not match")
                 yield connection
+                body_completed = True
         except psycopg.Error as exc:
-            raise ContentUnavailable(f"allocation journal is unavailable ({exc.sqlstate})") from None
+            state = exc.sqlstate
+            # A failed COMMIT can have an unknown outcome. A generic query
+            # cancellation (57014) also does not identify a lock timeout.
+            if not body_completed and (
+                state in {"08003", "08006", "40001", "40P01", "53300", "55P03", "57P01", "57P02", "57P03"}
+                or isinstance(exc, psycopg.errors.ConnectionTimeout)
+                or (connection is not None and connection.broken and state is None and isinstance(exc, psycopg.OperationalError))
+            ):
+                raise _JournalTemporarilyUnavailable(f"allocation journal is temporarily unavailable ({state})") from None
+            raise ContentUnavailable(f"allocation journal is unavailable ({state})") from None
 
     def _allocations(self, rows: list[tuple[Any, ...]]) -> tuple[Allocation, ...]:
         return tuple(

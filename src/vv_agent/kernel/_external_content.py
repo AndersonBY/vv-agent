@@ -3,12 +3,20 @@
 from __future__ import annotations
 
 import secrets
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from hashlib import sha256
 from typing import TYPE_CHECKING, Protocol, cast
 
-from ._allocation_journal import Allocation, AllocationOwner, JournalIdentity, KeyIntent, SQLiteAllocationJournal
+from ._allocation_journal import (
+    Allocation,
+    AllocationOwner,
+    JournalIdentity,
+    KeyIntent,
+    SQLiteAllocationJournal,
+    _JournalTemporarilyUnavailable,
+)
 from ._canonical_json import canonical_json_bytes
 from ._content import (
     _EXACT_KEY_ID_PREFIX,
@@ -28,6 +36,14 @@ if TYPE_CHECKING:
 
 _AES_GCM_TAG_BYTES = 16
 _ALLOCATION_PIN_MS = 5_000
+
+
+@contextmanager
+def _journal_key_access() -> Iterator[None]:
+    try:
+        yield
+    except _JournalTemporarilyUnavailable as exc:
+        raise KeyUnavailable("external content key journal is temporarily unavailable") from exc
 
 
 class _ObjectStore(Protocol):
@@ -83,7 +99,9 @@ class _ObjectContent[JournalT: _ContentJournal]:
         return sha256(binding).hexdigest()
 
     def verify_installation(self, database_id: str, provider: KeyProvider) -> str:
-        if self.journal.verify_identity().database_id != database_id:
+        with _journal_key_access():
+            identity = self.journal.verify_identity()
+        if identity.database_id != database_id:
             backend = "SQLite" if isinstance(self.journal, SQLiteAllocationJournal) else "PostgreSQL"
             raise ContentUnavailable(f"external content journal belongs to a different {backend} installation")
         if not self.objects._uses_journal(self.journal):
@@ -118,7 +136,8 @@ class _ObjectContent[JournalT: _ContentJournal]:
     def _key(self, tenant_id: str, session_id: str, key_id: str) -> KeyIntent:
         if not key_id.startswith(self._key_prefix()):
             raise ContentBindingMismatch("external content exact key does not match its storage binding")
-        key = self.journal.get_key_intent(self.provider_instance_id, key_id)
+        with _journal_key_access():
+            key = self.journal.get_key_intent(self.provider_instance_id, key_id)
         if key is None or key.state != "allocating":
             raise KeyUnavailable("external content exact key is unavailable")
         if (key.intent.tenant_id, key.intent.session_id) != (tenant_id, session_id):
@@ -131,7 +150,8 @@ class _ObjectContent[JournalT: _ContentJournal]:
         check_fence()
         if not callable(getattr(provider, "_allocate_exact_key", None)):
             raise KeyUnavailable("external content requires an exact key provider")
-        pending = self.journal.key_intents_for_admission(tenant_id, session_id, session_id, "session/create")
+        with _journal_key_access():
+            pending = self.journal.key_intents_for_admission(tenant_id, session_id, session_id, "session/create")
         if pending:
             raise KeyUnavailable("external content key intent requires reconciliation")
         intent = _ExactKeyIntent(
@@ -142,9 +162,13 @@ class _ObjectContent[JournalT: _ContentJournal]:
             session_id,
             "session/create",
         )
-        reservation = self.journal.reserve_key_intent(intent, pin_until_ms=self.pin())
+        pin_until_ms = self.pin()
+        with _journal_key_access():
+            reservation = self.journal.reserve_key_intent(intent, pin_until_ms=pin_until_ms)
         check_fence()
-        if reservation is None or self.journal.claim_key_allocation(reservation) is None:
+        with _journal_key_access():
+            claimed = None if reservation is None else self.journal.claim_key_allocation(reservation)
+        if claimed is None:
             raise KeyUnavailable("external content could not confirm key allocation authority")
         check_fence()
         wrapped = cast(_ExactAllocator, provider)._allocate_exact_key(intent)
@@ -154,7 +178,8 @@ class _ObjectContent[JournalT: _ContentJournal]:
         return wrapped
 
     def pin(self) -> int:
-        return self.journal._pin_until_ms(_ALLOCATION_PIN_MS)
+        with _journal_key_access():
+            return self.journal._pin_until_ms(_ALLOCATION_PIN_MS)
 
     def put(
         self,

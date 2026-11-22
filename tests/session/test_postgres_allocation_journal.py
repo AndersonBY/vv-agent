@@ -1,11 +1,12 @@
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import astuple, replace
 from secrets import token_hex
 from threading import Event
 
 import pytest
 
-from vv_agent.kernel._allocation_journal import AllocationOwner
+from vv_agent.kernel._allocation_journal import AllocationOwner, _JournalTemporarilyUnavailable
 from vv_agent.kernel._content import (
     ContentCleanupUnavailable,
     ContentUnavailable,
@@ -596,3 +597,28 @@ def test_obsolete_journal_revision_fails_closed(provisioned):
         PostgresAllocationJournal(logins[role], identity, role)
     with pytest.raises(ContentUnavailable, match="identity or policy"):
         journals[role].get_key_intent("provider", "unavailable")
+
+
+@pytest.mark.parametrize("phase", ["query", "commit", "cancel"])
+def test_postgres_journal_defers_only_known_precommit_errors(provisioned, monkeypatch, phase):
+    import psycopg
+
+    _, _, journals, _, _ = provisioned
+    journal = journals[JournalRole("scope", "tenant-a")]
+    original_transaction = psycopg.Connection.transaction
+
+    @contextmanager
+    def transaction(connection, *args, **kwargs):
+        with original_transaction(connection, *args, **kwargs):
+            yield
+            if phase == "commit":
+                raise psycopg.errors.ConnectionFailure("simulated lost commit response")
+
+    monkeypatch.setattr(psycopg.Connection, "transaction", transaction)
+    expected = _JournalTemporarilyUnavailable if phase == "query" else ContentUnavailable
+    with pytest.raises(expected) as error, journal._transaction() as connection:
+        assert isinstance(connection, psycopg.Connection)
+        if phase != "commit":
+            failure = psycopg.errors.LockNotAvailable if phase == "query" else psycopg.errors.QueryCanceled
+            raise failure("injected PostgreSQL operation error")
+    assert type(error.value) is expected

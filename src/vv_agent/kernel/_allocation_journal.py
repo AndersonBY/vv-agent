@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import secrets
@@ -170,6 +171,10 @@ def _check_owner_only(path: Path, *, directory: bool = False) -> None:
         raise ContentUnavailable("allocation journal requires owner-only storage")
 
 
+class _JournalTemporarilyUnavailable(ContentUnavailable):
+    """A journal operation failed before producing a reliable answer."""
+
+
 class SQLiteAllocationJournal:
     """Trusted internal journal. The caller supplies the primary fence and currentness proof."""
 
@@ -203,6 +208,7 @@ class SQLiteAllocationJournal:
 
     @contextmanager
     def _transaction(self, *, write: bool = False) -> Iterator[sqlite3.Connection]:
+        body_completed = False
         try:
             _check_owner_only(self._path.parent, directory=True)
             _check_owner_only(self._path)
@@ -222,7 +228,15 @@ class SQLiteAllocationJournal:
                     if rows != [astuple(self._identity)]:
                         raise ContentUnavailable("allocation journal identity does not match")
                     yield connection
-        except (OSError, sqlite3.Error) as exc:
+                    body_completed = True
+        except sqlite3.Error as exc:
+            error_code = getattr(exc, "sqlite_errorcode", 0) & 0xFF
+            if not body_completed and error_code in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
+                raise _JournalTemporarilyUnavailable("allocation journal is temporarily unavailable") from exc
+            raise ContentUnavailable("allocation journal is unavailable") from exc
+        except OSError as exc:
+            if not body_completed and exc.errno in {errno.EAGAIN, errno.EBUSY, errno.ETIMEDOUT}:
+                raise _JournalTemporarilyUnavailable("allocation journal is temporarily unavailable") from exc
             raise ContentUnavailable("allocation journal is unavailable") from exc
 
     def _allocation(self, row: tuple) -> Allocation:

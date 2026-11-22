@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from vv_agent.kernel._allocation_journal import AllocationOwner, SQLiteAllocationJournal
+from vv_agent.kernel._allocation_journal import AllocationOwner, SQLiteAllocationJournal, _JournalTemporarilyUnavailable
 from vv_agent.kernel._content import ContentCleanupUnavailable, ContentUnavailable
 
 _OWNER = AllocationOwner("tenant", "child", "content", "parent", "admission", "provider", "key")
@@ -171,3 +171,26 @@ def test_existing_only_open_rejects_missing_wrong_or_altered_sidecar(tmp_path: P
     corrupt.chmod(0o600)
     with pytest.raises(ContentUnavailable):
         SQLiteAllocationJournal(corrupt, identity)
+
+
+@pytest.mark.parametrize("commit_error", [False, True])
+def test_sidecar_only_defers_lock_failures_before_body_finishes(tmp_path, monkeypatch, commit_error):
+    path = tmp_path / "allocation.sqlite"
+    identity = SQLiteAllocationJournal.provision(path, database_id="primary", namespace="fixture")
+    journal = SQLiteAllocationJournal(path, identity)
+    connect = sqlite3.connect
+    error = sqlite3.OperationalError("simulated busy")
+    error.sqlite_errorcode = sqlite3.SQLITE_BUSY
+
+    class Connection(sqlite3.Connection):
+        def __exit__(self, exc_type, exc_value, traceback):
+            if commit_error and exc_type is None:
+                raise error
+            return super().__exit__(exc_type, exc_value, traceback)
+
+    monkeypatch.setattr(sqlite3, "connect", lambda *args, **kwargs: connect(*args, **kwargs, factory=Connection))
+    expected = ContentUnavailable if commit_error else _JournalTemporarilyUnavailable
+    with pytest.raises(expected) as failure, journal._transaction(write=True):
+        if not commit_error:
+            raise error
+    assert type(failure.value) is expected

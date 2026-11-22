@@ -14,7 +14,8 @@ from test_s1_postgres_rls import disposable_pg as disposable_pg
 from test_s1_postgres_rls import rls_database as rls_database
 
 from vv_agent import Agent, RunConfig
-from vv_agent.kernel._content import ContentRef, ContentUnavailable, KeyUnavailable
+from vv_agent.kernel._allocation_journal import _JournalTemporarilyUnavailable
+from vv_agent.kernel._content import ContentBindingMismatch, ContentRef, ContentUnavailable, KeyUnavailable
 from vv_agent.kernel._content_runtime import ContentRuntimeUnavailable, _provision_postgres_object_content, bind_content_runtime
 from vv_agent.kernel._content_sql import _read_ciphertext
 from vv_agent.kernel._external_content import _PostgresObjectContent
@@ -505,3 +506,111 @@ def test_postgres_sdk_worker_publishes_root_turn(object_publication, tmp_path, m
             assert consumed_seq is not None
             assert cold.read_input_content(session_id, input_id, ContentRef.from_dict(item.payload["content"])) == prompt
             assert project_result(cold.store, session_id, run_id).final_output == answer
+
+
+def test_postgres_object_worker_defers_journal_lock_timeout(object_publication, rls_database, tmp_path, monkeypatch):
+    import psycopg
+    from psycopg.conninfo import conninfo_to_dict, make_conninfo
+
+    owner, primary, journals, worker_dsn = object_publication
+    journal = journals[TENANT_A]
+    journal_db = conninfo_to_dict(journal._scope._conninfo)["dbname"]
+    cluster = rls_database.cluster
+    admin = make_conninfo(_dsn(rls_database, cluster.admin_role, cluster.admin_password), dbname=journal_db)
+    open_tenant = partial(PostgresStore.tenant_standalone, primary[TENANT_A], tenant_id=TENANT_A)
+    open_claim_store = partial(PostgresStore.worker_standalone, worker_dsn)
+    session_id, input_id = "worker-root", "first-input"
+    key_path = tmp_path / "keys.sqlite"
+    phase_calls = []
+    deferred = Event()
+    lookup_errors = []
+    defer = PostgresStore.defer_drive
+    lookup = journal.get_key_intent
+
+    def temporarily_block_key_lookup(*args):
+        if lookup_errors:
+            return lookup(*args)
+        with psycopg.connect(admin) as blocker:
+            blocker.execute("LOCK TABLE vv_allocation_journal.key_intent IN ACCESS EXCLUSIVE MODE")
+            try:
+                return lookup(*args)
+            except ContentUnavailable as exc:
+                lookup_errors.append(exc)
+                raise
+
+    def observe_deferral(store, lease, *, retry_after_ms):
+        result = defer(store, lease, retry_after_ms=max(1_500, retry_after_ms))
+        if lease.session_id == session_id:
+            deferred.set()
+        return result
+
+    def model_response(request):
+        phase_calls.append(request)
+        return LLMResponse("recovered")
+
+    monkeypatch.setattr(PostgresStore, "defer_drive", observe_deferral)
+    count_tokens("answer", "m")
+    agent = Agent("test", "Answer the user.", model="m")
+    config = RunConfig(model_provider=ScriptedModelProvider.from_callback("scripted", "m", model_response))
+    client = _SdkObjectClient(journal, session_id)
+
+    with closing(LocalKeyProvider(b"x" * 32, state_path=key_path)) as provider, open_tenant() as store:
+        objects = _PostgresObjectContent(
+            journal, S3CiphertextStore(client, bucket="fixture", journal=journal), provider._provision_exact_key_lifecycle()
+        )
+        _provision_postgres_object_content(owner, key_provider=provider, objects=objects)
+        store.configure_input_admission(allow_unsigned=True)
+        bind_content_runtime(store, key_provider=provider, cipher=AESGCMCipher(), _object_content=objects)
+        with closing(SessionDriver(store=store, open_claim_store=open_claim_store)) as driver:
+            driver.create(session_id, str(tmp_path))
+            driver.push(session_id, InboxItem(input_id, "user", {"content": "answer"}))
+            _, records, inbox_seq = store.read_state(session_id)
+            [pending] = store.peek_inbox(session_id)
+            key_intents = journal.key_intents_for_admission(TENANT_A, session_id, session_id, "session/create")
+            writes = len(client.calls)
+            monkeypatch.setattr(journal, "get_key_intent", temporarily_block_key_lookup)
+            handle = driver.start(session_id, agent, config, None)
+            assert deferred.wait(10)
+            assert len(lookup_errors) == 1
+            assert "55P03" in str(lookup_errors[0])
+            state, retained, watermark = store.read_state(session_id)
+            assert state.active_turn_id is None and retained == records and watermark == inbox_seq
+            assert store.peek_inbox(session_id) == (pending,)
+            assert phase_calls == []
+            assert len(client.calls) == writes
+            assert not handle.done()
+            assert journal.key_intents_for_admission(TENANT_A, session_id, session_id, "session/create") == key_intents
+            driver._wake_session(session_id)
+            assert handle.result(timeout=20).final_output == "recovered"
+            assert len(phase_calls) == 1
+            assert store.peek_inbox(session_id) == ()
+
+
+def test_object_key_access_preserves_terminal_failure_classification(monkeypatch):
+    from types import SimpleNamespace
+
+    calls = []
+
+    def lookup(*args):
+        calls.append(args)
+        if len(calls) == 1:
+            raise _JournalTemporarilyUnavailable("private diagnostic 55P03")
+        if len(calls) == 2:
+            raise ContentUnavailable("journal role is unavailable")
+        return None
+
+    journal = SimpleNamespace(get_key_intent=lookup)
+    objects = _PostgresObjectContent(journal, None, "provider")
+    # Test the exact key boundary independently of the installation digest.
+    monkeypatch.setattr(_PostgresObjectContent, "_key_prefix", lambda _self: "expected-")
+    with pytest.raises(ContentBindingMismatch):
+        objects._key("tenant", "session", "other-key")
+    assert not calls
+    with pytest.raises(KeyUnavailable) as transient:
+        objects._key("tenant", "session", "expected-key")
+    assert str(transient.value) == "external content key journal is temporarily unavailable"
+    with pytest.raises(ContentUnavailable, match="journal role is unavailable") as denied:
+        objects._key("tenant", "session", "expected-key")
+    assert type(denied.value) is ContentUnavailable
+    with pytest.raises(KeyUnavailable, match="exact key is unavailable"):
+        objects._key("tenant", "session", "expected-key")
