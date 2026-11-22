@@ -493,14 +493,50 @@ def test_process_kill_reuses_paid_receipt_and_atomic_admission(store, database, 
 
 
 def test_canonical_summary_fixture_matches_real_producers(monkeypatch):
+    import base64
     import json
+    from hashlib import sha256
     from pathlib import Path
+
+    from support.contract import fixture_root
 
     monkeypatch.syspath_prepend(str(Path(__file__).parents[2]))
     from scripts.host_summary_fixtures import produce
+    from vv_agent.kernel._canonical_json import canonical_json_bytes
 
-    fixture = Path(__file__).parents[1] / "fixtures/parity/host_summary_requests.json"
-    assert produce() == json.loads(fixture.read_text())
+    historical = json.loads((fixture_root() / "host_summary_requests.json").read_bytes())
+    current = produce()
+    assert historical["historical_contract_version"] == "39.0.0"
+    assert (historical["record_schema_version"], historical["inbox_schema_version"]) == (1, 3)
+    assert (current["record_schema_version"], current["inbox_schema_version"]) == ("S1", "S1")
+    for key in ("schema_version", "parent_replaced_for_child", "terminal_precedence", "batch_requests_coalesce"):
+        assert current[key] == historical[key]
+
+    for observed, baseline in zip(current["vectors"], historical["vectors"], strict=True):
+        for vector in (observed, baseline):
+            encoded = canonical_json_bytes(vector["wire"])
+            assert encoded == base64.b64decode(vector["bytes_base64"], validate=True)
+            assert sha256(encoded).hexdigest() == vector["sha256"]
+
+        legacy_wire = baseline["wire"]
+        legacy_plan = legacy_wire["summary_plan"]
+        legacy_payload = legacy_plan["payload"]
+        assert legacy_payload["request_digest"] == digest(legacy_payload["request"])
+        current_wire = observed["wire"]
+        # The producer verifies the S1 digest against the retained content reference.
+        s1_header = {"schema_version": "S1", "feature_level": 1}
+        assert current_wire == legacy_wire | {
+            "summary_plan": legacy_plan
+            | s1_header
+            | {
+                "payload": legacy_payload
+                | {
+                    "request_digest": current_wire["summary_plan"]["payload"]["request_digest"],
+                    "policy_decision": None,
+                }
+            },
+            "context_replacements": [record | s1_header for record in legacy_wire["context_replacements"]],
+        }
 
 
 @pytest.mark.parametrize("value", [False, None, "true", {}, 1])
