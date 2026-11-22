@@ -205,7 +205,7 @@ old-version session.
 
 ## Version notes
 
-### 0.36.0 — Unreleased
+### 0.40.0 — Unreleased
 
 **Store boundary**: P2 S1 changes the logical record and inbox envelopes from
 record schema 1 and inbox schema 3 to `schema_version: "S1"`. It changes the
@@ -219,6 +219,15 @@ fenced forget/purge, checkpoint and input-admission verification, and the
 fail-closed ledger verifier. The development `LocalKeyProvider` is not a
 production key service. Hash-only mode is structural consistency only; it does
 not prove authenticity, and no import or in-place migration is provided.
+
+### 0.36.0
+
+The P1 release moves the core and store implementations under
+`vv_agent.kernel`. It retains pre-S1 record schema 1, inbox schema 3, and
+the existing SQL layout. Contract 39 reports `invalid session schema` for
+closed-schema validation failures. Existing stores require no conversion.
+
+See the [0.36.0 release notes](https://github.com/AndersonBY/vv-agent/blob/v0.36.0/docs/releases/0.36.0.md).
 
 ### 0.35.4 — 2026-11-15
 
