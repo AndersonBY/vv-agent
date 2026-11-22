@@ -304,8 +304,11 @@ class _Driver(CoreDriver):
     def _park_logical_view(self) -> None:
         reader = self.content_reader
         fingerprints = getattr(reader, "fingerprints", None)
-        if isinstance(fingerprints, dict):
-            self._logical_frame_fingerprints.update(fingerprints)
+        if not isinstance(fingerprints, dict):
+            # A reader without a verification frame must rehydrate on the next step.
+            self._invalidate_logical_view()
+            return
+        self._logical_frame_fingerprints.update(fingerprints)
         if (
             self._active_logical_fold is not None
             and self._logical_projected_state is not None
