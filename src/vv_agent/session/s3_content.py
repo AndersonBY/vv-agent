@@ -40,10 +40,15 @@ class _ObjectJournal(Protocol):
     def get_owned(self, allocation_id: bytes, owner: AllocationOwner) -> Allocation | None: ...
 
 
-def _require_first_put(request: Any, **_: Any) -> None:
-    # S3 redirects may resend a request even with total_max_attempts=1.
+def _disable_region_redirect(request_dict: dict[str, Any], **_: Any) -> None:
+    # Botocore may perform region discovery before an attempted resend.
+    context = request_dict["context"]
+    context["s3_redirect"]["redirected"] = True
+
+
+def _require_first_request(request: Any, **_: Any) -> None:
     if request.context.get("retries", {}).get("attempt") != 1:
-        raise CiphertextTemporarilyUnavailable("external ciphertext PUT retry was blocked")
+        raise CiphertextTemporarilyUnavailable("external ciphertext request retry was blocked")
 
 
 def _status(reply: dict[str, Any]) -> int | None:
@@ -69,8 +74,9 @@ class S3CiphertextStore:
         retries = client.meta.config.retries
         if retries is None or retries.get("total_max_attempts") != 1:
             raise ValueError("S3 ciphertext client requires total_max_attempts=1")
+        client.meta.events.register_first("needs-retry.s3", _disable_region_redirect, unique_id="vv-agent-s1-fixed-region")
         client.meta.events.register_first(
-            "request-created.s3.PutObject", _require_first_put, unique_id="vv-agent-s1-first-put-only"
+            "request-created.s3", _require_first_request, unique_id="vv-agent-s1-first-request-only"
         )
         self._client = client
         self._bucket = bucket

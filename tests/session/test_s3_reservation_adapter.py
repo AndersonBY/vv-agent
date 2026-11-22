@@ -43,8 +43,11 @@ class _Client:
         self.events = self
         self.retries = {"total_max_attempts": 1}
 
-    def register_first(self, *_: Any, **kwargs: Any) -> None:
-        assert kwargs["unique_id"] == "vv-agent-s1-first-put-only"
+    def register_first(self, event: str, _handler: Any, *, unique_id: str) -> None:
+        assert (event, unique_id) in {
+            ("needs-retry.s3", "vv-agent-s1-fixed-region"),
+            ("request-created.s3", "vv-agent-s1-first-request-only"),
+        }
 
     def fence(self) -> None:
         if not self.fence_held:
@@ -235,28 +238,35 @@ def test_rejects_client_retry_policy_and_versioned_bucket(adapter) -> None:
         S3CiphertextStore(client, bucket="fixture", journal=journal)
 
 
-def test_botocore_sends_one_marker_even_after_region_redirect(adapter) -> None:
+@pytest.mark.parametrize("region_hint", [False, True])
+def test_botocore_does_not_discover_or_retry_after_region_redirect(adapter, region_hint: bool) -> None:
     boto3 = pytest.importorskip("boto3")
     config = pytest.importorskip("botocore.config")
     journal, _, _ = adapter
-    marker_keys: list[str] = []
+    requests: list[str] = []
 
     class RedirectServer(BaseHTTPRequestHandler):
-        def _reply(self, status: int, body: bytes) -> None:
+        def _reply(self, status: int, body: bytes, *, include_region: bool = False) -> None:
             self.send_response(status)
             self.send_header("Content-Type", "application/xml")
             self.send_header("Content-Length", str(len(body)))
-            self.send_header("x-amz-bucket-region", "us-west-2")
+            if include_region:
+                self.send_header("x-amz-bucket-region", "us-west-2")
             self.end_headers()
             self.wfile.write(body)
 
         def do_GET(self) -> None:
+            requests.append("GET")
             self._reply(200, b"<VersioningConfiguration/>")
 
+        def do_HEAD(self) -> None:
+            requests.append("HEAD")
+            self._reply(200, b"", include_region=True)
+
         def do_PUT(self) -> None:
-            marker_keys.append(self.path)
+            requests.append("PUT")
             self.rfile.read(int(self.headers["Content-Length"]))
-            self._reply(301, b"<Error><Code>PermanentRedirect</Code></Error>")
+            self._reply(301, b"<Error><Code>PermanentRedirect</Code></Error>", include_region=region_hint)
 
         def log_message(self, format: str, *args: Any) -> None:
             pass
@@ -287,4 +297,4 @@ def test_botocore_sends_one_marker_even_after_region_redirect(adapter) -> None:
         finally:
             server.shutdown()
             thread.join(timeout=2)
-    assert len(marker_keys) == 1
+    assert requests == ["GET", "PUT"]
