@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from contextlib import closing
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -12,7 +13,7 @@ from typing import Any
 import pytest
 
 from vv_agent.kernel import _allocation_journal
-from vv_agent.kernel._allocation_journal import AllocationOwner, SQLiteAllocationJournal
+from vv_agent.kernel._allocation_journal import Allocation, AllocationOwner, SQLiteAllocationJournal
 from vv_agent.kernel._content import ContentBindingMismatch, ContentCleanupUnavailable, ContentIntegrityError, ContentUnavailable
 from vv_agent.session.s3_content import CiphertextTemporarilyUnavailable, S3CiphertextStore
 
@@ -26,8 +27,9 @@ def _pin() -> int:
 
 
 class _Client:
-    def __init__(self, journal: SQLiteAllocationJournal) -> None:
-        self.journal = journal
+    def __init__(self, lookup: Callable[[bytes], Allocation | None], owner: AllocationOwner = _OWNER) -> None:
+        self.lookup = lookup
+        self.owner = owner
         self.calls: list[dict[str, Any]] = []
         self.objects: dict[str, bytes] = {}
         self.marker_etag = _MARKER_TAG
@@ -52,7 +54,7 @@ class _Client:
         self.fence()
         self.calls.append(request)
         key = request["Key"]
-        row = self.journal.get(bytes.fromhex(key.rsplit("/", maxsplit=1)[1]))
+        row = self.lookup(bytes.fromhex(key.rsplit("/", maxsplit=1)[1]))
         assert row is not None and request["ContentLength"] == len(request["Body"])
         if "IfNoneMatch" in request:
             assert request["IfNoneMatch"] == "*" and request.keys() == {"Bucket", "Key", "Body", "ContentLength", "IfNoneMatch"}
@@ -62,7 +64,7 @@ class _Client:
                 raise TimeoutError
             return {"ResponseMetadata": {"HTTPStatusCode": 200}, "ETag": self.marker_etag}
         assert request["IfMatch"] == _MARKER_TAG and row.reservation_etag == _MARKER_TAG
-        assert row.owner == _OWNER and row.state == "bound"
+        assert row.owner == self.owner and row.state == "bound"
         self.objects[key] = request["Body"]
         if self.fail == "ciphertext":
             raise TimeoutError
@@ -97,7 +99,7 @@ def adapter(tmp_path: Path) -> tuple[SQLiteAllocationJournal, _Client, S3Ciphert
     path = tmp_path / "allocation.sqlite"
     identity = SQLiteAllocationJournal.provision(path, database_id="database", namespace="fixture")
     journal = SQLiteAllocationJournal(path, identity)
-    client = _Client(journal)
+    client = _Client(journal.get)
     return journal, client, S3CiphertextStore(client, bucket="fixture", journal=journal)
 
 

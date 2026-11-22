@@ -34,6 +34,10 @@ from .test_s3_reservation_adapter import _Client
 
 
 class S3Fixture(_Client):
+    def __init__(self, journal: SQLiteAllocationJournal) -> None:
+        super().__init__(journal.get)
+        self.journal = journal
+
     def put_object(self, **request: Any) -> dict[str, Any]:
         if "IfMatch" not in request:
             return super().put_object(**request)

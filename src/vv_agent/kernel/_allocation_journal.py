@@ -15,6 +15,7 @@ from typing import Literal
 
 from ._content import (
     _EXACT_KEY_ID_PREFIX,
+    ContentBindingMismatch,
     ContentCleanupUnavailable,
     ContentUnavailable,
     KeyDestroyOutcome,
@@ -247,6 +248,22 @@ class SQLiteAllocationJournal:
         _require_id(allocation_id)
         with self._transaction() as connection:
             return self._get(connection, allocation_id)
+
+    @property
+    def identity(self) -> JournalIdentity:
+        return self._identity
+
+    def get_anonymous(self, allocation_id: bytes) -> Allocation | None:
+        row = self.get(allocation_id)
+        return row if row is not None and row.owner is None else None
+
+    def get_owned(self, allocation_id: bytes, owner: AllocationOwner) -> Allocation | None:
+        row = self.get(allocation_id)
+        if row is None or row.owner is None:
+            return None
+        if row.owner != owner:
+            raise ContentBindingMismatch("external ciphertext locator does not match its exact owner")
+        return row
 
     def reserve(self, allocation_id: bytes, *, pin_until_ms: int) -> bool:
         """Commit a newly generated random ID before dispatching its first PUT."""

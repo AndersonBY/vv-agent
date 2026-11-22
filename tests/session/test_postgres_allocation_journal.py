@@ -14,7 +14,10 @@ from vv_agent.kernel._content import (
     _ExactKeyIntent,
 )
 from vv_agent.kernel._postgres import CLOCK
-from vv_agent.kernel._postgres_allocation_journal import JournalRole, PostgresAllocationJournal
+from vv_agent.kernel._postgres_allocation_journal import JournalRole, PostgresAllocationJournal, PostgresObjectJournal
+from vv_agent.session.s3_content import CiphertextTemporarilyUnavailable, S3CiphertextStore
+
+from .test_s3_reservation_adapter import _CIPHERTEXT, _Client, _pin
 
 pytestmark = pytest.mark.postgres
 TABLE = "vv_allocation_journal.allocation"
@@ -35,6 +38,7 @@ def provisioned(database):
             ("anonymous", JournalRole("anonymous")),
             ("binder", JournalRole("binder")),
             ("binder_a", JournalRole("binder", "tenant-a")),
+            ("binder_b", JournalRole("binder", "tenant-b")),
             ("key_a", JournalRole("key-intent", "tenant-a")),
             ("key_b", JournalRole("key-intent", "tenant-b")),
             ("tenant_a", JournalRole("scope", "tenant-a")),
@@ -76,6 +80,70 @@ def _wait_for_row_lock(admin, query_pattern):
         admin.execute("SELECT pg_stat_clear_snapshot()")
         Event().wait(0.01)
     pytest.fail("journal operation did not wait for the row lock")
+
+
+@pytest.mark.parametrize("operation", ["reserve", "bind"])
+@pytest.mark.parametrize("matches", [True, False])
+def test_object_store_reconciles_lost_journal_commit_reply(provisioned, monkeypatch, operation, matches):
+    _, identity, journals, logins, _ = provisioned
+    anonymous = journals[JournalRole("anonymous")]
+    binder_a, scope_a = JournalRole("binder", "tenant-a"), JournalRole("scope", "tenant-a")
+    binder_b, scope_b = JournalRole("binder", "tenant-b"), JournalRole("scope", "tenant-b")
+    journal = PostgresObjectJournal(anonymous=anonymous, binder=journals[binder_a], scope=journals[scope_a])
+    foreign = PostgresObjectJournal(anonymous=anonymous, binder=journals[binder_b], scope=journals[scope_b])
+    with pytest.raises(ValueError, match="matching provisioned role"):
+        PostgresObjectJournal(anonymous=anonymous, binder=journals[binder_a], scope=journals[scope_b])
+    keys = journals[JournalRole("key-intent", "tenant-a")]
+    intent = _ExactKeyIntent("s1-exact-key-" + "a" * 64, "provider", "tenant-a", "child", "parent", "admission")
+    pin = _pin()
+    reserved = keys.reserve_key_intent(intent, pin_until_ms=pin)
+    assert reserved is not None and keys.claim_key_allocation(reserved) is not None
+    owner = replace(OWNER, key_id=intent.key_id)
+    client = _Client(lambda allocation_id: journal.get_anonymous(allocation_id) or journal.get_owned(allocation_id, owner), owner)
+    objects = S3CiphertextStore(client, bucket="fixture", journal=journal)
+    allocation_ids: list[bytes] = []
+    if operation == "reserve":
+        reserve = anonymous.reserve
+
+        def lost_reserve(allocation_id, *, pin_until_ms):
+            allocation_ids.append(allocation_id)
+            assert reserve(allocation_id, pin_until_ms=pin_until_ms if matches else pin_until_ms + 1)
+            raise ContentUnavailable("reservation reply lost after commit")
+
+        monkeypatch.setattr(anonymous, "reserve", lost_reserve)
+    else:
+        bind = journals[binder_a].bind
+
+        def lost_bind(allocation_id, owner, *, reservation_etag):
+            allocation_ids.append(allocation_id)
+            assert bind(allocation_id, owner, reservation_etag=reservation_etag if matches else '"wrong-etag"')
+            raise ContentUnavailable("binding reply lost after commit")
+
+        monkeypatch.setattr(journals[binder_a], "bind", lost_bind)
+
+    if not matches:
+        with pytest.raises(CiphertextTemporarilyUnavailable):
+            objects.put(owner, _CIPHERTEXT, pin_until_ms=pin, check_fence=client.fence)
+        assert len(client.calls) == (0 if operation == "reserve" else 1)
+        return
+
+    locator = objects.put(owner, _CIPHERTEXT, pin_until_ms=pin, check_fence=client.fence)
+    assert allocation_ids == [locator[1:]]
+    assert len(client.calls) == 2
+    reopened = PostgresObjectJournal(
+        anonymous=anonymous,
+        binder=journals[binder_a],
+        scope=PostgresAllocationJournal(logins[scope_a], identity, scope_a),
+    )
+    row = reopened.get_owned(locator[1:], owner)
+    assert row is not None and row.owner == owner and row.state == "bound"
+    assert reopened.get_owned(locator[1:], replace(owner, admission_id="different")) is None
+    assert reopened.get_anonymous(locator[1:]) is None
+    assert foreign.get_owned(locator[1:], replace(owner, tenant_id="tenant-b")) is None
+    assert foreign.get_anonymous(locator[1:]) is None
+    denied = S3CiphertextStore(client, bucket="fixture", journal=foreign)
+    with pytest.raises(ContentUnavailable):
+        denied.get(replace(owner, tenant_id="tenant-b"), locator, ciphertext_size=len(_CIPHERTEXT))
 
 
 def test_bound_row_survives_primary_rollback_and_requires_exact_claim(provisioned, postgres_admin_dsn):

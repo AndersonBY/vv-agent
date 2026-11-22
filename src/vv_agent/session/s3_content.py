@@ -7,9 +7,9 @@ import secrets
 import time
 from collections.abc import Callable
 from hashlib import sha256
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
-from vv_agent.kernel._allocation_journal import Allocation, AllocationOwner, SQLiteAllocationJournal
+from vv_agent.kernel._allocation_journal import Allocation, AllocationOwner, JournalIdentity
 from vv_agent.kernel._content import (
     ContentBindingMismatch,
     ContentCleanupUnavailable,
@@ -25,6 +25,19 @@ _STRONG_ETAG = re.compile(r'"[\x21\x23-\x2b\x2d-\x7e]+"')
 
 class CiphertextTemporarilyUnavailable(KeyUnavailable):
     """Object I/O shares the retry gate for unavailable content dependencies."""
+
+
+class _ObjectJournal(Protocol):
+    @property
+    def identity(self) -> JournalIdentity: ...
+
+    def reserve(self, allocation_id: bytes, *, pin_until_ms: int) -> bool: ...
+
+    def bind(self, allocation_id: bytes, owner: AllocationOwner, *, reservation_etag: str) -> bool: ...
+
+    def get_anonymous(self, allocation_id: bytes) -> Allocation | None: ...
+
+    def get_owned(self, allocation_id: bytes, owner: AllocationOwner) -> Allocation | None: ...
 
 
 def _require_first_put(request: Any, **_: Any) -> None:
@@ -50,7 +63,7 @@ class S3CiphertextStore:
     Socket timeouts alone do not enforce that budget while a request is running.
     """
 
-    def __init__(self, client: Any, *, bucket: str, journal: SQLiteAllocationJournal) -> None:
+    def __init__(self, client: Any, *, bucket: str, journal: _ObjectJournal) -> None:
         if not bucket:
             raise ValueError("S3 ciphertext bucket is required")
         retries = client.meta.config.retries
@@ -61,7 +74,7 @@ class S3CiphertextStore:
         )
         self._client = client
         self._bucket = bucket
-        namespace = sha256(journal._identity.namespace.encode()).hexdigest()
+        namespace = sha256(journal.identity.namespace.encode()).hexdigest()
         self._prefix = f"vv-agent-s1/{namespace}/alloc/"
         self._journal = journal
         self._require_unversioned()
@@ -82,9 +95,11 @@ class S3CiphertextStore:
     def _key(self, allocation_id: bytes) -> str:
         return self._prefix + allocation_id.hex()
 
-    def _lookup(self, allocation_id: bytes) -> Allocation | None:
+    def _lookup(self, allocation_id: bytes, *, owner: AllocationOwner | None = None) -> Allocation | None:
         try:
-            return self._journal.get(allocation_id)
+            if owner is None:
+                return self._journal.get_anonymous(allocation_id)
+            return self._journal.get_owned(allocation_id, owner)
         except ContentUnavailable:
             raise CiphertextTemporarilyUnavailable("external ciphertext journal is unavailable") from None
 
@@ -109,7 +124,7 @@ class S3CiphertextStore:
             check_fence()
             _require_live_pin(pin_until_ms)
             reserved = self._lookup(allocation_id) == Allocation(
-                self._journal._identity.journal_id, allocation_id, "unbound", pin_until_ms
+                self._journal.identity.journal_id, allocation_id, "unbound", pin_until_ms
             )
         if not reserved:
             raise CiphertextTemporarilyUnavailable("external ciphertext reservation is unavailable")
@@ -138,9 +153,12 @@ class S3CiphertextStore:
         except ContentUnavailable:
             check_fence()
             _require_live_pin(pin_until_ms)
-            bound = self._lookup(allocation_id) == Allocation(
-                self._journal._identity.journal_id, allocation_id, "bound", pin_until_ms, owner, etag
-            )
+            try:
+                bound = self._lookup(allocation_id, owner=owner) == Allocation(
+                    self._journal.identity.journal_id, allocation_id, "bound", pin_until_ms, owner, etag
+                )
+            except ContentBindingMismatch:
+                bound = False
         if not bound:
             raise CiphertextTemporarilyUnavailable("external ciphertext binding is unavailable")
 
@@ -163,7 +181,7 @@ class S3CiphertextStore:
         if not isinstance(locator, bytes) or len(locator) != 33 or not locator.startswith(_LOCATOR_VERSION):
             raise ContentBindingMismatch("external ciphertext locator is invalid")
         allocation_id = locator[1:]
-        current = self._lookup(allocation_id)
+        current = self._lookup(allocation_id, owner=owner)
         if current is None or current.state != "bound":
             raise ContentUnavailable("external ciphertext allocation is unavailable")
         if current.owner != owner:
@@ -199,8 +217,8 @@ class S3CiphertextStore:
         """
         check_fence()
         try:
-            current = self._journal.get(claim.allocation_id)
-        except (ContentUnavailable, ValueError):
+            current = self._lookup(claim.allocation_id, owner=claim.owner)
+        except (ContentBindingMismatch, CiphertextTemporarilyUnavailable, ValueError):
             raise ContentCleanupUnavailable("external ciphertext journal claim is unavailable") from None
         if claim.state != "reaping" or current != claim:
             raise ContentCleanupUnavailable("external ciphertext deletion requires an exact cleanup claim")

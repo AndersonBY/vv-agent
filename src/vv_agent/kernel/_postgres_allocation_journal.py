@@ -382,6 +382,17 @@ class PostgresAllocationJournal:
         with self._transaction() as connection:
             return self._get(connection, allocation_id)
 
+    def _get_owned(self, allocation_id: bytes, owner: AllocationOwner) -> Allocation | None:
+        _require_id(allocation_id)
+        owner_match = " AND ".join(f"{column}=%s" for column in _OWNER.split(","))
+        with self._transaction() as connection:
+            rows = _query_rows(
+                connection,
+                f"SELECT {_COLUMNS} FROM {_TABLE} WHERE allocation_id=%s AND {owner_match}",
+                (allocation_id, *astuple(owner)),
+            )
+            return self._allocations(rows)[0] if rows else None
+
     def reserve(self, allocation_id: bytes, *, pin_until_ms: int) -> bool:
         _require_id(allocation_id)
         if type(pin_until_ms) is not int or not 0 < pin_until_ms < 2**63:
@@ -645,3 +656,49 @@ class PostgresAllocationJournal:
                 ).rowcount
                 == 1
             )
+
+
+class PostgresObjectJournal:
+    """Compose the provisioned object roles for one authenticated tenant."""
+
+    def __init__(
+        self,
+        *,
+        anonymous: PostgresAllocationJournal,
+        binder: PostgresAllocationJournal,
+        scope: PostgresAllocationJournal,
+    ) -> None:
+        tenant_id = scope._role.tenant_id
+        if (
+            tenant_id is None
+            or scope._role != JournalRole("scope", tenant_id)
+            or binder._role != JournalRole("binder", tenant_id)
+            or anonymous._role != JournalRole("anonymous")
+            or not (scope._identity == binder._identity == anonymous._identity)
+        ):
+            raise ValueError("object journal requires matching provisioned role bindings")
+        self._tenant_id = tenant_id
+        self._anonymous = anonymous
+        self._binder = binder
+        self._scope = scope
+
+    @property
+    def identity(self) -> JournalIdentity:
+        return self._scope._identity
+
+    def reserve(self, allocation_id: bytes, *, pin_until_ms: int) -> bool:
+        return self._anonymous.reserve(allocation_id, pin_until_ms=pin_until_ms)
+
+    def bind(self, allocation_id: bytes, owner: AllocationOwner, *, reservation_etag: str) -> bool:
+        if owner.tenant_id != self._tenant_id or not owner.key_id.startswith(_EXACT_KEY_ID_PREFIX):
+            return False
+        return self._binder.bind(allocation_id, owner, reservation_etag=reservation_etag)
+
+    def get_anonymous(self, allocation_id: bytes) -> Allocation | None:
+        row = self._anonymous.get(allocation_id)
+        return row if row is not None and row.owner is None else None
+
+    def get_owned(self, allocation_id: bytes, owner: AllocationOwner) -> Allocation | None:
+        if owner.tenant_id != self._tenant_id:
+            return None
+        return self._scope._get_owned(allocation_id, owner)
