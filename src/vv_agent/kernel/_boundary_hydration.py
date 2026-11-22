@@ -6,9 +6,9 @@ import hashlib
 import hmac
 import json
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from ._canonical_json import canonical_json_bytes, validate_sha256
 from ._content import (
@@ -267,6 +267,21 @@ class HydratedFoldResult:
     hydrated_records: tuple[StoredRecord, ...]
 
 
+class _ContentFrameOpener(Protocol):
+    def __call__(
+        self,
+        *,
+        record_seqs: Iterable[int] = (),
+        input_ids: Iterable[str] = (),
+        validate_each_read: bool = True,
+    ) -> AbstractContextManager[ContentReader]: ...
+
+
+def _content_frame_opener(reader: ContentReader) -> _ContentFrameOpener | None:
+    opener = getattr(reader, "_read_frame", None)
+    return cast(_ContentFrameOpener, opener) if callable(opener) else None
+
+
 class _ScopedContentFrameReader:
     """Reuse one snapshot while preserving the original safe path on a frame miss."""
 
@@ -397,7 +412,7 @@ class _ScopedContentFrameReader:
         record_seqs: Iterable[int] = (),
         input_ids: Iterable[str] = (),
         validate_each_read: bool = True,
-    ) -> Iterator[_ScopedContentFrameReader]:
+    ) -> Iterator[ContentReader]:
         record_seq_values = tuple(record_seqs)
         input_id_values = tuple(input_ids)
         if self.covers(record_seqs=record_seq_values, input_ids=input_id_values):
@@ -563,9 +578,10 @@ def hydrate_session_input(
 ) -> InboxItem:
     """Hydrate one input while optionally resolving the actor identity proof."""
 
-    if hydration is None or not callable(getattr(hydration.reader, "_read_frame", None)):
+    opener = _content_frame_opener(hydration.reader) if hydration is not None else None
+    if hydration is None or opener is None:
         return _hydrate_session_input(item, hydration, include_actor_attributes=include_actor_attributes)
-    with hydration.reader._read_frame(input_ids=(item.input_id,)) as reader:
+    with opener(input_ids=(item.input_id,)) as reader:
         return _hydrate_session_input(
             item,
             replace(hydration, reader=reader),
@@ -739,7 +755,8 @@ def _hydrate_session_records_batch(
     if not sources:
         return ()
     shallow_ids = frozenset(shallow_nested_record_ids)
-    if hydration is None or not callable(getattr(hydration.reader, "_read_frame", None)):
+    opener = _content_frame_opener(hydration.reader) if hydration is not None else None
+    if hydration is None or opener is None:
         return tuple(
             hydrate_session_stored_record(
                 stored,
@@ -750,7 +767,7 @@ def _hydrate_session_records_batch(
             )
             for stored in sources
         )
-    with hydration.reader._read_frame(
+    with opener(
         record_seqs=(stored.seq for stored in sources),
         input_ids=(
             input_id for stored in sources if include_input and (input_id := _lookup_input_owner(stored.record)) is not None

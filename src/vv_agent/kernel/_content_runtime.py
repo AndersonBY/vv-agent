@@ -343,7 +343,7 @@ def durable_content_store(
         source = store._store if isinstance(store, _ContentSessionStoreAdapter) else store
         if not isinstance(source, (SQLiteStore, _TenantSQLStore)):
             raise ContentRuntimeUnavailable("SQLite tenant view must retain its concrete runtime binding")
-        durable: DurableContentStore = CoreSQLiteContentStore(
+        durable: CoreSQLContentStore = CoreSQLiteContentStore(
             source,
             selected.key_provider,
             selected.cipher,
@@ -463,7 +463,7 @@ class _ValidatedContentFrame:
 class _ValidatedDurableContentStore:
     """Keep direct durable link calls on the writer's owner/slot inventory."""
 
-    def __init__(self, durable: DurableContentStore) -> None:
+    def __init__(self, durable: CoreSQLContentStore) -> None:
         self._durable = durable
 
     def link_record(
@@ -568,7 +568,7 @@ class SessionContentWriter:
         if store_tenant is not None and store_tenant != tenant_id:
             raise ValueError("content writer tenant must match the transaction tenant")
 
-        durable: DurableContentStore
+        durable: CoreSQLContentStore
         if isinstance(tx.store, SQLiteStore):
             durable = CoreSQLiteContentStore(tx, binding.key_provider, binding.cipher)
         elif isinstance(tx.store, PostgresStore):
