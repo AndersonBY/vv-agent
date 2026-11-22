@@ -741,15 +741,10 @@ class SessionContentWriter:
         return ref
 
     def put_json(self, value: Any, *, labels: ContentLabels = _DEFAULT_LABELS) -> ContentRef:
-        return self.put_bytes(canonical_json_bytes(value), labels=labels)
-
-    def _put_creation_json(self, value: Any, *, labels: ContentLabels = _DEFAULT_LABELS) -> ContentRef:
-        self.tx._active()
-        if self._creation_json is None:
-            raise RuntimeError("creation JSON reuse requires a deferred PostgreSQL object writer")
         body = canonical_json_bytes(value)
         ref = self.put_bytes(body, labels=labels)
-        self._creation_json[ref] = body
+        if self._creation_json is not None:
+            self._creation_json[ref] = body
         return ref
 
     def get_bytes(self, ref: ContentRef | Mapping[str, Any]) -> bytes:

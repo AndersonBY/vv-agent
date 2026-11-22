@@ -20,6 +20,7 @@ from vv_agent.kernel._canonical_json import canonical_json_bytes
 from vv_agent.kernel._content import INPUT_ACTOR_ATTRIBUTES, SESSION_PRINCIPAL_ATTRIBUTES, ContentRef
 from vv_agent.kernel._content_publication import publish_session_created_content
 from vv_agent.kernel._content_runtime import SessionContentWriter as CoreSessionContentWriter
+from vv_agent.kernel._content_runtime import _uses_postgres_objects
 from vv_agent.kernel._provider_outcomes import ProviderResultInvalid
 from vv_agent.kernel._requirements import SessionRequirements, normalize_requirements
 from vv_agent.kernel._sql import UnsupportedFeatureLevel
@@ -344,8 +345,11 @@ class _KernelThreadStore:
                 capabilities=bootstrap.capabilities,
             )
         try:
-            with self.kernel.store.atomic() as tx:
+            with self.kernel._root_publication_atomic() as tx:
                 writer = SessionContentWriter.bind(tx, tenant_id=self.kernel.tenant_id, session_id=input_id)
+                if _uses_postgres_objects(self.kernel.store) and writer.tx.preflight_create(input_id):
+                    # A competing root committed before we took the publication lock.
+                    raise Conflict("thread already exists")
 
                 def session_spec(content: CoreSessionContentWriter) -> SessionSpec:
                     bound_principal = self.kernel._bound_principal(

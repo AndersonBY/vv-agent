@@ -157,7 +157,7 @@ class _ForkContentReader:
 def _object_fork_principal(principal, writer, original, logical, context_labels):
     if principal is None:
         payload = {"tenant_id": writer.tenant_id, "subject_id": "app-server", "subject_kind": "service"}
-        ref = writer._put_creation_json({"role": "app-server"}, labels=INTERNAL_LABELS)
+        ref = writer.put_json({"role": "app-server"}, labels=INTERNAL_LABELS)
         return payload | {"attributes": ref.to_dict()}
     payload = _principal_payload(principal)
     if payload["tenant_id"] != writer.tenant_id:
@@ -174,7 +174,7 @@ def _object_fork_principal(principal, writer, original, logical, context_labels)
         value["seed"]["messages"] = [
             writer.put_json(message, labels=context_labels).to_dict() for message in value["seed"]["messages"]
         ]
-    ref = writer._put_creation_json(value, labels=source_ref.labels if copied else ContentLabels())
+    ref = writer.put_json(value, labels=source_ref.labels if copied else ContentLabels())
     return payload | {"attributes": ref.to_dict()}
 
 
@@ -372,7 +372,7 @@ def fork_thread(kernel, host, params, principal: PrincipalInput | None = None):
                         spec,
                         principal=_object_fork_principal(principal, writer, source_principal, logical["principal"], labels),
                         workspace=workspace.to_dict(),
-                        attributes=writer._put_creation_json(attributes, labels=labels).to_dict(),
+                        attributes=writer.put_json(attributes, labels=labels).to_dict(),
                     )
                 source_content.assert_record(1, source_principal["attributes"], SESSION_PRINCIPAL_ATTRIBUTES)
                 source_content.assert_record(1, source_workspace, SESSION_WORKSPACE)
