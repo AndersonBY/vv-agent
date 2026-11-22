@@ -431,7 +431,6 @@
           "usage/active/c1c/max_cycles_preserves_last_assistant_output/turn/initial/1/3",
           "op/c1c/max_cycles_preserves_last_assistant_output/turn/initial/model/primary/1/1/result",
           "usage/active/c1c/max_cycles_preserves_last_assistant_output/turn/initial/1/4",
-          "usage/active/c1c/max_cycles_preserves_last_assistant_output/turn/initial/1/5",
           "turn/c1c/max_cycles_preserves_last_assistant_output/turn/initial/ended"
         ],
         "session_id": "c1c/max_cycles_preserves_last_assistant_output"

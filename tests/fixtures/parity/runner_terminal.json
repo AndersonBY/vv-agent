@@ -91,7 +91,7 @@
           "error": "agent_failed",
           "event_id": "sk/d4e1b413bdb97ef4d4c18e6d7f190abc794a6fc3c5e45c0700712235c8233f7d/event",
           "metadata": {
-            "session_seq": 6
+            "session_seq": 5
           },
           "partial_output": null,
           "run_id": "blocked/turn/initial",
@@ -126,7 +126,7 @@
           "error": "budget_exhausted",
           "event_id": "sk/e1112e970f5a0d33fd33dc7edebf45201dd15e1b56ff7f71dff0ac6ddb0d5457/event",
           "metadata": {
-            "session_seq": 16
+            "session_seq": 15
           },
           "partial_output": null,
           "run_id": "budget/turn/initial",
