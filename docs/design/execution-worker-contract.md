@@ -3,7 +3,7 @@
 Status: P1 design for W4 and W3 in P3; no worker or execution-environment implementation is delivered by this document.
 Authority: approved plan `vv-agent-trusted-distributed-harness-plan-2026-11-11.md` (2026-11-11 v3), sections 1.4, W1, W3, W4, W6a, W9 and 8.
 Baseline: `vv-agent` 0.35.0 at `d2d02c238cc8600d30aa9af87366ccba8fedba93`; `vv-agent-contract` 38.0.0 at `1f4e6ff891996f1199f02e6b65edb1305ec7d8ae`. That repository's `support-matrix.json` at revision `13dffcfd61aa4aba800b7466295f1a7ca8675176` verifies adoption at the Python baseline. Canonical semantics are in its `docs/session-kernel.md` and record/inbox fixtures. Rust remains frozen on contract 23 / 0.21.x; its lock is unchanged.
-The pre-S1 campaign uses Python `c7d3fbe` with canonical contract 39 at `ec154627` via `VV_AGENT_CONTRACT_SOURCE`. This worktree locks contract 38. The published S1 contract 41 at `65358c7` supplies the field allocations. Python adoption of 41 is pending.
+The pre-S1 campaign uses Python `c7d3fbe` with canonical contract 39 at `ec154627` via `VV_AGENT_CONTRACT_SOURCE`. That campaign checkout vendored contract 38. The P1 release branch pins the published Contract 39. The published S1 contract 41 at `65358c7` supplies the field allocations. Python adoption of 41 is pending.
 
 The existing Provider protocol remains the kernel's operation boundary. ExecutionEnvironment is the resource on which a provider performs commands and file operations. A worker owns one driving connection; the environment and its commands may outlive that worker. Durable admission, SQL fencing and provider evidence keep their current meanings. S1 storage and fields are defined in [trusted-storage-s1.md](trusted-storage-s1.md).
 

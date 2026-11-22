@@ -1,0 +1,89 @@
+{
+  "app_server_error": {
+    "code": -32603,
+    "message": "invalid session schema"
+  },
+  "canonical": {
+    "inbox_sha256": "af39690df1121774e037efa464fb09302ee16d282f474cd16012e6ddcccc0490",
+    "inbox_utf8": "{\"available_ms\":0,\"generation\":null,\"input_id\":\"i\",\"kind\":\"user\",\"payload\":{\"content\":\"go\"},\"schema_version\":3,\"target_turn_id\":null}",
+    "record_sha256": "ab2ed968bd89994659da4819eb42667b703bcdbe6435f19352142378365d97a7",
+    "record_utf8": "{\"attempt\":null,\"kind\":\"session_created\",\"operation_id\":null,\"payload\":{\"attributes\":{\"seed\":{\"response_rejection\":true,\"unseen_input_protection\":true}},\"parent_operation_id\":null,\"parent_session_id\":null,\"principal\":\"p\",\"workspace\":\"/fixture\"},\"record_id\":\"session/s/created\",\"schema_version\":1,\"session_id\":\"s\",\"turn_id\":null}"
+  },
+  "model_selection_reason": "model_selection_unresolvable",
+  "preserved_diagnostics": [
+    {
+      "case": "record_identity",
+      "error": {
+        "message": "record_id does not match semantic position",
+        "type": "RecordError"
+      }
+    },
+    {
+      "case": "embedded_digest",
+      "error": {
+        "message": "input digest mismatch",
+        "type": "RecordError"
+      }
+    },
+    {
+      "case": "duplicate_field",
+      "error": {
+        "message": "duplicate field: a",
+        "type": "RecordError"
+      }
+    },
+    {
+      "case": "nonobject",
+      "error": {
+        "message": "expected object",
+        "type": "RecordError"
+      }
+    },
+    {
+      "case": "malformed_json",
+      "error": {
+        "message": "Expecting property name enclosed in double quotes: line 1 column 2 (char 1)",
+        "type": "RecordError"
+      }
+    },
+    {
+      "case": "model_settings",
+      "error": {
+        "message": "named tool_choice requires a non-empty function name",
+        "type": "RecordError"
+      }
+    }
+  ],
+  "provider_reason": "provider_result_invalid",
+  "schema_diagnostics": [
+    {
+      "case": "record_version",
+      "error": {
+        "message": "invalid session schema",
+        "type": "RecordError"
+      }
+    },
+    {
+      "case": "record_payload",
+      "error": {
+        "message": "invalid session schema",
+        "type": "RecordError"
+      }
+    },
+    {
+      "case": "inbox_envelope",
+      "error": {
+        "message": "invalid session schema",
+        "type": "RecordError"
+      }
+    },
+    {
+      "case": "reserved_metadata",
+      "error": {
+        "message": "invalid session schema",
+        "type": "RecordError"
+      }
+    }
+  ],
+  "version": 1
+}
