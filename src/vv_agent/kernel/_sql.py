@@ -1302,6 +1302,7 @@ class SQLStore:
         *,
         through: int,
         record_rows: list[tuple[Any, ...]],
+        applied_inputs: dict[str, int],
     ) -> None:
         if len(record_rows) != len(chains):
             raise LedgerIntegrityError("ledger record count does not match the session head")
@@ -1314,8 +1315,8 @@ class SQLStore:
         # A commit body is still parsed only after its current SQL digest matches.
         consumed_inputs = self._rows(
             "SELECT input_id,consumed_seq FROM sk_inbox "
-            "WHERE tenant_id=%s AND session_id=%s AND consumed_seq IS NOT NULL ORDER BY input_id",
-            (self.tenant_id, session_id),
+            "WHERE tenant_id=%s AND session_id=%s AND consumed_seq IS NOT NULL AND consumed_seq<=%s ORDER BY input_id",
+            (self.tenant_id, session_id, through),
         )
         consumed_by_id: dict[str, Any] = {}
         for input_id, consumed_seq in consumed_inputs:
@@ -1384,6 +1385,12 @@ class SQLStore:
 
         if set(claimed) != set(range(1, len(chains) + 1)):
             raise LedgerIntegrityError("ledger sequence is not fully claimed by commits")
+        for input_id, applied_seq in applied_inputs.items():
+            if consumed_by_id.get(input_id) != applied_seq:
+                raise InputAdmissionProofError(f"stored input consumption does not match its proof at seq {applied_seq}")
+        for input_id, consumed_seq in consumed_by_id.items():
+            if input_id not in applied_inputs:
+                raise InputAdmissionProofError(f"stored input was consumed without an applied record at seq {consumed_seq}")
 
     def _verify_head_bounds(self, session_id: str) -> None:
         """Reject append-only rows that are not covered by the session head."""
@@ -1610,6 +1617,7 @@ class SQLStore:
         chains: list[str] = []
         stored_rows: list[tuple[Any, ...]] = []
         commit_record_rows: list[tuple[Any, ...]] = []
+        applied_inputs: dict[str, int] = {}
         cached = self._cached_prefix(session_id)
         cursor = 0
         while cursor < through:
@@ -1684,6 +1692,13 @@ class SQLStore:
                     attempt,
                 ):
                     raise LedgerIntegrityError(f"stored record SQL identity does not match its body at seq {seq}")
+                if kind == "input_applied":
+                    payload = value.get("payload") if record is None else record._payload
+                    item = payload.get("input") if isinstance(payload, dict) else None
+                    input_id = item.get("input_id") if isinstance(item, dict) else None
+                    if not isinstance(input_id, str) or input_id in applied_inputs:
+                        raise InputAdmissionProofError(f"applied input identity is invalid at seq {seq}")
+                    applied_inputs[input_id] = seq
                 try:
                     _natural(epoch, "record writer_epoch")
                     _natural(created_ms, "record created_ms")
@@ -1704,7 +1719,9 @@ class SQLStore:
         # append-only and committed with the session head, so bounded queries
         # validate that exact prefix without holding a transaction across hydration.
         self._verify_checkpoints(session_id, tuple(chains), through=through, verifier=verifier, signed=signed)
-        self._verify_commits(session_id, tuple(chains), through=through, record_rows=commit_record_rows)
+        self._verify_commits(
+            session_id, tuple(chains), through=through, record_rows=commit_record_rows, applied_inputs=applied_inputs
+        )
         self._verify_head_bounds(session_id)
         return stored_rows, tuple(chains)
 

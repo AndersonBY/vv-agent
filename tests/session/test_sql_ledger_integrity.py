@@ -71,6 +71,7 @@ def extend(previous: str, seq: int, record_digest: str) -> str:
 def test_chain_vector_uses_binary_length_framing_and_sequence(tmp_path):
     with SQLiteStore.standalone(str(tmp_path / "chain.sqlite")) as store:
         store.install_schema()
+        store.configure_input_admission(allow_unsigned=True)
         create(store)
         body, digest, chain = store._one("SELECT body,digest,chain_digest FROM sk_record WHERE seq=1")
         assert sha256(body).hexdigest() == digest
@@ -199,6 +200,7 @@ def test_recovery_rejects_sequence_gap_after_recomputed_digest(tmp_path):
     path = tmp_path / "gap.sqlite"
     with SQLiteStore.standalone(str(path)) as store:
         store.install_schema()
+        store.configure_input_admission(allow_unsigned=True)
         create(store)
         lease = store.acquire("s", owner="worker", ttl_ms=10_000)
         assert lease is not None
@@ -206,8 +208,10 @@ def test_recovery_rejects_sequence_gap_after_recomputed_digest(tmp_path):
             tx.append("s", lease=lease, expected_seq=1, commit_id="turn", records=(record("turn_started"),))
         store.connection.execute("DELETE FROM sk_record WHERE seq=2")
 
-    with SQLiteStore.standalone(str(path)) as reopened, pytest.raises(LedgerIntegrityError, match="sequence gap"):
-        reopened.read("s")
+    with SQLiteStore.standalone(str(path)) as reopened:
+        reopened.configure_input_admission(allow_unsigned=True)
+        with pytest.raises(LedgerIntegrityError, match="sequence gap"):
+            reopened.read("s")
 
 
 def test_checkpoint_signing_failure_rolls_back_append(tmp_path):
