@@ -112,3 +112,11 @@ class ExecutionState:
 def child_handles(handle: dict[str, Any]) -> list[dict[str, Any]]:
     base = {key: value for key, value in handle.items() if key != "siblings"}
     return [base, *(base | sibling for sibling in handle.get("siblings", []))]
+
+
+def queued_input_starts_turn(applied: Record) -> bool:
+    """Return whether a retained input-applied record can open a later turn."""
+    payload = applied._payload
+    kind = payload["input"]["kind"]
+    # Only compaction queues a user input against an already active turn.
+    return payload["disposition"] == "queued" and (kind == "follow_up" or (kind == "user" and applied.turn_id is None))

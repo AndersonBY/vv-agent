@@ -21,6 +21,7 @@ from vv_agent.kernel._child_store import (
     _store_tenant_id,
     ordinary_result_for_children,
 )
+from vv_agent.kernel._state import queued_input_starts_turn
 from vv_agent.model import ModelRef
 from vv_agent.model_settings import ModelSettings
 from vv_agent.prompt.builder import build_raw_system_prompt_bundle, build_system_prompt_bundle
@@ -522,9 +523,7 @@ class ChildTasks:
             value = replace(value, status=AgentStatus.RUNNING)
         if state.active_turn_id is None and (
             any(item.item.kind == "follow_up" and item.item.input_id not in state.admitted_inputs for item in pending)
-            or any(
-                r._payload["disposition"] == "queued" and i not in state.admitted_inputs for i, r in state.applied_inputs.items()
-            )
+            or any(i not in state.admitted_inputs and queued_input_starts_turn(r) for i, r in state.applied_inputs.items())
         ):
             value = replace(value, status=AgentStatus.RUNNING)
         attributes = _created_record(self.store, task_id).payload["attributes"]

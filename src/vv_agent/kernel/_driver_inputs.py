@@ -35,7 +35,7 @@ from ._requirements import (
     normalize_requirements,
 )
 from ._sql import stored_input_proof
-from ._state import Attempt
+from ._state import Attempt, queued_input_starts_turn
 from ._store import Conflict
 from ._summary_requests import compaction_request
 from ._token_count import _StopIterationTransport
@@ -721,8 +721,8 @@ def apply_input(self: CoreDriver, *, one_turn: bool) -> Generator[object, Any, b
             and logical_item.payload["action"] in {"cancel", "abort"}
             and tid is None
             and any(
-                r._payload["disposition"] == "queued"
-                and key not in self.state.admitted_inputs
+                key not in self.state.admitted_inputs
+                and queued_input_starts_turn(r)
                 and target_tid == (r._payload["input"]["target_turn_id"] or f"{self.sid}/turn/{key}")
                 for key, r in self.state.applied_inputs.items()
             )
@@ -1315,7 +1315,7 @@ def start_turn(self: CoreDriver) -> Generator[object, Any, bool]:
     inputs = sorted(self.state.applied_inputs.items(), key=lambda pair: pair[1]._payload["input"]["kind"] == "follow_up")
     attributes = self.session_attributes()
     for input_id, applied in inputs:
-        if applied._payload["disposition"] != "queued" or input_id in self.state.admitted_inputs:
+        if input_id in self.state.admitted_inputs or not queued_input_starts_turn(applied):
             continue
         item = applied._payload["input"]
         tid = item["target_turn_id"] or f"{self.sid}/turn/{input_id}"

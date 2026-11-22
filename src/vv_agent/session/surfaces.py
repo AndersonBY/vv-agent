@@ -67,6 +67,7 @@ from vv_agent.kernel._sql import (
     _TenantSQLStore,
 )
 from vv_agent.kernel._sqlite import SQLiteStore as CoreSQLiteStore
+from vv_agent.kernel._state import queued_input_starts_turn
 from vv_agent.kernel._store import DEFAULT_TENANT_ID, LeaseRetryExhausted, ObjectPublicationBusy
 from vv_agent.memory import MemoryManager
 from vv_agent.model import ModelError, resolve_model_selection, resolve_run_model
@@ -489,8 +490,7 @@ def _has_pending_drive_input(store: SessionStore, sid: str, state) -> bool:
     if _is_runnable_in_snapshot(store, sid) or store.peek_inbox(sid):
         return True
     return any(
-        record._payload["disposition"] == "queued" and key not in state.admitted_inputs
-        for key, record in state.applied_inputs.items()
+        key not in state.admitted_inputs and queued_input_starts_turn(record) for key, record in state.applied_inputs.items()
     )
 
 
@@ -2698,7 +2698,7 @@ class SessionDriver:
                 (
                     record._payload["input"]
                     for key, record in state.applied_inputs.items()
-                    if record._payload["disposition"] == "queued" and key not in state.admitted_inputs
+                    if key not in state.admitted_inputs and queued_input_starts_turn(record)
                 ),
                 None,
             )
@@ -2756,7 +2756,7 @@ class SessionDriver:
                 (
                     record._payload["input"]
                     for key, record in state.applied_inputs.items()
-                    if record._payload["disposition"] == "queued" and key not in state.admitted_inputs
+                    if key not in state.admitted_inputs and queued_input_starts_turn(record)
                 ),
                 None,
             )

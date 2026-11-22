@@ -23,7 +23,7 @@ from vv_agent.kernel._microcompaction import (
     replace_with_compacted_marker,
 )
 from vv_agent.kernel._records import InboxItem, Record, _MessageCache, copy_json, digest
-from vv_agent.kernel._state import Attempt, ExecutionState, Operation, Turn, child_handles
+from vv_agent.kernel._state import Attempt, ExecutionState, Operation, Turn, child_handles, queued_input_starts_turn
 from vv_agent.kernel._store import StoredRecord
 from vv_agent.kernel._token_count import TokenCount, _StopIterationTransport
 
@@ -682,9 +682,7 @@ def _schedule(state: ExecutionState) -> None:
     if state.active_turn_id is None:
         state.phase = "closed" if state.closed else "idle"
         if not state.closed and any(
-            input_id not in state.admitted_inputs
-            and applied._payload["disposition"] == "queued"
-            and applied._payload["input"]["kind"] in {"user", "follow_up"}
+            input_id not in state.admitted_inputs and queued_input_starts_turn(applied)
             for input_id, applied in state.applied_inputs.items()
         ):
             state.due_ms = (0,)

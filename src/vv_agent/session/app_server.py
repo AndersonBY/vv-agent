@@ -23,6 +23,7 @@ from vv_agent.kernel._content_runtime import SessionContentWriter as CoreSession
 from vv_agent.kernel._provider_outcomes import ProviderResultInvalid
 from vv_agent.kernel._requirements import SessionRequirements, normalize_requirements
 from vv_agent.kernel._sql import UnsupportedFeatureLevel
+from vv_agent.kernel._state import queued_input_starts_turn
 from vv_agent.model import ModelError
 from vv_agent.types import AgentStatus, Message
 
@@ -118,7 +119,7 @@ def thread_status(kernel, thread_id, *, snapshot=None, clock: Clock | None = Non
         x.item.kind in {"user", "follow_up"} and x.item.target_turn_id is None for x in selected_store.peek_inbox(thread_id)
     )
     pending = pending or any(
-        r._payload["disposition"] == "queued" and key not in state.admitted_inputs for key, r in state.applied_inputs.items()
+        key not in state.admitted_inputs and queued_input_starts_turn(r) for key, r in state.applied_inputs.items()
     )
     status = project_thread_status(state, pending=pending, now_ms=(clock if clock is not None else SystemClock()).now_ms())
     wait_kind = {
@@ -402,7 +403,7 @@ class _KernelThreadStore:
         pending.extend(
             InboxItem(**r._payload["input"])
             for key, r in state.applied_inputs.items()
-            if r._payload["disposition"] == "queued" and key not in state.admitted_inputs
+            if key not in state.admitted_inputs and queued_input_starts_turn(r)
         )
         archived = next(
             (
@@ -472,7 +473,7 @@ class _KernelThreadStore:
             if stored.item.kind in {"user", "follow_up"} and stored.item.target_turn_id is None:
                 pending.append((stored.item, stored.received_ms))
         for key, r in state.applied_inputs.items():
-            if r._payload["disposition"] == "queued" and key not in state.admitted_inputs:
+            if key not in state.admitted_inputs and queued_input_starts_turn(r):
                 pending.append((InboxItem(**r._payload["input"]), records[-1].created_ms))
         for item, received in pending:
             tid = f"{thread_id}/turn/{item.input_id}"
@@ -633,13 +634,8 @@ class _KernelRunAdapter(RunAdapter):
         else:
             candidates = []
             for key, record in state.applied_inputs.items():
-                item = InboxItem(**record._payload["input"])
-                if (
-                    key not in state.admitted_inputs
-                    and record._payload["disposition"] == "queued"
-                    and item.kind in {"user", "follow_up"}
-                ):
-                    candidates.append(item)
+                if key not in state.admitted_inputs and queued_input_starts_turn(record):
+                    candidates.append(InboxItem(**record._payload["input"]))
             candidates.extend(
                 stored.item
                 for stored in stored_inputs
@@ -1205,10 +1201,7 @@ class _KernelRunAdapter(RunAdapter):
 
     def _has_pending_start_input(self, thread_id: str, store, state) -> bool:
         if any(
-            record._payload["disposition"] == "queued"
-            and key not in state.admitted_inputs
-            and record._payload["input"]["kind"] in {"user", "follow_up"}
-            for key, record in state.applied_inputs.items()
+            key not in state.admitted_inputs and queued_input_starts_turn(record) for key, record in state.applied_inputs.items()
         ):
             return True
         return any(
@@ -1225,9 +1218,7 @@ class _KernelRunAdapter(RunAdapter):
             (
                 record._payload["input"]["input_id"]
                 for key, record in state.applied_inputs.items()
-                if record._payload["disposition"] == "queued"
-                and key not in state.admitted_inputs
-                and record._payload["input"]["kind"] in {"user", "follow_up"}
+                if key not in state.admitted_inputs and queued_input_starts_turn(record)
             ),
             None,
         )
@@ -1492,9 +1483,7 @@ class _KernelRunAdapter(RunAdapter):
                 (
                     r._payload["input"]
                     for key, r in state.applied_inputs.items()
-                    if r._payload["disposition"] == "queued"
-                    and key not in state.admitted_inputs
-                    and r._payload["input"]["kind"] in {"user", "follow_up"}
+                    if key not in state.admitted_inputs and queued_input_starts_turn(r)
                 ),
                 None,
             )
@@ -1592,9 +1581,7 @@ class _KernelRunAdapter(RunAdapter):
                         if kind == "start" and (
                             state.active_turn_id
                             or any(
-                                r._payload["disposition"] == "queued"
-                                and key not in state.admitted_inputs
-                                and r._payload["input"]["kind"] in {"user", "follow_up"}
+                                key not in state.admitted_inputs and queued_input_starts_turn(r)
                                 for key, r in state.applied_inputs.items()
                             )
                             or any(
@@ -1880,9 +1867,7 @@ class _KernelRunAdapter(RunAdapter):
                         return
                     kinds = {"follow_up"} if follow_up_only else {"user", "follow_up"}
                     queued = any(
-                        r._payload["disposition"] == "queued"
-                        and key not in state.admitted_inputs
-                        and r._payload["input"]["kind"] in kinds
+                        key not in state.admitted_inputs and queued_input_starts_turn(r) and r._payload["input"]["kind"] in kinds
                         for key, r in state.applied_inputs.items()
                     )
                     if (

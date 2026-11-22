@@ -28,7 +28,7 @@ from vv_agent.kernel._content import (
 from vv_agent.kernel._records import InboxItem, Record, SessionSpec, _MessageCache
 from vv_agent.kernel._reducer import Fold
 from vv_agent.kernel._requirements import SessionRequirements, normalize_requirements
-from vv_agent.kernel._state import ExecutionState
+from vv_agent.kernel._state import ExecutionState, queued_input_starts_turn
 from vv_agent.kernel._store import (
     DEFAULT_TENANT_ID,
     SESSION_PURGE_DELETE_ORDER,
@@ -958,13 +958,9 @@ class SQLStore:
         stored_input_sequences = {stored.item.input_id: stored.input_seq for stored in prefix.stored_inputs}
         queued_candidates: list[tuple[int, str, SessionRequirements]] = []
         for input_id, applied in state.applied_inputs.items():
-            input_item = InboxItem(**applied._payload["input"])
-            if (
-                input_id in state.admitted_inputs
-                or applied._payload["disposition"] != "queued"
-                or input_item.kind not in {"user", "follow_up"}
-            ):
+            if input_id in state.admitted_inputs or not queued_input_starts_turn(applied):
                 continue
+            input_item = InboxItem(**applied._payload["input"])
             if input_id not in stored_input_sequences:
                 raise LedgerIntegrityError("queued input is missing from the stored inbox prefix")
             queued_candidates.append(
