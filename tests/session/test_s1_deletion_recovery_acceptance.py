@@ -202,12 +202,18 @@ def test_deletion_requires_a_committed_fence_before_destroying_key(
                 return original_destroy(tenant_id, key_id)
 
             monkeypatch.setattr(provider, "destroy", observed_destroy)
-            store.connection.execute("BEGIN")
-            try:
-                with pytest.raises(RuntimeError, match="requires an idle connection"):
-                    delete(TENANT, "session", actor=actor)
-            finally:
-                store.connection.execute("ROLLBACK")
+            with monkeypatch.context() as invalid_transaction:
+
+                def unexpected_bind():
+                    pytest.fail("deletion bound the signer before verifying an idle connection")
+
+                invalid_transaction.setattr(signer, "bind_key", unexpected_bind)
+                store.connection.execute("BEGIN")
+                try:
+                    with pytest.raises(RuntimeError, match="requires an idle connection"):
+                        delete(TENANT, "session", actor=actor)
+                finally:
+                    store.connection.execute("ROLLBACK")
 
             assert destroy_states == []
             assert _session_state(observer, "session") == ("live", None)

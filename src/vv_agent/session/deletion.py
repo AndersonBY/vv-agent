@@ -386,8 +386,8 @@ class SessionDeletionStore:
             action="forget",
         )
         scoped = self._scoped(tenant_id)
-        authority = self._authority(scoped)
         self._require_idle_connection(scoped)
+        authority = self._authority(scoped)
         session_ids = scoped.begin_forget(
             session_id,
             actor,
@@ -432,8 +432,8 @@ class SessionDeletionStore:
             action="purge",
         )
         scoped = self._scoped(tenant_id)
-        authority = self._authority(scoped)
         self._require_idle_connection(scoped)
+        authority = self._authority(scoped)
         session_ids = scoped.begin_purge(
             session_id,
             actor,
