@@ -3,26 +3,36 @@
 import json
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
-from threading import Barrier, Event
+from threading import Event
 
 import pytest
 from jsonschema import Draft202012Validator
 from support.s1_fixture_values import read_fixture_state
 from test_app_server_context import create
-from test_app_server_distributed import node, request, submission
+from test_app_server_distributed import eventually, node, request, submission
 
 from vv_agent import ScriptedModelProvider
 from vv_agent.app_server.schema import json_schema_bundle
+from vv_agent.session import fork as fork_module
+from vv_agent.session.content_store import LocalKeyProvider
 from vv_agent.session.context import project_context
 from vv_agent.session.records import digest
 from vv_agent.types import LLMResponse
 
 
+def wait_for_turn(server, sid, turn_id):
+    server.run_adapter.join()
+    eventually(
+        lambda: any(r.record.kind == "turn_ended" and r.record.turn_id == turn_id for r in server.kernel.store.read(sid).records)
+    )
+
+
 def turn(server, identity, expected=None, text=None):
     result = request(server, identity, "turn/start", submission(identity=identity, expected=expected, text=text or identity))
     assert "result" in result, result
-    server.run_adapter.join()
-    return result["result"]["turnId"]
+    turn_id = result["result"]["turnId"]
+    wait_for_turn(server, "thread", turn_id)
+    return turn_id
 
 
 def fork(server, identity="copy", **kwargs):
@@ -88,8 +98,8 @@ def test_cut_points_lineage_and_independent_new_turn(tmp_path, cut):
         original_resolve = b.run_adapter._host.build_run_config
         b.run_adapter._host.build_run_config = lambda r: binding.append(r) or original_resolve(r)
         result_turn = request(b, "new", "turn/start", submission(sid, "new", text="fork prompt"))
-        assert "result" in result_turn
-        b.run_adapter.join()
+        assert "result" in result_turn, result_turn
+        wait_for_turn(b, sid, result_turn["result"]["turnId"])
         assert binding[-1].thread_id == sid
         assert binding[-1].metadata["workspace"] == {"snapshot": "host-prepared", "nested": {"id": 7}}
         assert calls[-1].messages[-1].content == "fork prompt"
@@ -99,25 +109,51 @@ def test_cut_points_lineage_and_independent_new_turn(tmp_path, cut):
         assert nested["lineage"]["sourceThreadId"] == sid
 
 
-def test_replay_before_source_changes_and_conflicts_across_nodes(tmp_path):
+@pytest.mark.parametrize("other_params", [{}, {"workspace": {"snapshot": "different"}}])
+def test_replay_before_source_changes_and_conflicts_across_nodes(tmp_path, monkeypatch, other_params):
     with ExitStack() as stack:
         provider = ScriptedModelProvider.from_callback("test", "m", lambda r: LLMResponse("answer"))
         a = node(stack, tmp_path / "store", "A", provider)
         b = node(stack, tmp_path / "store", "B", provider)
         create(a)
         first = turn(a, "one")
-        barrier = Barrier(2)
+        sid = "fork/" + digest(["thread", "copy"])
+        checked, committed = Event(), Event()
+        original_replay = fork_module._replay
+        original_generate = LocalKeyProvider.generate_data_key
+        allocations = []
 
-        def submit(s):
-            barrier.wait(5)
-            response = fork(s)
+        def pause_after_miss(kernel, session_id, params):
+            result = original_replay(kernel, session_id, params)
+            if kernel is b.kernel and session_id == sid and not checked.is_set():
+                assert result is None
+                checked.set()
+                assert committed.wait(10)
+            return result
+
+        def count_keys(provider, tenant_id, session_id):
+            allocations.append(session_id)
+            return original_generate(provider, tenant_id, session_id)
+
+        monkeypatch.setattr(fork_module, "_replay", pause_after_miss)
+        monkeypatch.setattr(LocalKeyProvider, "generate_data_key", count_keys)
+        with ThreadPoolExecutor(1) as pool:
+            delayed = pool.submit(fork, b, **other_params)
+            try:
+                assert checked.wait(5)
+                response = fork(a)
+            finally:
+                committed.set()
             assert "result" in response, response
-            return response["result"]
-
-        with ThreadPoolExecutor(2) as pool:
-            receipts = list(pool.map(submit, [a, b]))
-        assert sorted(x["replayed"] for x in receipts) == [False, True]
-        receipt = receipts[0] | {"replayed": True}
+            repeated = delayed.result(timeout=10)
+        initial = response["result"]
+        assert initial["replayed"] is False
+        receipt = initial | {"replayed": True}
+        if other_params:
+            assert "error" in repeated and repeated["error"]["code"] == -32024, repeated
+        else:
+            assert "result" in repeated and repeated["result"] == receipt, repeated
+        assert allocations == [sid]
         turn(a, "two", first)
         assert fork(b)["result"] == receipt
         for change in [{"workspace": {}}, {"throughTurnId": "unknown"}, {"beforeTurnId": first}]:

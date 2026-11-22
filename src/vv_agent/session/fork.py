@@ -256,6 +256,11 @@ def fork_thread(kernel, host, params, principal: PrincipalInput | None = None):
     )
     try:
         with kernel.store.atomic() as tx:
+            # Serialize competing forks before either allocates destination session content.
+            tx.lock_session(source)
+            previous = _replay(kernel, sid, params)
+            if previous is not None:
+                return previous
             content_writer = getattr(tx, "content_writer", None)
             if not callable(content_writer):
                 raise ValueError("fork requires a transaction with trusted content capability")
