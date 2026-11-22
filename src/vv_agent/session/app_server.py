@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections import deque
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Any, cast
@@ -42,7 +43,7 @@ from .reducer import ExecutionState
 from .result import project_result
 from .runtime import static_model_selection_requirements, static_session_requirements, static_worker_supports
 from .store import Conflict
-from .surfaces import PrincipalInput, SessionDriver, _principal_payload, _read_snapshot
+from .surfaces import PrincipalInput, SessionDriver, _KnownSessionOwner, _principal_payload, _read_snapshot
 from .timing import Clock, SystemClock
 
 
@@ -588,14 +589,20 @@ class _KernelRunAdapter(RunAdapter):
         self.kernel.model_resolver = self._host.resolve_model
         self._notification_positions: dict[str, _NotificationPosition] = {}
         self._turn_connections: dict[tuple[str, str], str | None] = {}
-        support = self.kernel._worker.support
-        self._driver_observe = support.observe
-        self._driver_projection_consumers = support.projection_consumers
-        self.kernel._worker.support = replace(
-            support,
-            observe=self._observe_with_driver,
-            projection_consumers=("child_delivery",) if support.project is not None else (),
-        )
+        worker = self.kernel._worker
+        self._local_owner = worker if isinstance(worker, _KnownSessionOwner) else None
+        if self._local_owner is not None:
+            self._local_owner.set_observer(self._observe_with_driver)
+            self._driver_observe = None
+        else:
+            support = worker.support
+            self._driver_observe = support.observe
+            self._driver_projection_consumers = support.projection_consumers
+            worker.support = replace(
+                support,
+                observe=self._observe_with_driver,
+                projection_consumers=("child_delivery",) if support.project is not None else (),
+            )
         self.kernel._on_close(self.close)
 
     def _hydration(self, thread_id: str, store=None) -> SessionHydration:
@@ -880,7 +887,7 @@ class _KernelRunAdapter(RunAdapter):
             or (state.active_turn_id is not None and registration is None)
         ):
             return
-        self.kernel._worker.post_observation(self._observe_with_driver)
+        self._schedule_observation()
 
     def unsubscribe(self, thread_id, connection_id):
         self._state_manager.unsubscribe(thread_id, connection_id)
@@ -923,10 +930,16 @@ class _KernelRunAdapter(RunAdapter):
             position.due = 0.0
             position.delay = 0.05
         try:
-            self.kernel._worker.post_observation(self._observe_with_driver)
+            self._schedule_observation()
         except RuntimeError as exc:
             if str(exc) not in {"LocalWorker is stopped", "LocalWorker cannot be restarted"}:
                 raise
+
+    def _schedule_observation(self) -> None:
+        if self._local_owner is not None:
+            self._local_owner.request_observation()
+        else:
+            self.kernel._worker.post_observation(self._observe_with_driver)
 
     def _observe_with_driver(self, store) -> None:
         if self._driver_observe is not None:
@@ -1454,6 +1467,8 @@ class _KernelRunAdapter(RunAdapter):
         return None
 
     def close(self):
+        if self._local_owner is not None:
+            self._local_owner.set_observer(None)
         thread_ids = {key[0] for key in self._turn_connections} | set(self._notification_positions)
         subscribed = {connection_id for thread_id in thread_ids for connection_id in self._state_manager.subscribers(thread_id)}
         for thread_id, turn_id in tuple(self._turn_connections):
@@ -1465,6 +1480,8 @@ class _KernelRunAdapter(RunAdapter):
                 self.kernel._abandon_handle(handle)
         self._notification_positions.clear()
         self._turn_connections.clear()
+        if self._local_owner is not None:
+            return
         support = self.kernel._worker.support
         if support.observe == self._observe_with_driver:
             self.kernel._worker.support = replace(
@@ -1835,7 +1852,7 @@ class _KernelRunAdapter(RunAdapter):
                     **({"runId": handle.run_id} if content is None else {}),
                 },
             )
-        self.kernel._worker.post_observation(self._observe_with_driver)
+        self._schedule_observation()
         try:
             handle.start()
         except Exception as exc:
@@ -1851,7 +1868,7 @@ class _KernelRunAdapter(RunAdapter):
 
     def recover(self, connection_id, thread_id, *, follow_up_only=False, lease_retry=True):
         if self.kernel._worker.support.drive is None:
-            self.kernel._worker.post_observation(self._observe_with_driver)
+            self._schedule_observation()
             return
         try:
             with self._state_manager.turn_lock(thread_id):
@@ -2278,7 +2295,7 @@ class _KernelRunAdapter(RunAdapter):
         if active is None or active.handle.done():
             self.recover(connection_id, thread_id)
         else:
-            self.kernel._worker.post_observation(self._observe_with_driver)
+            self._schedule_observation()
 
     def _wait_for_local_claim_handoff(self, session_id: str) -> bool:
         worker = self.kernel._worker
@@ -2349,6 +2366,9 @@ class _KernelRunAdapter(RunAdapter):
     def join(self):
         """Wait for this node's accepted work without joining a remote lease."""
 
+        if self._local_owner is not None:
+            self._join_known_sessions(self._local_owner)
+            return
         handles = tuple(handle for handle in self.kernel.handles if handle.consumer == "app_server")
         wake_sessions = self.kernel._worker.active_wake_sessions
         if not self._notification_positions and not handles and not wake_sessions and not self.kernel._worker.started:
@@ -2401,3 +2421,29 @@ class _KernelRunAdapter(RunAdapter):
             quiet_passes += 1
             if quiet_passes >= 2:
                 break
+
+    def _join_known_sessions(self, owner: _KnownSessionOwner) -> None:
+        if not (self._notification_positions or self.kernel.handles or self.kernel._runtimes or owner.running):
+            return
+        quiet_passes = 0
+        while quiet_passes < 2:
+            owner.request_observation(wait=True)
+            if owner.support.drive is None:
+                return
+            pending = deque(self._notification_positions)
+            pending.extend(handle.session_id for handle in tuple(self.kernel.handles) if handle.consumer == "app_server")
+            pending.extend(
+                sid
+                for sid, registration in tuple(self.kernel._runtimes.items())
+                if registration.armed and registration.config.metadata.get("thread_id") == sid
+            )
+            seen: set[str] = set()
+            progressed = False
+            while pending:
+                sid = pending.popleft()
+                if sid in seen or self.kernel._registration_for_cursor(sid) is None:
+                    continue
+                seen.add(sid)
+                progressed = owner.join_session(sid) or progressed
+                pending.extend(self.kernel._discover_child_runtimes(self.kernel.store, sid))
+            quiet_passes = 0 if progressed else quiet_passes + 1

@@ -20,13 +20,16 @@ class AppServer:
         state_manager: ThreadStateManager | None = None,
         router: OutgoingRouter | None = None,
         processor: MessageProcessor | None = None,
+        _managed_worker: bool = False,
     ) -> None:
+        from vv_agent.kernel._content_runtime import _root_store
         from vv_agent.session.app_server import _KernelRunAdapter, _KernelThreadStore
         from vv_agent.session.surfaces import SessionDriver
 
         self.transport = transport or StdioJsonlTransport()
         self.host = host or DefaultAppServerHost()
-        self.kernel = SessionDriver(store=store, content_key_provider=content_key_provider)
+        managed = _managed_worker or getattr(_root_store(store), "runtime_mode", None) == "worker"
+        self.kernel = SessionDriver(store=store, content_key_provider=content_key_provider, _known_sessions=not managed)
         self.store = _KernelThreadStore(self.kernel)
         self.state_manager = state_manager or ThreadStateManager()
         self.router = router or OutgoingRouter()

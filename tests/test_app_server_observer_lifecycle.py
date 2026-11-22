@@ -27,12 +27,13 @@ from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.kernel._canonical_json import canonical_json_bytes
 from vv_agent.kernel._provider_outcomes import ProviderResultInvalid
 from vv_agent.llm import ScriptedLLM
+from vv_agent.session.app_server import _content
 from vv_agent.session.runtime import static_session_requirements
 from vv_agent.session.sqlite import SQLiteStore
 from vv_agent.types import LLMResponse, ToolCall
 
 
-def node(stack, path, connection, provider, *, agent=None, content_key_provider=None):
+def node(stack, path, connection, provider, *, agent=None, content_key_provider=None, managed_worker=True):
     server = _distributed_node(
         stack,
         path,
@@ -40,6 +41,7 @@ def node(stack, path, connection, provider, *, agent=None, content_key_provider=
         provider,
         agent=agent,
         content_key_provider=content_key_provider,
+        managed_worker=managed_worker,
     )
     # Static App Server bootstrap persists level-2 sessions. These shared
     # SQLite fixtures install the default level-1 schema directly.
@@ -56,8 +58,8 @@ def _eventually(predicate: Callable[[], bool], timeout: float = 5) -> None:
     assert predicate()
 
 
-def _observer_node(stack: ExitStack, path: Path, connection: str, provider):
-    server = node(stack, path, connection, provider)
+def _observer_node(stack: ExitStack, path: Path, connection: str, provider, *, managed_worker=True):
+    server = node(stack, path, connection, provider, managed_worker=managed_worker)
     support = replace(
         server.kernel._worker.support,
         drive=None,
@@ -65,7 +67,6 @@ def _observer_node(stack: ExitStack, path: Path, connection: str, provider):
         projection_consumers=(),
     )
     server.kernel._worker.support = support
-    assert server.kernel._worker.support.observe is not None
     return server
 
 
@@ -275,14 +276,46 @@ def test_default_observer_accepts_empty_thread_and_queued_turn_without_provider(
 
         assert "result" in request(server, 4, "thread/resume", {"threadId": "thread"})
         assert server.kernel._worker.support.drive is None
-        assert server.kernel._worker._drive_thread_ident is None
         assert server.kernel._runtimes == {}
     finally:
         server.run_adapter.close()
         server.kernel.close()
 
 
-def test_pure_observer_continues_after_events_and_traces_are_acked(tmp_path):
+def test_join_drives_committed_registration_without_subscriber_or_handle(tmp_path):
+    with ExitStack() as stack:
+        server = node(
+            stack,
+            tmp_path / "store",
+            "A",
+            FixedModelProvider(ScriptedLLM([LLMResponse("done")]), _resolved_model()),
+            managed_worker=False,
+        )
+        thread_id = server.store.create_thread_receipt(input_id="thread", agent_key="default")["threadId"]
+        adapter = server.run_adapter
+        input_items = [{"type": "text", "text": "hello"}]
+        content = _content(adapter, input_items, {}, "start", None)
+        runtime = adapter._prepare_turn_runtime(connection_id=None, thread_id=thread_id, input_id="prompt", content=content)
+        receipt, _ = adapter.submit_input(
+            connection_id=None,
+            thread_id=thread_id,
+            input_id="prompt",
+            expected_turn_id=None,
+            kind="start",
+            input=input_items,
+            _start_runtime=runtime,
+        )
+        assert not adapter._notification_positions and not server.kernel.handles
+        assert not server.kernel._worker.running
+
+        adapter.join()
+
+        state, _, _ = server.kernel.store.read_state(thread_id)
+        assert state.turns[receipt["turnId"]].ended
+
+
+@pytest.mark.parametrize("managed_worker", [False, True])
+def test_pure_observer_continues_after_events_and_traces_are_acked(tmp_path, managed_worker):
     with ExitStack() as stack:
         a = node(stack, tmp_path / "store", "A", FixedModelProvider(ScriptedLLM([LLMResponse("done")]), _resolved_model()))
         b = _observer_node(
@@ -290,6 +323,7 @@ def test_pure_observer_continues_after_events_and_traces_are_acked(tmp_path):
             tmp_path / "store",
             "B",
             FixedModelProvider(ScriptedLLM([LLMResponse("unused")]), _resolved_model()),
+            managed_worker=managed_worker,
         )
         request(a, 1, "thread/start", {"inputId": "thread"})
         assert "result" in request(b, 2, "thread/resume", {"threadId": "thread"})

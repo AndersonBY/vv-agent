@@ -17,6 +17,7 @@ from test_app_server_review_regressions import record_output
 
 from vv_agent import InteractionAnswer, ScriptedModelProvider
 from vv_agent.session.records import InboxItem
+from vv_agent.session.sqlite import SQLiteStore
 from vv_agent.types import LLMResponse, ToolCall
 
 
@@ -57,6 +58,7 @@ def test_abandoned_lease_runs_accepted_turn_after_expiry_without_external_wake(t
             tmp_path / "store",
             "A",
             ScriptedModelProvider.from_callback("test", "m", lambda r: calls.append(r.model) or LLMResponse("done")),
+            managed_worker=False,
         )
         messages = record_output(server, monkeypatch)
         request(server, 1, "thread/start", {"inputId": "thread"})
@@ -329,8 +331,12 @@ def test_persistent_observer_failure_is_rate_limited_and_does_not_stop_other_ses
 
 
 def test_live_lease_prevents_fake_started_until_release(tmp_path, monkeypatch):
+    def unexpected_claim(*_args, **_kwargs):
+        pytest.fail("App Server must acquire known sessions directly")
+
+    monkeypatch.setattr(SQLiteStore, "claim_runnable", unexpected_claim)
     with ExitStack() as stack:
-        server = node(stack, tmp_path / "store", "A", provider())
+        server = node(stack, tmp_path / "store", "A", provider(), managed_worker=False)
         request(server, 1, "thread/start", {"inputId": "thread"})
         messages = record_output(server, monkeypatch)
         holder = server.kernel.store.acquire("thread", owner="live-process", ttl_ms=60_000)

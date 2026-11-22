@@ -108,6 +108,7 @@ def node(
     write_level=2,
     host=None,
     store_class=SQLiteStore,
+    managed_worker=True,
 ):
     store = stack.enter_context(store_class.standalone(str(path)))
     store.configure_input_admission(allow_unsigned=True)
@@ -125,6 +126,7 @@ def node(
         transport=ChannelTransport(connection_id=connection, outbound_capacity=10000),
         store=store,
         content_key_provider=content_key_provider,
+        _managed_worker=managed_worker,
         host=host
         or DefaultAppServerHost(
             agent=agent or Agent("test", "Answer."),

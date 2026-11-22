@@ -23,6 +23,7 @@ from vv_agent.model import resolve_model_selection
 from vv_agent.runtime.hooks import BaseRuntimeHook, BeforeToolCallPatch, RuntimeHook
 from vv_agent.session.app_server import _JoinDriveState, _KernelRunAdapter
 from vv_agent.session.reducer import ExecutionState
+from vv_agent.session.worker import LocalWorker
 from vv_agent.types import LLMResponse, ToolCall
 
 pytestmark = pytest.mark.usefixtures("surface")
@@ -73,11 +74,10 @@ def test_wake_keeps_committed_progress_in_forward_approval_order(monkeypatch: py
     _initialize(server, transport, request_id=0, client_name="owner")
     thread_id = _start_thread(server, transport, request_id=1)
     position = server.run_adapter._notification_positions[thread_id]
-    worker = server.kernel._worker
-    original_post_observation = worker.post_observation
-    monkeypatch.setattr(worker, "post_observation", lambda _callback: None)
+    original_schedule = server.run_adapter._schedule_observation
+    monkeypatch.setattr(server.run_adapter, "_schedule_observation", lambda: None)
     server.wake(thread_id)
-    monkeypatch.setattr(worker, "post_observation", original_post_observation)
+    monkeypatch.setattr(server.run_adapter, "_schedule_observation", original_schedule)
 
     assert position.replay_approvals is False
 
@@ -853,7 +853,7 @@ def test_second_turn_registers_config_before_worker_can_drive() -> None:
             provider = second_provider if second_config_entered.is_set() else first_provider
             return resolve_model_selection(provider, request)
 
-    server = AppServer(transport=transport, host=PerTurnHost())
+    server = AppServer(transport=transport, host=PerTurnHost(), _managed_worker=True)
     _initialize(server, transport, request_id=0, client_name="owner")
     _send(
         transport,
@@ -887,6 +887,7 @@ def test_second_turn_registers_config_before_worker_can_drive() -> None:
     assert first_calls == ["first"]
 
     worker = server.kernel._worker
+    assert isinstance(worker, LocalWorker)
     original_drive = worker.support.drive
     assert original_drive is not None
 
