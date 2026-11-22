@@ -389,6 +389,7 @@ class SQLStore:
     _input_admission_configured = False
     _input_admission_allow_unsigned = False
     _input_admission_signer: LedgerSigner | None = None
+    _commit_parse_cache: dict[tuple[bytes, bytes], _CommitPayload] | None = None
     _fold_cache: _Prefix | None = None
     _previous_prefix: _Prefix | None = None
     _tenant_id = DEFAULT_TENANT_ID
@@ -400,7 +401,6 @@ class SQLStore:
     def __init__(self, *, fold_factory: Callable[[], Fold]):
         self.fold_factory = fold_factory
         self._transaction_state = _TransactionState()
-        self._commit_parse_cache: dict[tuple[bytes, bytes], _CommitPayload] = {}
 
     @property
     def tenant_id(self) -> str:
@@ -485,7 +485,7 @@ class SQLStore:
         scoped._tenant_id = tenant_id
         scoped._fold_cache = None
         scoped._previous_prefix = None
-        scoped._commit_parse_cache = {}
+        scoped._commit_parse_cache = None
         return scoped
 
     @property
@@ -1216,7 +1216,10 @@ class SQLStore:
         if not isinstance(sequence_body, bytes):
             raise LedgerIntegrityError("commit metadata is not canonical JCS")
         key = (body, sequence_body)
-        cached = self._commit_parse_cache.get(key)
+        cache = self._commit_parse_cache
+        if cache is None:
+            cache = self._commit_parse_cache = {}
+        cached = cache.get(key)
         if cached is not None:
             return cached
         try:
@@ -1280,9 +1283,9 @@ class SQLStore:
             consume_input_ids=tuple(consume_ids),
             consumers=tuple(consumers),
         )
-        if len(self._commit_parse_cache) >= _COMMIT_PARSE_CACHE_LIMIT:
-            self._commit_parse_cache.clear()
-        self._commit_parse_cache[key] = parsed
+        if len(cache) >= _COMMIT_PARSE_CACHE_LIMIT:
+            cache.clear()
+        cache[key] = parsed
         return parsed
 
     def _verify_commits(
