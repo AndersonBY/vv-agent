@@ -527,7 +527,6 @@ def test_child_cancel_from_wire_driven_host_tool_rejects_its_late_answer(store, 
             assert any(pending.item.payload == {"action": "cancel"} for pending in bound_store.peek_inbox(child_ids[0]))
             assert bound_store.release(child_lease)
             child_lease = None
-            server.server.kernel._wake_session(child_ids[0])
         deadline = monotonic() + 10
         while not store.read_state(child_ids[0])[0].turns[child_form["turnId"]].ended and monotonic() < deadline:
             Event().wait(0.01)
