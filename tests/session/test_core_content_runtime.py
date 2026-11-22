@@ -24,6 +24,7 @@ from vv_agent.kernel._content_publication import (
 from vv_agent.kernel._content_reader import DurableContentReader as CoreDurableContentReader
 from vv_agent.kernel._content_reader import input_owner, record_owner
 from vv_agent.kernel._records import InboxItem, SessionSpec, digest, make_record
+from vv_agent.kernel._sql import LedgerIntegrityError
 from vv_agent.session import content_runtime as sdk_runtime
 from vv_agent.session.content_reader import DurableContentReader as SDKDurableContentReader
 from vv_agent.session.content_store import AESGCMCipher, LocalKeyProvider
@@ -63,6 +64,21 @@ def _create_session(store: Any, binding: core_runtime.ContentRuntimeBinding) -> 
 
         writer.create_session(spec, consumers=("events",))
     return wrapped
+
+
+def test_unconfigured_ledger_rejects_creation_before_content_factory(tmp_path: Path) -> None:
+    _, _, binding = _binding(tmp_path)
+    with open_store(tmp_path / "unconfigured.sqlite", allow_unsigned=False) as raw_store:
+        raw_store.install_schema()
+        wrapped = core_runtime.wrap_session_content_store(raw_store, binding)
+        with wrapped.atomic() as tx:
+            writer = core_runtime.SessionContentWriter.bind(tx, tenant_id=TENANT, session_id=SESSION)
+
+            def spec_factory(_writer: core_runtime.SessionContentWriter) -> SessionSpec:
+                pytest.fail("unconfigured ledger must reject before invoking the content factory")
+
+            with pytest.raises(LedgerIntegrityError, match="session creation requires an explicit signed signer"):
+                writer.create_session(spec_factory, consumers=("events",))
 
 
 def _publish_input_and_record(store: Any) -> tuple[ContentRef, ContentRef, int]:

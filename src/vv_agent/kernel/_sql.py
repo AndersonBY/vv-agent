@@ -3096,6 +3096,8 @@ class SQLSessionTx:
         """Check the creation identity before preparing content and return whether it exists."""
         self._active()
         store = self.store
+        store._require_configured_ledger("session creation")
+        _identity(session_id)
         store._require_create_isolation()
         tenant_id = store.tenant_id
         deletion_state, tombstoned = store._one(
