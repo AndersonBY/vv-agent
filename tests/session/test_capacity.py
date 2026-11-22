@@ -340,23 +340,36 @@ def test_prefix_cache_rollback_conflict_epoch_and_disposal(store, database):
 
 @pytest.mark.postgres
 def test_prefix_cache_external_rollback_and_same_head_replacement(store, database):
-    """An outer host rollback bypasses the store; a different same-length branch must miss."""
+    """Verify the new chain after rollback even where its suffix has identical bytes."""
     create_fixture_session(store, "s")
+    suffix_payload = record("usage_observed").payload | {"usage": {}, "source": {}}
+    seed = make_record_before_publication("usage_observed", session_id="s", payload=suffix_payload | {"meter_id": "seed"})
+    append_fixture_records(store, "s", (seed,), commit_id="seed")
+    suffix = make_record_before_publication("usage_observed", session_id="s", turn_id="t", payload=suffix_payload)
 
     class Rollback(Exception):
         pass
 
     with pytest.raises(Rollback), store.connection.transaction():
-        append_fixture_records(store, "s", (turn_record(store, database),), commit_id="provisional")
+        append_fixture_records(store, "s", (turn_record(store, database), suffix), commit_id="provisional")
+        provisional = store._root._fold_cache
+        assert provisional is not None and len(provisional.records) == 4
         raise Rollback
-    cached = store._fold_cache
-    # The current SQL host may either retain the provisional prefix or discard it
-    # on rollback; a retained prefix must contain only the rows that were visible.
-    assert cached is None or len(cached.records) == 2
     with open_store(database) as other:
         other = wrap_fixture_store(other)
-        append_fixture_records(other, "s", (turn_record(other, database, "different"),), commit_id="different")
-    assert read_fixture_state(store, "s")[0].active_turn_id == "different"
+        append_fixture_records(other, "s", (turn_record(other, database, text="replacement"), suffix), commit_id="different")
+        expected = other._root._fold_cache
+        assert expected is not None
+
+    assert provisional.records[2].record.encode() != expected.records[2].record.encode()
+    assert provisional.records[3].record.encode() == expected.records[3].record.encode()
+    assert provisional.chains[3] != expected.chains[3]
+    # Simulate a host rolling back without clearing the store's retained prefix.
+    store._root._fold_cache = provisional
+    state, records, _ = store.read_state("s")
+    assert state.active_turn_id == "t"
+    assert [row.record.encode() for row in records] == [row.record.encode() for row in expected.records]
+    assert store._root._fold_cache.chains == expected.chains
 
 
 def test_read_state_and_append_payloads_cannot_poison_prefix(store, database):

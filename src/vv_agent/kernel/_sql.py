@@ -1624,6 +1624,7 @@ class SQLStore:
         commit_record_rows: list[tuple[Any, ...]] = []
         applied_inputs: dict[str, int] = {}
         cached = self._cached_prefix(session_id)
+        cached_chain_count = len(cached.chains) if cached is not None else 0
         cursor = 0
         while cursor < through:
             rows = self._rows(
@@ -1655,10 +1656,14 @@ class SQLStore:
                 ) = row
                 if seq != expected_seq:
                     raise LedgerIntegrityError(f"log sequence gap or reorder at seq {expected_seq}; found {seq}")
-                actual_digest = sha256(body).hexdigest()
+                record = self._cached_record_for_body(cached, seq, body)
+                if record is None:
+                    cached_chain_count = 0
+                    actual_digest = sha256(body).hexdigest()
+                else:
+                    actual_digest = record.digest
                 if actual_digest != checksum:
                     raise LedgerIntegrityError(f"stored record digest mismatch at seq {seq}")
-                record = self._cached_record_for_body(cached, seq, body)
                 if record is None and parsed_records is not None:
                     try:
                         parsed = Record.parse(body)
@@ -1720,7 +1725,11 @@ class SQLStore:
                     _natural(commit_position, "record commit_position")
                 except ValueError as exc:
                     raise LedgerIntegrityError(f"stored record metadata is invalid at seq {seq}") from exc
-                actual_chain = _extend_chain_digest(previous, expected_seq, actual_digest)
+                # A cached chain is valid only through the exact retained body prefix.
+                if cached is not None and seq <= cached_chain_count:
+                    actual_chain = cached.chains[seq - 1]
+                else:
+                    actual_chain = _extend_chain_digest(previous, expected_seq, actual_digest)
                 if stored_chain != actual_chain:
                     raise LedgerIntegrityError(f"stored record chain digest mismatch at seq {seq}")
                 previous = actual_chain
