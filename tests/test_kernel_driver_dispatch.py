@@ -377,6 +377,7 @@ class FixtureDriver(CoreDriver):
 
 with SQLiteStore.standalone(sys.argv[2], clock=clock, fold_factory=factory) as raw_store:
     raw_store.install_schema()
+    raw_store.configure_input_admission(allow_unsigned=True)
     binding = bind_content_runtime(
         raw_store,
         key_provider=FixtureKeyProvider(),
