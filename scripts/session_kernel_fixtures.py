@@ -1464,23 +1464,8 @@ class Fixtures:
             config,
             extra_capabilities=server.kernel.capabilities,
         )
-        server.kernel._configure_static_worker(
-            level=bootstrap.level,
-            capabilities=supports,
-            requirements=bootstrap,
-        )
+        server.kernel._ensure_static_worker_support(level=bootstrap.level, capabilities=supports)
         self.kernel._ensure_static_worker_support(level=bootstrap.level, capabilities=supports)
-        server.kernel.create(
-            "thread_1",
-            "/fixture",
-            {"app_server": {"agent_key": "default", "cwd": "/fixture", "metadata": {}}},
-            principal={
-                "tenant_id": server.kernel.tenant_id,
-                "subject_id": "app-server",
-                "subject_kind": "service",
-                "attributes": {"role": "app-server"},
-            },
-        )
         transcript = []
         notices = []
 
@@ -1513,7 +1498,8 @@ class Fixtures:
 
         assert request(0, "initialize", {"clientInfo": {"name": "fixture"}})["result"]["protocolVersion"] == "v5"
         request(None, "initialized")
-        request(1, "thread/start", {"inputId": "thread_1", "agentKey": "default", "cwd": "/fixture"})
+        start = request(1, "thread/start", {"inputId": "thread_1", "agentKey": "default", "cwd": "/fixture"})
+        assert start["result"]["replayed"] is False, start
         selection_params = {"threadId": "thread_1", "inputId": "select-app", "selection": {"model": "m", "route": {}}}
         selection = request(16, "thread/model/select", selection_params)
         assert selection.get("result") == {
