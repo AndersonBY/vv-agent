@@ -1092,7 +1092,13 @@ def close(
         stopping = status in {"failed", "cancelled", "aborted"}
         if records or stopping:
             yield CommitStopping(records, tid, stopping)
-        evaluator = _retained_budget(self, tid)
+        if stopping:
+            evaluator = yield from _compose(self, outcomes.live_budget_steps(self))
+            if evaluator is not None:
+                # Observe through stopping reconciliation while preserving the terminal reason.
+                yield from evaluator.terminal_steps()
+        else:
+            evaluator = _retained_budget(self, tid)
         terminal = self.record(
             "turn_ended",
             {
