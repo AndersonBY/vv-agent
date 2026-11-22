@@ -12,6 +12,7 @@ import vv_agent.interactive as interactive_module
 from vv_agent import Agent, AgentSessionOptions, ScriptedModelProvider, create_agent_session
 from vv_agent.events import DiagnosticEvent
 from vv_agent.interactive import AgentSessionEventGapError, AgentSessionEventStreamClosed
+from vv_agent.memory.token_utils import count_tokens
 from vv_agent.session.bindings import MissingHostBinding
 from vv_agent.types import LLMResponse
 
@@ -163,6 +164,8 @@ def test_background_completion_emits_idle_notification_for_host_resume(monkeypat
 
 
 def test_close_aborts_active_handle_closes_stream_and_rejects_new_work(tmp_path):
+    # First-use tokenizer imports are outside the active-run shutdown check.
+    count_tokens("run", "m")
     active, release = threading.Event(), threading.Event()
 
     def respond(request):
