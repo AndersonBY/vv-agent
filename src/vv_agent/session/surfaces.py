@@ -11,7 +11,7 @@ from contextlib import AbstractContextManager, contextmanager, suppress
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from threading import Event, Lock, Thread, current_thread
+from threading import Event, Lock, RLock, Thread, current_thread
 from time import sleep
 from typing import Any, cast
 from uuid import uuid4
@@ -679,6 +679,11 @@ class _KnownSessionOwner:
         self._hints: set[str] = set()
         self._projected: dict[str, int] = {}
         self._last_sid = ""
+        self._observer_lock = RLock()
+        self._observer: Callable[[SessionStore], None] | None = None
+        self._observations: list[Future[None]] = []
+        self._join_requests: dict[str, Future[Future[bool] | None]] = {}
+        self._inflight: tuple[str, Future[bool]] | None = None
         self.last_error: Exception | None = None
 
     @property
@@ -703,11 +708,64 @@ class _KnownSessionOwner:
             self._hints.add(sid)
             self._changed.set()
 
+    def set_observer(self, callback: Callable[[SessionStore], None] | None) -> None:
+        with self._observer_lock:
+            self._observer = callback
+
+    def request_observation(self, *, wait: bool = False) -> None:
+        if wait and current_thread() is self._thread:
+            raise RuntimeError("SessionDriver observer cannot wait for itself")
+        acknowledgement: Future[None] | None = Future() if wait else None
+        with self._lock:
+            if self._stop.is_set():
+                return
+            if acknowledgement is not None:
+                self._observations.append(acknowledgement)
+            self._changed.set()
+        self.start()
+        if acknowledgement is not None:
+            acknowledgement.result()
+
+    def join_session(self, sid: str) -> bool:
+        if current_thread() in (self._thread, self._drive_thread):
+            raise RuntimeError("SessionDriver cannot join work from its own execution thread")
+        job = self._local_job(sid)
+        if job is not None:
+            return job.result()
+        if self.support.drive is None or self._stop.is_set():
+            return False
+        with self._driver._open_drive_store() as store:
+            runnable = store.is_runnable(sid)
+        with self._lock:
+            job = self._local_job(sid)
+            if job is None:
+                if not runnable or self._stop.is_set():
+                    return False
+                request = self._join_requests.setdefault(sid, Future())
+                self._changed.set()
+        if job is None:
+            self.start()
+            try:
+                job = request.result(timeout=max(5.0, self.scan_interval * 4))
+            except TimeoutError:
+                return False
+        return job is not None and job.result()
+
+    def _local_job(self, sid: str) -> Future[bool] | None:
+        inflight = self._inflight
+        return inflight[1] if inflight is not None and inflight[0] == sid else None
+
     def close(self) -> bool:
         with self._lock:
             thread = self._thread
             self._stop.set()
             self._changed.set()
+            for observation in self._observations:
+                observation.set_result(None)
+            self._observations.clear()
+            for request in self._join_requests.values():
+                request.set_result(None)
+            self._join_requests.clear()
         if current_thread() in (thread, self._drive_thread):
             raise RuntimeError("SessionDriver cannot close from its own execution thread")
         if thread is not None:
@@ -716,7 +774,6 @@ class _KnownSessionOwner:
 
     def _run(self) -> None:
         with ThreadPoolExecutor(max_workers=1, thread_name_prefix="session-client-drive") as executor:
-            future: Future[None] | None = None
             while not self._stop.is_set():
                 hints: set[str] = set()
                 try:
@@ -726,14 +783,25 @@ class _KnownSessionOwner:
                                 hints = self._hints
                                 self._hints = set()
                                 self._changed.clear()
-                            if future is not None and future.done():
-                                completed = future
-                                future = None
-                                completed.result()
-                            sid = self._observe_and_select(store, hints, drive=future is None)
-                            if sid is not None and not self._stop.is_set():
-                                future = executor.submit(self._drive, sid)
-                                future.add_done_callback(lambda _: self._changed.set())
+                                completed = self._inflight
+                                if completed is not None and completed[1].done():
+                                    self._inflight = None
+                                else:
+                                    completed = None
+                            if completed is not None:
+                                completed[1].result()
+                            self._driver._configure_store_support(store)
+                            sid = self._observe_and_select(store, hints, drive=self._inflight is None)
+                            self._observe(store)
+                            with self._lock:
+                                if not self._stop.is_set() and self._inflight is None:
+                                    requested = next(iter(self._join_requests), sid)
+                                    if requested is not None:
+                                        future = executor.submit(self._drive, requested)
+                                        self._inflight = (requested, future)
+                                        future.add_done_callback(lambda _: self._changed.set())
+                                        if (join := self._join_requests.pop(requested, None)) is not None:
+                                            join.set_result(future)
                             hints = set()
                             self._changed.wait(self.scan_interval)
                 except Exception as exc:
@@ -744,11 +812,28 @@ class _KnownSessionOwner:
                     # drive job keeps its own connection and lease lifecycle.
                     self._stop.wait(self.scan_interval)
 
+    def _observe(self, store: SessionStore) -> None:
+        with self._lock:
+            pending = self._observations
+            self._observations = []
+        error = None
+        try:
+            with self._observer_lock:
+                if self._observer is not None:
+                    self._observer(store)
+        except Exception as exc:
+            self.last_error = error = exc
+        finally:
+            for acknowledgement in pending:
+                if error is None:
+                    acknowledgement.set_result(None)
+                else:
+                    acknowledgement.set_exception(error)
+
     def _observe_and_select(self, store: SessionStore, hints: set[str], *, drive: bool) -> str | None:
         from .bindings import MissingHostBinding
 
         driver = self._driver
-        driver._configure_store_support(store)
         # Observation errors must not suppress an independently runnable drive.
         try:
             driver._observe_registered_handles(store, discover_unobserved=True)
@@ -793,21 +878,29 @@ class _KnownSessionOwner:
             self._last_sid = selected
         return selected
 
-    def _drive(self, sid: str) -> None:
+    def _drive(self, sid: str) -> bool:
         self._drive_thread = current_thread()
+        acquired = False
         try:
             with self._driver._open_drive_store() as store:
                 if self._stop.is_set() or not store.is_runnable(sid):
-                    return
+                    return False
+                registration = self._driver._registration_for_cursor(sid, store=store)
+                if registration is None or not registration.armed:
+                    return False
+                failure = self._driver._failure_after_progress(store, sid, self._driver._errors.get(sid))
+                if failure is not None and failure.terminal and not isinstance(failure.error, ProviderResultInvalid):
+                    return False
                 callback = self.support.drive
                 if callback is None:
-                    return
+                    return False
                 lease = store.acquire(sid, owner=f"session-client/{uuid4().hex}", ttl_ms=self.support.lease_ttl_ms)
                 if lease is not None:
+                    acquired = True
                     if self._stop.is_set():
                         with suppress(LeaseLost):
                             store.release(lease)
-                        return
+                        return False
                     callback(store, sid, lease=lease)
         except LedgerIntegrityError as exc:
             self._driver._record_local_integrity_failure(sid, exc)
@@ -815,9 +908,12 @@ class _KnownSessionOwner:
             self.last_error = exc
         except SessionNotLive:
             pass
+        except Exception as exc:
+            self.last_error = exc
         finally:
             self._driver._notify_session(sid)
             self._drive_thread = None
+        return acquired
 
 
 class SessionDriver:
