@@ -3186,9 +3186,15 @@ class SQLSessionTx:
 
     def lock_session(self, session_id: str) -> None:
         self._active()
+        self.store._require_live_row(self._lock_for_persistence(session_id))
+
+    def _lock_for_persistence(self, session_id: str) -> tuple[Any, ...]:
         if self._freeze_persistence_deadline is not None:
             self._freeze_persistence_deadline()
-        self.store._require_live_row(self.store._lock(session_id))
+        row = self.store._lock(session_id)
+        if self._check_persistence_deadline is not None:
+            self._check_persistence_deadline()
+        return row
 
     def preflight_create(self, session_id: str) -> bool:
         """Check the creation identity before preparing content and return whether it exists."""
@@ -3233,10 +3239,14 @@ class SQLSessionTx:
                     f"SELECT deletion_state FROM sk_session WHERE tenant_id=%s AND session_id=%s{s.lock_clause}",
                     (tenant_id, spec.parent_session_id),
                 )
+                if self._check_persistence_deadline is not None:
+                    self._check_persistence_deadline()
                 if len(parent) != 1:
                     raise Conflict("parent session not found in tenant")
                 if parent[0][0] != "live":
                     raise SessionNotLive("parent session is fenced for deletion")
+            if self._freeze_persistence_deadline is not None:
+                self._freeze_persistence_deadline()
             now = s._now()
             inserted = s._rows(
                 "INSERT INTO sk_session(tenant_id,session_id,schema_version,parent_session_id,parent_operation_id,"
@@ -3245,7 +3255,7 @@ class SQLSessionTx:
                 "ON CONFLICT(tenant_id,session_id) DO NOTHING RETURNING session_id",
                 (tenant_id, spec.session_id, spec.parent_session_id, spec.parent_operation_id, now),
             )
-            row = s._lock(spec.session_id)
+            row = self._lock_for_persistence(spec.session_id)
             # Serialize admission against the deletion fence before inspecting the identity.
             if row[7] != "live" or s._rows(
                 "SELECT 1 FROM sk_tombstone WHERE tenant_id=%s AND session_id=%s",
@@ -3338,9 +3348,7 @@ class SQLSessionTx:
             raise InputAdmissionProofError("signed input admission signer is unavailable")
         with s._transaction():
             ceiling = s._write_ceiling()
-            if self._freeze_persistence_deadline is not None:
-                self._freeze_persistence_deadline()
-            row = s._lock(session_id)
+            row = self._lock_for_persistence(session_id)
             s._require_live_row(row)
             old = s._rows(
                 f"SELECT {_STORED_INBOX_COLUMNS} FROM sk_inbox WHERE tenant_id=%s AND session_id=%s AND input_id=%s",

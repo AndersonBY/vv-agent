@@ -259,6 +259,42 @@ def test_postgres_external_admission_retains_early_deadline(store, database, mon
     assert store._rows("SELECT * FROM host_child") == ([] if external else [(1,)])
 
 
+def test_prepare_rechecks_deadline_after_waiting_for_a_session_lock(store, database, monkeypatch):
+    start(store)
+    clock = ManualClock()
+    rt = runtime(store, database, [], clock=clock, ttl_ms=4000, heartbeat_seconds=INTERVAL)
+    lease = store.acquire("s", owner="admission", ttl_ms=rt.ttl_ms)
+    assert lease is not None
+    scope = kernel._Scope(lease, rt, now_ms=store._now())
+    driver = kernel._Driver(store, "s", rt, scope)
+    raw = store._store
+    lock = raw._lock
+    entered = False
+
+    def lock_after_delay(session_id):
+        nonlocal entered
+        row = lock(session_id)
+        clock.advance(3500)
+        entered = True
+        return row
+
+    def prepare(tx):
+        tx.lock_session("s")
+        pytest.fail("prepare continued after its writing deadline")
+
+    try:
+        with (
+            monkeypatch.context() as patch,
+            pytest.raises(LeaseLost, match="session persistence reached the lease safety deadline"),
+        ):
+            patch.setattr(raw, "_lock", lock_after_delay)
+            driver.commit([], prepare=prepare)
+        assert entered
+    finally:
+        scope.close()
+        store.release(scope.lease)
+
+
 def test_slow_append_encoding_uses_last_lease(store, database, monkeypatch):
     start(store)
     entered, finish = threading.Event(), threading.Event()
