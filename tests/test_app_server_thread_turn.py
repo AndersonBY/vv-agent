@@ -114,11 +114,17 @@ def test_processor_starts_thread_and_streams_turn_items(monkeypatch) -> None:
 
     projection = server.kernel.handles[0].runtime
 
-    def reject_execution_wake(_thread_id: str) -> None:
-        raise AssertionError("projection runtime attempted to wake the execution worker")
+    assert isinstance(server.kernel._worker, _KnownSessionOwner)
+    owner_wakes: list[str] = []
+    owner_wake = server.kernel._worker.wake
 
-    monkeypatch.setattr(server.kernel._worker, "wake", reject_execution_wake)
+    def record_owner_wake(thread_id: str) -> None:
+        owner_wakes.append(thread_id)
+        owner_wake(thread_id)
+
+    monkeypatch.setattr(server.kernel._worker, "wake", record_owner_wake)
     projection.wake("thread_1")
+    assert owner_wakes == ["thread_1"]
 
 
 def test_runtime_factory_runs_after_inbox_commit_on_worker_thread() -> None:
@@ -160,7 +166,7 @@ def test_runtime_factory_runs_after_inbox_commit_on_worker_thread() -> None:
     )
     _drain_until_turn_completed(transport)
 
-    assert calls == [("session-local-worker", ("turn_1",))]
+    assert calls == [("session-client-drive_0", ("turn_1",))]
 
 
 def test_turn_start_and_completion_emit_thread_status_changes() -> None:

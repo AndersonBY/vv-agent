@@ -207,6 +207,7 @@ import sys
 from vv_agent.session.sqlite import SQLiteStore
 from vv_agent.session.records import InboxItem
 with SQLiteStore.standalone(sys.argv[1]) as store:
+    store.configure_input_admission(allow_unsigned=True)
     store.connection.execute('PRAGMA busy_timeout=100')
     _, records, _ = store.read_state('thread')
     actor = records[0].record.payload['principal']
