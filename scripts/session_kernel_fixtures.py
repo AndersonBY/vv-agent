@@ -27,6 +27,7 @@ from vv_agent.budget import BudgetEvaluator, RunBudgetLimits, UnavailableMetricP
 from vv_agent.events import ModelCallCompletedEvent, event_from_dict
 from vv_agent.guardrails import GuardrailResult
 from vv_agent.interaction import HostInteractionOutcome, HostInteractionRequest
+from vv_agent.kernel._boundary_hydration import _retain_record_payload, hydrate_and_fold_records
 from vv_agent.kernel._content_publication import declare_input_content, link_declared_input_content
 from vv_agent.kernel._content_runtime import SessionContentWriter
 from vv_agent.llm.scripted import ScriptedLLM
@@ -78,9 +79,11 @@ from vv_agent.workspace.memory import MemoryWorkspaceBackend
 JCS_JS = r"""
 const fs = require('fs');
 function jcs(x) {
+  if (typeof x === 'number' && !Number.isFinite(x)) throw new Error('Nonfinite JCS number');
+  if (typeof x === 'string' && /[\uD800-\uDFFF]/u.test(x)) throw new Error('Unpaired JCS surrogate');
   if (x === null || typeof x !== 'object') return JSON.stringify(x);
   if (Array.isArray(x)) return '[' + x.map(jcs).join(',') + ']';
-  return '{' + Object.keys(x).sort().map(k => JSON.stringify(k) + ':' + jcs(x[k])).join(',') + '}';
+  return '{' + Object.keys(x).sort().map(k => jcs(k) + ':' + jcs(x[k])).join(',') + '}';
 }
 for (const x of JSON.parse(fs.readFileSync(0, 'utf8'))) {
   process.stdout.write(Buffer.from(jcs(x), 'utf8').toString('base64') + '\n');
@@ -137,7 +140,11 @@ class _FixtureClock:
 
 def independent_bytes(values: list[Any]) -> list[bytes]:
     result = subprocess.run(
-        ["node", "-e", JCS_JS], input=json.dumps(values, ensure_ascii=True), text=True, capture_output=True, check=True
+        ["node", "-e", JCS_JS],
+        input=json.dumps(values, ensure_ascii=True, allow_nan=False),
+        text=True,
+        capture_output=True,
+        check=True,
     )
     return [base64.b64decode(line, validate=True) for line in result.stdout.splitlines()]
 
@@ -673,14 +680,6 @@ class Fixtures:
                 and routes["selected"] == ["A", "B"]
             ):
                 routes["selected"] = ["C", "B"]
-            elif (
-                point == "after_commit"
-                and record.kind == "op_completed"
-                and record.turn_id == f"{sid}/turn/followup"
-                and record.payload["execution_started"] is False
-                and routes["selected"] == ["C", "B"]
-            ):
-                routes["selected"] = ["B"]
 
         rt.hook = remove
         self.kernel._register_runtime(sid, rt)
@@ -709,7 +708,7 @@ class Fixtures:
         terminal = next(
             payload for record, payload in records if record.kind == "turn_ended" and record.turn_id == f"{sid}/turn/followup"
         )
-        assert calls == ["B", "B"] and preferences == [None, "B", "B"]
+        assert calls == ["B", "C"] and preferences == [None, "B", "B"]
         assert [metadata["vv_session"]["endpoint_id"] for metadata in dispatched_metadata] == calls
         assert selected_plans[0]["request"]["metadata"]["vv_session"]["endpoint_order"] == ["A", "B"]
         assert not missing["execution_started"] and missing["usage"] == {} and missing["evidence"] == []
@@ -1973,6 +1972,7 @@ class Fixtures:
         assert not self.state("yieldable_child").turns
         assert not rt.llm.steps
         assert state.active_turn_id is None
+        hydration = hydration_for_session_store(self.kernel.store, sid)
         self.semantics.append(
             {
                 "case": "yieldable_wait_atomic_steer",
@@ -1980,7 +1980,7 @@ class Fixtures:
                 "input_id": "new-input",
                 "same_commit": True,
                 "child_stopped": False,
-                "result": receipt.record._payload["result"],
+                "result": hydrate_record_payload(receipt, hydration)["result"],
             }
         )
 
@@ -2117,6 +2117,57 @@ def fold_negatives(vectors):
     return invalid
 
 
+def logical_compaction_negatives(streams, store):
+    by_session = dict(streams)
+    cases = []
+
+    def extend(prefix_fold, source, payload):
+        body = source.encode()
+        candidate = replace(source)
+        _retain_record_payload(candidate, body, payload)
+        return prefix_fold.fork().extend([candidate], bodies=[body])
+
+    for sid in ("summary", "micro"):
+        log = by_session[sid]
+        index = next(i for i, row in enumerate(log) if row.record.kind == "context_compacted")
+        prefix, source = log[:index], log[index]
+        hydration = hydration_for_session_store(store, sid)
+        validated = hydrate_and_fold_records(prefix, Fold, hydration)
+        payload = hydrate_record_payload(source, hydration)
+
+        assert extend(validated.fold, source.record, payload).compactions[-1].record_id == source.record.record_id
+        for field, value, reason in (
+            ("source_digest", "0" * 64, "compaction source mismatch"),
+            ("prefix_ids", ["forged"], "compaction identities mismatch"),
+            ("tail_ids", ["forged"], "compaction identities mismatch"),
+            (
+                "replacement",
+                [],
+                "replacement differs from accepted receipt" if sid == "summary" else "invalid micro replacement",
+            ),
+            ("evidence_manifest", {"artifacts": [], "cursors": [], "forged": True}, "compaction evidence mismatch"),
+        ):
+            label = f"{sid}_compaction_{field}"
+            try:
+                extend(validated.fold, source.record, payload | {field: value})
+            except TransitionError as exc:
+                assert str(exc) == reason, (label, str(exc))
+            else:
+                raise AssertionError(f"accepted logical compaction mutation: {label}")
+            cases.append(
+                {
+                    "rejection_class": label,
+                    "layer": "logical_fold",
+                    "session_id": sid,
+                    "prefix_ids": [row.record.record_id for row in prefix],
+                    "source_record_id": source.record.record_id,
+                    "mutation": {"field": field, "value": value},
+                    "reason": reason,
+                }
+            )
+    return cases
+
+
 def valid_vectors(streams, inbox):
     vectors, values, bodies = [], [], []
     for sid, stored in streams:
@@ -2239,7 +2290,7 @@ def coverage(vectors, semantics, logical_records):
     }
 
 
-def invalid_vectors(vectors):
+def invalid_vectors(vectors, historical_vectors):
     sample = next(v["wire"] for v in vectors if v["type"] == "record" and v["wire"]["kind"] == "op_planned")
     invalid = []
 
@@ -2255,6 +2306,15 @@ def invalid_vectors(vectors):
                 raise AssertionError(f"accepted invalid vector: {label}")
         invalid.append({"rejection_class": label, "layer": category, **facts(raw)})
 
+    # Inline metadata cases were frozen before S1 moved these payloads behind ContentRefs.
+    for label in ("closed_reserved_metadata", "closed_task_metadata", "closed_child_task_metadata"):
+        prior = next(vector for vector in historical_vectors if vector["rejection_class"] == label)
+        assert prior["layer"] == "codec"
+        raw = base64.b64decode(prior["bytes_base64"], validate=True)
+        add(label, raw=raw)
+        invalid[-1]["record_id"] = expected_id(json.loads(raw))
+        assert invalid[-1] == prior, label
+
     for kind, field, invalid_values in (
         ("op_parked", "yield_on_steer", (False, 1, "true", None)),
         ("op_parked", "yieldable_children", ("invalid", [1], None)),
@@ -2267,6 +2327,24 @@ def invalid_vectors(vectors):
             wire = deepcopy(source)
             wire["payload"][field] = value
             add(f"{kind}_{field}_{index}", wire)
+    stopped = next(
+        v["wire"]
+        for v in vectors
+        if v["type"] == "record"
+        and v["wire"]["kind"] == "boundary_recorded"
+        and v["wire"]["payload"]["stage"] == "after_cycle"
+        and v["wire"]["payload"]["data"]["action"] == "stop_non_success"
+    )
+    Record.parse(independent_bytes([stopped])[0])
+    for suffix, code in (
+        ("unknown", "host.private_reason"),
+        ("whitespace", "host policy stop"),
+        ("newline", "host\npolicy_stop"),
+        ("overlong", "a" * 129),
+    ):
+        wire = deepcopy(stopped)
+        wire["payload"]["data"]["stop"]["code"] = code
+        add(f"after_cycle_stop_code_{suffix}", wire)
     acceptance = next(
         v["wire"]
         for v in vectors
@@ -2486,13 +2564,21 @@ def generate(output: Path):
                         )
                     )
                 inventory = coverage(vectors, fixtures.semantics, logical_records)
-                invalid = invalid_vectors(vectors) + fold_negatives(vectors) + fixtures.invalid
+                invalid = (
+                    invalid_vectors(vectors, replacements.load("session_invalid.json")["vectors"])
+                    + fold_negatives(vectors)
+                    + fixtures.invalid
+                )
                 for kind, name in (("record", "session_records.jsonl"), ("inbox", "session_inbox.jsonl")):
                     (output / name).write_bytes(
                         b"".join(base64.b64decode(v["bytes_base64"]) + b"\n" for v in vectors if v["type"] == kind)
                     )
                 write_json(output, "session_codec_vectors.json", {"coverage": inventory, "vectors": vectors})
-                write_json(output, "session_invalid.json", {"vectors": invalid})
+                write_json(
+                    output,
+                    "session_invalid.json",
+                    {"vectors": invalid, "logical_vectors": logical_compaction_negatives(streams, fixtures.kernel.store)},
+                )
                 for cases in (fixtures.semantics, fixtures.recovery):
                     for case, raw in zip(cases, independent_bytes(cases), strict=True):
                         case.update(facts(raw))
@@ -2555,7 +2641,7 @@ def generate(output: Path):
                     projection.update(facts(raw))
                 for entry, raw in zip(app["transcripts"], independent_bytes(app["transcripts"]), strict=True):
                     entry.update(facts(raw))
-                write_json(output, "session_projection.json", {"sessions": projections})
+                write_json(output, "session_projection_s1.json", {"sessions": projections})
                 write_json(output, "session_compaction.json", {"vectors": compactions})
                 write_json(output, "app_server_protocol.json", app)
                 spec = importlib.util.spec_from_file_location(
@@ -2574,6 +2660,24 @@ def generate(output: Path):
                 )
                 replacements.validate_replacements({name: values[name] for name in replacements.REPLACE}, independent_bytes)
                 self_checks = checks.validate_outputs(values, replacements.BASE, replacements.KEEP, replacements.REPLACE)
+                spec = importlib.util.spec_from_file_location(
+                    "_session_kernel_catalog", Path(__file__).with_name("_session_kernel_catalog.py")
+                )
+                assert spec is not None and spec.loader is not None
+                catalog = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(catalog)
+                catalog_payload = catalog.capture_content_catalog(
+                    fixtures._raw_store,
+                    fixtures.content_key_provider,
+                    output,
+                    replacements.load("session_content_catalog.json"),
+                    independent_bytes=independent_bytes,
+                    fixture_values=S1_FIXTURE_VALUES,
+                )
+                catalog_name = "session_content_capture_s1.json"
+                write_json(output, catalog_name, catalog_payload)
+                content_coverage = sorted(curation.coverage_keys(catalog_name, catalog_payload))
+                curated_coverage[catalog_name] = {"before": content_coverage, "after": content_coverage}
                 replacement_report["replaced"] = {
                     name: replacements.classify(replacements.load(name), values[name]) for name in replacements.REPLACE
                 }

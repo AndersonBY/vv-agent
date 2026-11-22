@@ -217,7 +217,7 @@ def entry_keys(name, item):
         return {"event=" + item["type"]} | shape_keys(item, item["type"])
     if name == "projection_spans":
         return {"span=" + item["span"]["name"] + "@" + item["method"]} | shape_keys(item)
-    if name == "session_projection.json":
+    if name == "session_projection_s1.json":
         return (
             set().union(*(entry_keys("projection_events", event) for event in item["events"]))
             | set().union(*(entry_keys("projection_spans", span) for span in item["spans"]))
@@ -346,16 +346,20 @@ def logical_optional_keys(wire):
 def coverage_keys(name, value):
     if isinstance(value, list):
         return set().union(*(entry_keys(name, item) for item in value))
+    if name == "session_content_capture_s1.json":
+        return {"content=" + content_id for content_id in value["contents"]}
     collection = {
         "session_codec_vectors.json": "vectors",
         "session_invalid.json": "vectors",
         "session_compaction.json": "vectors",
-        "session_projection.json": "sessions",
+        "session_projection_s1.json": "sessions",
         "app_server_protocol.json": "transcripts",
         **SCENARIO_FILES,
     }.get(name)
     if collection:
         keys = set().union(*(entry_keys(name, item) for item in value[collection]))
+        if name == "session_invalid.json":
+            keys.update(*(entry_keys(name, item) for item in value["logical_vectors"]))
         if name == "app_server_protocol.json":
             for family in ("jsonSchema", "typescript"):
                 bundles = value["schemas"][family]
@@ -489,16 +493,16 @@ def curate(output, streams, semantics, independent, facts, logical_records):
     supporting = {}
     invalid = values["session_invalid.json"]
     invalid["vectors"] = select("session_invalid.json", invalid["vectors"])
-    for vector in invalid["vectors"]:
-        if vector["layer"] not in {"fold", "admission", "input_conflict"}:
+    for vector in (*invalid["vectors"], *invalid["logical_vectors"]):
+        if vector["layer"] not in {"fold", "logical_fold", "admission", "input_conflict"}:
             continue
-        ids = set(vector.get("prefix_ids", [])) | {vector.get("audit_record_id")}
+        ids = set(vector.get("prefix_ids", [])) | {vector.get("audit_record_id"), vector.get("source_record_id")}
         for row in sources[vector["session_id"]]:
             if row.record.record_id in ids:
                 supporting[(row.record.session_id, row.record.record_id)] = row.record.to_dict()
     invalid["source_records"] = list(supporting.values())
 
-    projections = values["session_projection.json"]["sessions"]
+    projections = values["session_projection_s1.json"]["sessions"]
     all_events = [event for item in projections for event in item["events"]]
     referenced_sessions = {case["input"]["session_id"] for case in values["token_usage.json"]["compaction_cases"]}
     # Accounting references must retain a real projection and its source records after set cover.
@@ -552,7 +556,7 @@ def curate(output, streams, semantics, independent, facts, logical_records):
         strict=True,
     ):
         item.update(facts(raw))
-    values["session_projection.json"] = {"sessions": selected, "source_records": source_records}
+    values["session_projection_s1.json"] = {"sessions": selected, "source_records": source_records}
 
     for name in EVENT_FILES | {"runner_trace.jsonl"}:
         values[name] = select(name, values[name])
@@ -576,7 +580,7 @@ def curate(output, streams, semantics, independent, facts, logical_records):
             path.write_text(app_server_source(value))
         elif name == "app_server_observable.json" or name == "public_api.json":
             path.write_text(public_api_source(value))
-        elif name == "session_projection.json":
+        elif name == "session_projection_s1.json":
             # One source row per line keeps real wire objects readable without repeated indentation.
             sessions = value["sessions"]
             lines = ["{", '  "sessions": [']

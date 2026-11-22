@@ -7,6 +7,7 @@ import runpy
 import subprocess
 import sys
 from collections import Counter, defaultdict
+from collections.abc import Mapping
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import replace
@@ -26,6 +27,7 @@ from vv_agent.approval import ApprovalBroker
 from vv_agent.events import ApprovalRequestedEvent, event_from_dict
 from vv_agent.kernel import _driver_inputs as inputs
 from vv_agent.kernel import _sql as sql_module
+from vv_agent.kernel._boundary_hydration import SessionHydration, _retain_record_payload, hydrate_and_fold_records
 from vv_agent.kernel._content import ContentIntegrityError, ContentLinkConflict, ContentRef, ContentUnavailable
 from vv_agent.kernel._content_publication import make_record_before_publication
 from vv_agent.kernel._content_reader import DurableContentReader
@@ -73,7 +75,8 @@ FILES = {
     "session_invalid.json",
     "session_semantics.json",
     "session_recovery.json",
-    "session_projection.json",
+    "session_projection_s1.json",
+    "session_content_capture_s1.json",
     "session_compaction.json",
     "app_server_protocol.json",
 }
@@ -687,11 +690,12 @@ def test_session_kernel_fixtures_deterministic_and_revalidated(generated_fixture
     for kind, name in (("record", "session_records.jsonl"), ("inbox", "session_inbox.jsonl")):
         assert (first / name).read_bytes() == b"".join(checked_bytes(v) + b"\n" for v in corpus["vectors"] if v["type"] == kind)
 
-    for wire in read("session_invalid.json")["source_records"]:
+    invalid_fixture = read("session_invalid.json")
+    for wire in invalid_fixture["source_records"]:
         record = Record(**wire)
         assert record.encode() == AUTHOR["independent_bytes"]([wire])[0]
         records[(record.session_id, record.record_id)] = record
-    invalid = read("session_invalid.json")["vectors"]
+    invalid = invalid_fixture["vectors"]
     classes = {v["rejection_class"] for v in invalid}
     assert {
         "missing_version",
@@ -757,28 +761,67 @@ def test_session_kernel_fixtures_deterministic_and_revalidated(generated_fixture
     for name, key in (
         ("session_semantics.json", "cases"),
         ("session_recovery.json", "cases"),
-        ("session_projection.json", "sessions"),
+        ("session_projection_s1.json", "sessions"),
         ("app_server_protocol.json", "transcripts"),
     ):
         for vector in read(name)[key]:
             value = {k: v for k, v in vector.items() if k not in {"bytes_base64", "sha256", "record_id"}}
             assert checked_bytes(vector) == AUTHOR["independent_bytes"]([value])[0]
-    for projection in read("session_projection.json")["sessions"]:
+    captured_catalog = read("session_content_capture_s1.json")["contents"]
+    projection_fixture = read("session_projection_s1.json")
+
+    class CapturedContent:
+        def __init__(self, entries: Mapping[str, Any]) -> None:
+            self.entries = entries
+
+        def read(self, tenant_id: str, session_id: str, owner: str, slot: str, ref: ContentRef) -> bytes:
+            entry = self.entries[ref.content_id]
+            assert entry["tenant_id"] == tenant_id and entry["session_id"] == session_id
+            assert entry["key_id"] == ref.key_id, (owner, slot)
+            return base64.b64decode(entry["bytes_base64"], validate=True)
+
+    reader = CapturedContent(captured_catalog)
+    for vector in invalid_fixture["logical_vectors"]:
+        sid = vector["session_id"]
+        prefix = tuple(
+            StoredRecord(records[(sid, record_id)], seq, "fixture", 0, 0) for seq, record_id in enumerate(vector["prefix_ids"], 1)
+        )
+        source = records[(sid, vector["source_record_id"])]
+        hydration = SessionHydration(reader, tenant_id="default", session_id=sid)
+        base = hydrate_and_fold_records(prefix, AUTHOR["Fold"], hydration).fold
+        payload = AUTHOR["hydrate_record_payload"](StoredRecord(source, len(prefix) + 1, "fixture", 0, 0), hydration)
+        body = source.encode()
+        valid = replace(source)
+        _retain_record_payload(valid, body, payload)
+        base.fork().extend([valid], bodies=[body])
+        changed = replace(source)
+        mutation = vector["mutation"]
+        _retain_record_payload(changed, body, payload | {mutation["field"]: mutation["value"]})
+        with pytest.raises(TransitionError, match=re.escape(vector["reason"])):
+            base.fork().extend([changed], bodies=[body])
+
+    for projection in projection_fixture["sessions"]:
+        sid = projection["session_id"]
         rows = tuple(
             StoredRecord(Record(**row["wire"]), row["seq"], row["commit_id"], row["writer_epoch"], row["created_ms"])
-            for row in read("session_projection.json")["source_records"][projection["session_id"]]
+            for row in projection_fixture["source_records"][sid]
         )
-        expected_events = {e.event_id: e.to_dict() for e in project_records(rows)}
+        hydration = SessionHydration(reader, tenant_id="default", session_id=sid)
+        expected_events = (
+            {e.event_id: e.to_dict() for e in project_records(rows, hydration=hydration)} if projection["events"] else {}
+        )
         assert projection["events"] == [expected_events[e["event_id"]] for e in projection["events"]]
-        assert projection["spans"]
+        if projection["spans"]:
+            expected_spans = {
+                (seq, method, span.span_id): span.to_dict() for seq, method, span in project_spans(rows, hydration=hydration)
+            }
         source_by_seq = {row.seq: row.record for row in rows}
         for entry in projection["spans"]:
             span = entry["span"]
             source = source_by_seq[entry["seq"]]
+            assert span == expected_spans[(entry["seq"], entry["method"], span["span_id"])]
             identity = (
-                ["tools", source.operation_id, source.attempt]
-                if span["name"] == "tool"
-                else ["tools", source.turn_id, span["name"]]
+                [sid, source.operation_id, source.attempt] if span["name"] == "tool" else [sid, source.turn_id, span["name"]]
             )
             assert span["span_id"] == "sk/span/" + sha256(AUTHOR["independent_bytes"]([identity])[0]).hexdigest()
         for event in projection["events"]:

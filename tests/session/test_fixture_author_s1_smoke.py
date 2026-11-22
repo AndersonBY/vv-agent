@@ -184,7 +184,7 @@ def test_fixture_author_endpoint_routing_uses_hydrated_s1_plans() -> None:
         case = fixtures.semantics[0]
         assert case["case"] == "endpoint_routing"
         assert case["session_id"] == session_id
-        assert case["calls"] == ["B", "B"]
+        assert case["calls"] == ["B", "C"]
         assert case["preferences"] == [None, "B", "B"]
         raw_store = fixtures.kernel._root_store
         _, rows, _ = fixtures.kernel._read_state(session_id)
@@ -209,7 +209,7 @@ def test_fixture_author_endpoint_routing_uses_hydrated_s1_plans() -> None:
         assert selected_request["metadata"]["vv_session"]["endpoint_order"] == ["A", "B"]
         assert selected_request["metadata"]["vv_session"]["model_binding"]["model"] == "selected"
         retry_request = selected_plans[-1][1]["request"]
-        assert retry_request["metadata"]["vv_session"]["endpoint_order"] == ["B"]
+        assert retry_request["metadata"]["vv_session"]["endpoint_order"] == ["C", "B"]
 
         raw_plan = selected_plans[0][0].record
         assert declared_content_ref(raw_plan.payload["request"]) is not None

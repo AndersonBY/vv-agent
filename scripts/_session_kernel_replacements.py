@@ -1176,7 +1176,7 @@ class Author:
             case["input"] = {
                 "session_id": sid,
                 "action": "reuse_summary_receipt" if replay else "drive",
-                "transcript_ref": f"session_projection.json#/source_records/{sid}",
+                "transcript_ref": f"session_projection_s1.json#/source_records/{sid}",
             }
             case["expected"] = {
                 "model_calls": calls,
