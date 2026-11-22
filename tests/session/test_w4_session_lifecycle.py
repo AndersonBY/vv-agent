@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import ExitStack
 from gc import collect
 from pathlib import Path
+from sqlite3 import OperationalError
 from threading import Barrier, Event, Thread, current_thread
 from threading import enumerate as thread_enumerate
 from time import monotonic, sleep
@@ -907,6 +908,67 @@ def test_known_session_owner_recovers_observer_and_leaves_unregistered_input(mon
         assert retried.is_set()
         assert driver.store.lease_status("unregistered")[1:] == (0, 0)
         assert [entry.item.input_id for entry in driver.store.peek_inbox("unregistered")] == ["foreign"]
+
+
+@pytest.mark.parametrize("fault", ["busy", "not-acquired"])
+def test_known_session_claim_miss_delays_only_that_session(monkeypatch, fault) -> None:
+    now = 10.0
+    monkeypatch.setattr(surface_module, "monotonic", lambda: now, raising=False)
+    acquire = CoreSQLiteStore.acquire
+    first_failed, retried = Event(), Event()
+    attempts = []
+
+    def fail_first(store, session_id, **kwargs):
+        if session_id == "first" and kwargs["owner"].startswith("session-client/"):
+            attempts.append(now)
+            if len(attempts) == 1:
+                first_failed.set()
+                if fault == "busy":
+                    raise OperationalError("database is locked")
+                return None
+            retried.set()
+        return acquire(store, session_id, **kwargs)
+
+    monkeypatch.setattr(CoreSQLiteStore, "acquire", fail_first)
+    with ExitStack() as stack:
+        driver = SessionDriver(_known_sessions=True)
+        stack.callback(driver.close)
+        agent = Agent("known", "Answer.", model="m")
+        for sid in ("first", "second"):
+            driver.create(sid, ".")
+
+        def start(sid):
+            provider = ScriptedModelProvider.new("scripted", "m", [LLMResponse(sid)])
+            return driver.start(sid, agent, RunConfig(model_provider=provider), "go")
+
+        first = start("first")
+        assert first_failed.wait(3)
+        assert start("second").result(timeout=4).final_output == "second"
+        for _ in range(3):
+            driver._worker.request_observation(wait=True)
+        assert attempts == [10.0]
+        now += 1
+        driver._worker.wake("first")
+        assert first.result(timeout=4).final_output == "first"
+        assert retried.is_set()
+
+
+def test_known_session_owner_self_close_leaves_observer_running() -> None:
+    with ExitStack() as stack:
+        driver = SessionDriver(_known_sessions=True)
+        stack.callback(driver.close)
+        owner = driver._worker
+        observed = Event()
+
+        def observe(_store):
+            with pytest.raises(RuntimeError, match="cannot close from its own execution thread"):
+                owner.close()
+            observed.set()
+
+        owner.set_observer(observe)
+        owner.request_observation(wait=True)
+        assert observed.is_set()
+        assert owner.running
 
 
 @pytest.mark.parametrize("cooperative", [False, True])

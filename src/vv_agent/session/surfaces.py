@@ -12,7 +12,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Event, Lock, RLock, Thread, current_thread
-from time import sleep
+from time import monotonic, sleep
 from typing import Any, cast
 from uuid import uuid4
 from weakref import WeakKeyDictionary, WeakValueDictionary
@@ -678,6 +678,7 @@ class _KnownSessionOwner:
         self._drive_thread: Thread | None = None
         self._hints: set[str] = set()
         self._projected: dict[str, int] = {}
+        self._retry_after: dict[str, float] = {}
         self._last_sid = ""
         self._observer_lock = RLock()
         self._observer: Callable[[SessionStore], None] | None = None
@@ -758,6 +759,8 @@ class _KnownSessionOwner:
     def close(self) -> bool:
         with self._lock:
             thread = self._thread
+            if current_thread() in (thread, self._drive_thread):
+                raise RuntimeError("SessionDriver cannot close from its own execution thread")
             self._stop.set()
             self._changed.set()
             for observation in self._observations:
@@ -766,8 +769,6 @@ class _KnownSessionOwner:
             for request in self._join_requests.values():
                 request.set_result(None)
             self._join_requests.clear()
-        if current_thread() in (thread, self._drive_thread):
-            raise RuntimeError("SessionDriver cannot close from its own execution thread")
         if thread is not None:
             thread.join()
         return True
@@ -788,14 +789,20 @@ class _KnownSessionOwner:
                                     self._inflight = None
                                 else:
                                     completed = None
+                            now = monotonic()
+                            self._retry_after = {sid: deadline for sid, deadline in self._retry_after.items() if deadline > now}
                             if completed is not None:
-                                completed[1].result()
+                                completed_sid, completed_job = completed
+                                if not completed_job.result():
+                                    self._retry_after[completed_sid] = now + self.scan_interval
                             self._driver._configure_store_support(store)
                             sid = self._observe_and_select(store, hints, drive=self._inflight is None)
                             self._observe(store)
                             with self._lock:
                                 if not self._stop.is_set() and self._inflight is None:
-                                    requested = next(iter(self._join_requests), sid)
+                                    requested = next(
+                                        (target for target in self._join_requests if target not in self._retry_after), sid
+                                    )
                                     if requested is not None:
                                         future = executor.submit(self._drive, requested)
                                         self._inflight = (requested, future)
@@ -868,7 +875,13 @@ class _KnownSessionOwner:
                     if projected < head:
                         through = driver._deliver_child_session(store, sid)
                         self._projected[sid] = through or head
-                if selected is None and drive and self.drive_available and store.is_runnable(sid):
+                if (
+                    selected is None
+                    and drive
+                    and self.drive_available
+                    and sid not in self._retry_after
+                    and store.is_runnable(sid)
+                ):
                     selected = sid
             except LedgerIntegrityError as exc:
                 driver._record_local_integrity_failure(sid, exc)
