@@ -419,8 +419,15 @@ def test_same_tenant_users_reuse_only_explicit_shared_resource_grants(store, tmp
             ("turn/followUp", submit),
             ("turn/action", answer),
             ("turn/interrupt", {"threadId": source, "expectedTurnId": turn, "actionId": "cancel"}),
+            ("approval/resolve", {"threadId": source, "turnId": turn, "requestId": "denied-approval", "decision": "deny"}),
+            (
+                "thread/model/select",
+                {"threadId": source, "inputId": "denied-model", "selection": {"model": "m", "route": {}}},
+            ),
+            ("thread/compact/start", {"threadId": source, "actionId": "denied-compact"}),
             ("thread/fork", {"threadId": source, "forkId": "forbidden-copy"}),
             ("thread/archive", {"threadId": source}),
+            ("thread/unsubscribe", {"threadId": source}),
         )
         denied = (
             *(
