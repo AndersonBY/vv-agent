@@ -28,7 +28,12 @@ jobs:
           sudo apt-get install -y -qq postgresql-common
           sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
           sudo apt-get install -y -qq postgresql-18
-          sudo pg_ctlcluster 18 main start || true
+          cluster_status="$(pg_lsclusters -h | awk '$1 == "18" && $2 == "main" {print $4}')"
+          if [[ -z "$cluster_status" ]]; then
+            sudo pg_createcluster 18 main --start
+          elif [[ "$cluster_status" == down ]]; then
+            sudo pg_ctlcluster 18 main start
+          fi
           pg_lsclusters
           sudo -u postgres psql -p 5432 -qc "ALTER USER postgres PASSWORD 'postgres'"
           pg_isready -h localhost -p 5432
