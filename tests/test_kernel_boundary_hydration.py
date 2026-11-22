@@ -7,7 +7,9 @@ from typing import Any
 
 import pytest
 
+from vv_agent.kernel import _hydration
 from vv_agent.kernel._boundary_hydration import (
+    SessionHydration,
     hydrate_boundary_data,
     hydrate_context_compacted,
     hydrate_turn_ended,
@@ -17,7 +19,7 @@ from vv_agent.kernel._content import Classification, ContentLabels, ContentRef, 
 from vv_agent.kernel._content_publication import _payload_slots, publish_record_content
 from vv_agent.kernel._content_runtime import SessionContentWriter as ContentSessionWriter
 from vv_agent.kernel._driver import CoreDriver
-from vv_agent.kernel._hydration import MissingContentLink, ReferenceDigestMismatch, reference_digest
+from vv_agent.kernel._hydration import MissingContentLink, ReferenceDigestMismatch, TypedSchemaFailure, reference_digest
 from vv_agent.kernel._record_codec import RecordError
 from vv_agent.kernel._records import Record, record_identity
 from vv_agent.kernel._store import StoredRecord
@@ -40,6 +42,47 @@ class _Reader:
             return self.links[(owner, slot, ref.content_id)]
         except KeyError as exc:
             raise MissingContentLink("owner/slot/ref link is absent") from exc
+
+
+def test_typed_and_generic_slots_share_only_exact_decoded_bytes(monkeypatch: pytest.MonkeyPatch) -> None:
+    expected = {"a": [1], "b": 2}
+    ref = _ref("shared", expected)
+    body = canonical_json_bytes(expected)
+    reader = _Reader()
+    first = ("record:1", "input", ref.content_id)
+    second = ("record:2", "request.messages[0]", ref.content_id)
+    reader.links = {first: body, second: body}
+    hydration = SessionHydration(reader, tenant_id="tenant", session_id="session", _decoded_json={})
+    original_loads = _hydration.json.loads
+    calls = []
+
+    def counted_loads(text, *args, **kwargs):
+        calls.append(text)
+        return original_loads(text, *args, **kwargs)
+
+    monkeypatch.setattr(_hydration.json, "loads", counted_loads)
+    typed = hydration.read(*first[:2], ref)
+    typed["a"].append(3)
+    assert hydration.read(*second[:2], ref) == expected
+    assert reader.calls == [first, second]
+    assert len(calls) == 1
+
+    # A changed body for the same ref must receive its own canonical check.
+    reader.links[first] = b'{"b":2,"a":[1]}'
+    assert len(reader.links[first]) == ref.size
+    with pytest.raises(TypedSchemaFailure, match="not canonical"):
+        hydration.read(*first[:2], ref)
+
+
+@pytest.mark.parametrize("body", [b'{"a":1,"a":2}', b'{"a":NaN}', b'{"a":Infinity}', b'"\xff"'])
+def test_generic_slot_requires_strict_canonical_json(body: bytes) -> None:
+    ref = replace(_ref("invalid", {}), size=len(body))
+    reader = _Reader()
+    reader.links[("record:1", "request.messages[0]", ref.content_id)] = body
+    hydration = SessionHydration(reader, tenant_id="tenant", session_id="session", _decoded_json={})
+
+    with pytest.raises(TypedSchemaFailure, match=r"not (?:valid )?canonical JSON"):
+        hydration.read("record:1", "request.messages[0]", ref)
 
 
 class _Writer(ContentSessionWriter):

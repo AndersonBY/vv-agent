@@ -148,7 +148,7 @@ def projection_records_frame(
         input_ids=(input_id for stored in selected if (input_id := _lookup_input_owner(stored.record)) is not None),
         validate_each_read=False,
     ) as reader:
-        framed = replace(hydration, reader=reader, _validated_json_refs=set())
+        framed = replace(hydration, reader=reader, _decoded_json={})
         hydrated = {stored.seq: _hydrate_projection_stored_record(stored, framed) for stored in selected}
         yield tuple(hydrated.get(stored.seq, stored) for stored in sources)
 

@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import json
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
-from ._canonical_json import canonical_json_bytes, validate_sha256
+from ._canonical_json import validate_sha256
 from ._content import (
     INPUT_ACTOR_ATTRIBUTES,
     ContentBindingMismatch,
@@ -45,6 +44,7 @@ from ._hydration import (
     ReferenceDigestMismatch,
     SessionHydrator,
     TypedSchemaFailure,
+    _decode_json,
     _parse_definition,
     _parse_principal_attributes,
     reference_digest,
@@ -82,7 +82,6 @@ class SessionHydration:
     reader: ContentReader = field(repr=False)
     tenant_id: str
     session_id: str
-    _validated_json_refs: set[ContentRef] | None = field(default=None, repr=False, compare=False)
     _decoded_json: dict[ContentRef, tuple[bytes, Any]] | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -141,7 +140,7 @@ class SessionHydration:
             tenant_id=self.tenant_id,
             session_id=self.session_id,
             owner=owner,
-            validated_json_refs=self._validated_json_refs,
+            decoded_json=self._decoded_json,
         )
         try:
             selected = HydrationSlot(slot)
@@ -229,30 +228,7 @@ class SessionHydration:
             raise MissingContentLink("content owner link is unavailable") from exc
         except ContentStoreError as exc:
             raise HydrationError("content read failed") from exc
-        if type(body) is not bytes:
-            raise IntegrityFailure(f"{slot} reader returned a non-bytes value")
-        if len(body) != ref.size:
-            raise IntegrityFailure(f"{slot} size does not match ContentRef")
-        decoded_json = self._decoded_json
-        cached = None
-        if decoded_json is not None:
-            cached = decoded_json.get(ref)
-            if cached is not None and cached[0] is body:
-                # Nested hydration replaces paths in its own copy.
-                return copy_json(cached[1])
-        try:
-            value = json.loads(body)
-        except (TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise TypedSchemaFailure(f"{slot} is not valid canonical JSON") from exc
-        validated_refs = self._validated_json_refs
-        if cached is not None or validated_refs is None or ref not in validated_refs:
-            if canonical_json_bytes(value, slot) != body:
-                raise TypedSchemaFailure(f"{slot} is not canonical JSON")
-            if validated_refs is not None:
-                validated_refs.add(ref)
-        if decoded_json is not None:
-            decoded_json[ref] = (body, copy_json(value))
-        return value
+        return _decode_json(body, slot, ref, self._decoded_json)
 
 
 class RetainedInboxItem(InboxItem):
@@ -792,7 +768,7 @@ def _hydrate_session_records_batch(
         ),
         validate_each_read=False,
     ) as reader:
-        framed = replace(hydration, reader=reader, _validated_json_refs=set(), _decoded_json={})
+        framed = replace(hydration, reader=reader, _decoded_json={})
         return tuple(
             hydrate_session_stored_record(
                 stored,

@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 
 from tests.sim.content import SimContentKeyProvider
-from vv_agent.kernel import _boundary_hydration, _content_sql
+from vv_agent.kernel import _content_sql, _hydration
 from vv_agent.kernel._boundary_hydration import (
     SessionHydration,
     hydrate_session_input,
@@ -365,20 +365,20 @@ def test_frame_reuses_canonical_json_proof_without_sharing_mutable_values(
         writer.link_record(1, ref, "request.messages[1]")
 
     canonical_calls = 0
-    original_canonical = _boundary_hydration.canonical_json_bytes
+    original_canonical = _hydration.canonical_json_bytes
 
     def counted_canonical(value, field_name="value"):
         nonlocal canonical_calls
         canonical_calls += 1
         return original_canonical(value, field_name)
 
-    monkeypatch.setattr(_boundary_hydration, "canonical_json_bytes", counted_canonical)
+    monkeypatch.setattr(_hydration, "canonical_json_bytes", counted_canonical)
     with reader._read_frame(record_seqs=(1,)) as frame_reader:
         hydration = SessionHydration(
             frame_reader,
             tenant_id=store.tenant_id,
             session_id=SESSION,
-            _validated_json_refs=set(),
+            _decoded_json={},
         )
         first = hydration.read(record_owner(1), "request.messages[0]", ref)
         second = hydration.read(record_owner(1), "request.messages[1]", ref)
@@ -997,7 +997,7 @@ def test_shared_nested_definition_content_decodes_once_but_validates_each_owner(
             events.append(decoded)
         return decoded
 
-    monkeypatch.setattr(_boundary_hydration.json, "loads", track_loads)
+    monkeypatch.setattr(_hydration.json, "loads", track_loads)
     hydration = SessionHydration(reader, tenant_id=store.tenant_id, session_id=SESSION)
     first, second = hydrate_session_records(records, hydration)
     first.record._payload["definition"]["task"]["initial_messages"][0]["content"] = "changed"

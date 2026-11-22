@@ -33,6 +33,7 @@ from ._execution_values import AgentTask
 from ._message_values import Message
 from ._record_codec import RecordError, validate
 from ._record_schema import CHILD_ADMISSION, DEFINITION_MODEL_BINDING, SEED
+from ._records import copy_json
 
 
 class HydrationError(RuntimeError):
@@ -156,36 +157,29 @@ def _non_empty(value: object, field_name: str) -> str:
     return value
 
 
-def _pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    for key, value in items:
-        if key in result:
-            raise ValueError(f"duplicate field: {key}")
-        result[key] = value
-    return result
-
-
-def _reject_constant(value: str) -> None:
-    raise ValueError(f"non-finite JSON number: {value}")
-
-
 def _decode_json(
     body: bytes,
-    slot: HydrationSlot | str,
-    *,
-    canonical_checked: bool = False,
+    slot: str,
+    ref: ContentRef,
+    decoded_json: dict[ContentRef, tuple[bytes, Any]] | None,
 ) -> Any:
-    label = slot.value if isinstance(slot, HydrationSlot) else slot
     if type(body) is not bytes:
-        raise TypedSchemaFailure(f"{label} reader must return bytes")
+        raise IntegrityFailure(f"{slot} reader returned a non-bytes value")
+    if len(body) != ref.size:
+        raise IntegrityFailure(f"{slot} size does not match ContentRef")
+
+    cached = decoded_json.get(ref) if decoded_json is not None else None
+    if cached is not None and cached[0] is body:
+        return copy_json(cached[1])
     try:
-        text = body.decode("utf-8", errors="strict")
-        value = json.loads(text, object_pairs_hook=_pairs, parse_constant=_reject_constant)
-        canonical = None if canonical_checked else canonical_json_bytes(value, label)
+        value = json.loads(body.decode("utf-8"))
+        canonical = canonical_json_bytes(value, slot)
     except (UnicodeError, ValueError, TypeError) as exc:
-        raise TypedSchemaFailure(f"{label} is not valid canonical JSON") from exc
-    if canonical is not None and canonical != body:
-        raise TypedSchemaFailure(f"{label} is not canonical JSON")
+        raise TypedSchemaFailure(f"{slot} is not valid canonical JSON") from exc
+    if canonical != body:
+        raise TypedSchemaFailure(f"{slot} is not canonical JSON")
+    if decoded_json is not None:
+        decoded_json[ref] = (body, copy_json(value))
     return value
 
 
@@ -304,7 +298,7 @@ class SessionHydrator:
         tenant_id: str,
         session_id: str,
         owner: str,
-        validated_json_refs: set[ContentRef] | None = None,
+        decoded_json: dict[ContentRef, tuple[bytes, Any]] | None = None,
     ) -> None:
         try:
             self._tenant_id = _non_empty(tenant_id, "tenant_id")
@@ -315,7 +309,7 @@ class SessionHydrator:
         if not isinstance(reader, ContentReader):
             raise TypeError("reader must implement ContentReader")
         self._reader = reader
-        self._validated_json_refs = validated_json_refs
+        self._decoded_json = decoded_json
 
     @property
     def binding(self) -> tuple[str, str, str]:
@@ -348,16 +342,7 @@ class SessionHydrator:
             ContentBindingMismatch,
         ) as exc:
             raise _translate_backend_error(exc) from exc
-        if type(body) is not bytes:
-            raise IntegrityFailure(f"{slot} reader returned a non-bytes value")
-        if len(body) != ref.size:
-            raise IntegrityFailure(f"{slot} size does not match ContentRef")
-        validated_refs = self._validated_json_refs
-        canonical_checked = validated_refs is not None and ref in validated_refs
-        value = _decode_json(body, slot, canonical_checked=canonical_checked)
-        if validated_refs is not None:
-            validated_refs.add(ref)
-        return value
+        return _decode_json(body, slot, ref, self._decoded_json)
 
     def nested(self, kind: str, source: Mapping[str, Any], outer_slot: str, value: Any) -> Any:
         """Hydrate only the nested links declared by the closed publication inventory."""
