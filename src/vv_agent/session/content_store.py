@@ -22,6 +22,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from vv_agent.kernel._canonical_json import canonical_json_bytes
 from vv_agent.kernel._content import (
+    _EXACT_KEY_ID_PREFIX,
     ContentBindingMismatch,
     ContentIntegrityError,
     ContentLabels,
@@ -32,6 +33,7 @@ from vv_agent.kernel._content import (
     KeyProvider,
     KeyUnavailable,
     WrappedDataKey,
+    _ExactKeyIntent,
 )
 from vv_agent.kernel._content_sql import (
     ContentExportRef,
@@ -51,18 +53,18 @@ _KEY_WRAP_PREFIX = b"vv-agent/S1/key-wrap/v1\0"
 _KEY_STATE_ENV = "VV_AGENT_LOCAL_KEY_STATE"
 
 
-def _key_wrap_aad(tenant_id: str, session_id: str, key_id: str) -> bytes:
-    return canonical_json_bytes(
-        {
-            "domain": "vv-agent/S1/key-wrap",
-            "framing_version": 1,
-            "purpose": "session-data-key",
-            "tenant_id": tenant_id,
-            "session_id": session_id,
-            "key_id": key_id,
-        },
-        "data-key AAD",
-    )
+def _key_wrap_aad(tenant_id: str, session_id: str, key_id: str, *, provider_instance_id: str | None = None) -> bytes:
+    binding = {
+        "domain": "vv-agent/S1/key-wrap",
+        "framing_version": 1,
+        "purpose": "session-data-key",
+        "tenant_id": tenant_id,
+        "session_id": session_id,
+        "key_id": key_id,
+    }
+    if provider_instance_id is not None:
+        binding["provider_instance_id"] = provider_instance_id
+    return canonical_json_bytes(binding, "data-key AAD")
 
 
 def _default_local_key_state_path(master_key: bytes) -> Path:
@@ -189,18 +191,127 @@ class LocalKeyProvider:
         if state is None or state[2] or state[:2] != (tenant_id, session_id):
             raise KeyUnavailable("session data key is unavailable")
 
+    def _provision_exact_key_lifecycle(self) -> str:
+        """Provision a development authority whose state must stay outside primary restore."""
+        instance_id = secrets.token_hex(32)
+        with self._lock, self._state_connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                "CREATE TABLE local_exact_key_state ("
+                "singleton INTEGER PRIMARY KEY CHECK (singleton=1), "
+                "instance_id TEXT NOT NULL"
+                ") STRICT"
+            )
+            connection.execute(
+                "CREATE TABLE local_exact_keys (key_id TEXT PRIMARY KEY, binding BLOB NOT NULL, evidence_id TEXT) STRICT"
+            )
+            connection.execute("INSERT INTO local_exact_key_state VALUES (1,?)", (instance_id,))
+        return instance_id
+
+    @staticmethod
+    def _exact_key_instance_id(connection: sqlite3.Connection) -> str:
+        try:
+            row = connection.execute("SELECT instance_id FROM local_exact_key_state WHERE singleton=1").fetchone()
+        except sqlite3.OperationalError as exc:
+            raise KeyUnavailable("exact key provider state is unavailable") from exc
+        if row is None:
+            raise KeyUnavailable("exact key provider state is unavailable")
+        return row[0]
+
+    def _exact_key_binding(self, connection: sqlite3.Connection, intent: _ExactKeyIntent) -> bytes:
+        if intent.provider_instance_id != self._exact_key_instance_id(connection):
+            raise ContentBindingMismatch("exact key belongs to another provider instance")
+        return hmac.digest(
+            self._master_key,
+            canonical_json_bytes(
+                [
+                    "vv-agent/S1/exact-key-owner/v1",
+                    intent.provider_instance_id,
+                    intent.key_id,
+                    intent.tenant_id,
+                    intent.session_id,
+                    intent.admission_root_id,
+                    intent.admission_id,
+                ],
+                "exact key owner",
+            ),
+            "sha256",
+        )
+
+    def _allocate_exact_key(self, intent: _ExactKeyIntent) -> WrappedDataKey:
+        """Create once. A duplicate or terminal ID cannot issue a second envelope."""
+        with self._lock, self._state_connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            binding = self._exact_key_binding(connection, intent)
+            inserted = connection.execute(
+                "INSERT INTO local_exact_keys(key_id,binding) VALUES (?,?) ON CONFLICT(key_id) DO NOTHING",
+                (intent.key_id, binding),
+            )
+            if inserted.rowcount != 1:
+                raise KeyUnavailable("exact key ID has already been used")
+            return self._wrap_data_key(
+                intent.tenant_id, intent.session_id, intent.key_id, provider_instance_id=intent.provider_instance_id
+            )
+
+    def _retire_exact_key(self, intent: _ExactKeyIntent) -> KeyDestroyOutcome:
+        """Commit terminal evidence even if the exact allocation has yet to arrive."""
+        with self._lock, self._state_connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            binding = self._exact_key_binding(connection, intent)
+            row = connection.execute(
+                "SELECT binding,evidence_id FROM local_exact_keys WHERE key_id=?", (intent.key_id,)
+            ).fetchone()
+            if row is not None:
+                owner_binding, evidence_id = row
+                if not hmac.compare_digest(owner_binding, binding):
+                    raise ContentBindingMismatch("exact key owner does not match")
+                if evidence_id is not None:
+                    return KeyDestroyOutcome(True, KeyDestroyStatus.ALREADY_DESTROYED, evidence_id)
+            evidence_id = f"local-key-destroy-{secrets.token_urlsafe(18)}"
+            connection.execute(
+                "INSERT INTO local_exact_keys(key_id,binding,evidence_id) VALUES (?,?,?) "
+                "ON CONFLICT(key_id) DO UPDATE SET evidence_id=excluded.evidence_id",
+                (intent.key_id, binding, evidence_id),
+            )
+        return KeyDestroyOutcome(True, KeyDestroyStatus.DESTROYED, evidence_id)
+
     def generate_data_key(self, tenant_id: str, session_id: str) -> WrappedDataKey:
         tenant_id = _text(tenant_id, "tenant_id")
         session_id = _text(session_id, "session_id")
         key_id = f"key_{secrets.token_urlsafe(32)}"
+        wrapped = self._wrap_data_key(tenant_id, session_id, key_id)
+        self._persist_new_key(tenant_id, session_id, key_id)
+        return wrapped
+
+    def _wrap_data_key(
+        self, tenant_id: str, session_id: str, key_id: str, *, provider_instance_id: str | None = None
+    ) -> WrappedDataKey:
         nonce = secrets.token_bytes(_NONCE_BYTES)
         data_key = secrets.token_bytes(_DATA_KEY_BYTES)
-        aad = _key_wrap_aad(tenant_id, session_id, key_id)
+        aad = _key_wrap_aad(tenant_id, session_id, key_id, provider_instance_id=provider_instance_id)
         wrapped = _KEY_WRAP_PREFIX + nonce + AESGCM(self._master_key).encrypt(nonce, data_key, aad)
-        self._persist_new_key(tenant_id, session_id, key_id)
         return WrappedDataKey(tenant_id, session_id, key_id, wrapped)
 
     def _decrypt_wrapped_key(self, tenant_id: str, session_id: str, wrapped_key: WrappedDataKey) -> bytes:
+        provider_instance_id = None
+        if wrapped_key.key_id.startswith(_EXACT_KEY_ID_PREFIX):
+            try:
+                row = (
+                    self._state_connection()
+                    .execute(
+                        "SELECT instance_id FROM local_exact_key_state CROSS JOIN local_exact_keys "
+                        "WHERE singleton=1 AND key_id=? AND evidence_id IS NULL",
+                        (wrapped_key.key_id,),
+                    )
+                    .fetchone()
+                )
+            except sqlite3.OperationalError as exc:
+                raise KeyUnavailable("exact key provider state is unavailable") from exc
+            if row is None:
+                raise KeyUnavailable("exact key is unavailable")
+            provider_instance_id = row[0]
+        else:
+            self._require_active_key(tenant_id, session_id, wrapped_key.key_id)
         wrapped = wrapped_key.wrapped_key
         prefix_length = len(_KEY_WRAP_PREFIX)
         if not wrapped.startswith(_KEY_WRAP_PREFIX) or len(wrapped) < prefix_length + _NONCE_BYTES + 16:
@@ -211,7 +322,7 @@ class LocalKeyProvider:
             data_key = AESGCM(self._master_key).decrypt(
                 nonce,
                 ciphertext,
-                _key_wrap_aad(tenant_id, session_id, wrapped_key.key_id),
+                _key_wrap_aad(tenant_id, session_id, wrapped_key.key_id, provider_instance_id=provider_instance_id),
             )
         except InvalidTag as exc:
             raise KeyUnavailable("wrapped data key failed authentication") from exc
@@ -227,7 +338,6 @@ class LocalKeyProvider:
         if wrapped_key.tenant_id != tenant_id or wrapped_key.session_id != session_id:
             raise KeyUnavailable("wrapped data key does not belong to the session binding")
         with self._lock:
-            self._require_active_key(tenant_id, session_id, wrapped_key.key_id)
             return self._decrypt_wrapped_key(tenant_id, session_id, wrapped_key)
 
     def restore_data_key(self, wrapped_key: WrappedDataKey) -> None:
@@ -237,12 +347,13 @@ class LocalKeyProvider:
         tenant_id = _text(wrapped_key.tenant_id, "tenant_id")
         session_id = _text(wrapped_key.session_id, "session_id")
         with self._lock:
-            self._require_active_key(tenant_id, session_id, wrapped_key.key_id)
             self._decrypt_wrapped_key(tenant_id, session_id, wrapped_key)
 
     def destroy(self, tenant_id: str, key_id: str) -> KeyDestroyOutcome:
         tenant_id = _text(tenant_id, "tenant_id")
         key_id = _text(key_id, "key_id")
+        if key_id.startswith(_EXACT_KEY_ID_PREFIX):
+            return KeyDestroyOutcome(False, KeyDestroyStatus.KEY_UNAVAILABLE, None, "Exact key intent is required.")
         with self._lock, self._state_connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(

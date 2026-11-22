@@ -8,6 +8,7 @@ persist atomically. Identifier fields are opaque, non-empty strings.
 from __future__ import annotations
 
 import base64
+import re
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
@@ -460,6 +461,32 @@ class KeyProvider(Protocol):
     def unwrap(self, tenant_id: str, session_id: str, wrapped_key: WrappedDataKey) -> bytes: ...
 
     def destroy(self, tenant_id: str, key_id: str) -> KeyDestroyOutcome: ...
+
+
+_EXACT_KEY_ID_PREFIX = "s1-exact-key-"
+_EXACT_KEY_ID = re.compile(r"s1-exact-key-[0-9a-f]{64}")
+
+
+@dataclass(frozen=True, slots=True)
+class _ExactKeyIntent:
+    """Immutable owner of a predeclared allocation in one provider instance."""
+
+    key_id: str
+    provider_instance_id: str
+    tenant_id: str
+    session_id: str
+    admission_root_id: str
+    admission_id: str
+
+    def __post_init__(self) -> None:
+        key_id = _text(self.key_id, "exact key ID", ContentBindingMismatch)
+        if _EXACT_KEY_ID.fullmatch(key_id) is None:
+            raise ContentBindingMismatch("exact key ID is invalid")
+        _text(self.provider_instance_id, "key provider instance ID", ContentBindingMismatch)
+        _text(self.tenant_id, "key tenant ID", ContentBindingMismatch)
+        _text(self.session_id, "key session ID", ContentBindingMismatch)
+        _text(self.admission_root_id, "key admission root ID", ContentBindingMismatch)
+        _text(self.admission_id, "key admission ID", ContentBindingMismatch)
 
 
 @dataclass(frozen=True, slots=True)

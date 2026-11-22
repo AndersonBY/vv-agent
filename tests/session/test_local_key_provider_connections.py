@@ -6,11 +6,13 @@ import sqlite3
 import stat
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from vv_agent.kernel._content import KeyDestroyStatus, KeyUnavailable
+from vv_agent.kernel._content import ContentBindingMismatch, KeyDestroyStatus, KeyUnavailable, _ExactKeyIntent
 from vv_agent.session import content_store
 from vv_agent.session.content_store import LocalKeyProvider
 
@@ -167,3 +169,100 @@ def test_shared_connection_is_lock_serialized_across_threads(tmp_path: Path) -> 
         provider.close()
 
     state_path.unlink()
+
+
+def _exact_intent(provider_instance_id: str) -> _ExactKeyIntent:
+    return _ExactKeyIntent(
+        key_id="s1-exact-key-" + "a" * 64,
+        provider_instance_id=provider_instance_id,
+        tenant_id=TENANT,
+        session_id=SESSION,
+        admission_root_id="admission-root",
+        admission_id="first-admission",
+    )
+
+
+def test_exact_key_retirement_survives_reopen_without_retaining_scope_labels(tmp_path: Path) -> None:
+    state_path = tmp_path / "state.sqlite3"
+    with closing(LocalKeyProvider(MASTER_KEY, state_path=state_path)) as provider:
+        intent = _exact_intent(provider._provision_exact_key_lifecycle())
+        # Ignore the successful allocation result in the caller, as after a lost reply.
+        wrapped = provider._allocate_exact_key(intent)
+        assert len(provider.unwrap(TENANT, SESSION, wrapped)) == 32
+        with pytest.raises(KeyUnavailable):
+            provider._allocate_exact_key(intent)
+        with pytest.raises(ContentBindingMismatch):
+            provider._retire_exact_key(replace(intent, admission_id="another-admission"))
+        assert provider.destroy(TENANT, intent.key_id).status is KeyDestroyStatus.KEY_UNAVAILABLE
+        provider.restore_data_key(wrapped)
+
+    with closing(LocalKeyProvider(MASTER_KEY, state_path=state_path)) as eraser:
+        result = eraser._retire_exact_key(intent)
+        assert result.status is KeyDestroyStatus.DESTROYED
+        assert result.evidence_id
+        with pytest.raises(KeyUnavailable):
+            eraser.unwrap(TENANT, SESSION, wrapped)
+        with pytest.raises(KeyUnavailable):
+            eraser.restore_data_key(wrapped)
+
+    with closing(LocalKeyProvider(MASTER_KEY, state_path=state_path)) as restarted:
+        repeated = restarted._retire_exact_key(intent)
+        assert repeated.status is KeyDestroyStatus.ALREADY_DESTROYED
+        assert repeated.evidence_id == result.evidence_id
+        with pytest.raises(ContentBindingMismatch):
+            restarted._retire_exact_key(replace(intent, tenant_id="other-tenant"))
+        with pytest.raises(KeyUnavailable):
+            restarted._allocate_exact_key(intent)
+        columns = restarted._state_connection().execute("PRAGMA table_info(local_exact_keys)").fetchall()
+        assert [column[1] for column in columns] == ["key_id", "binding", "evidence_id"]
+
+
+def test_exact_retirement_blocks_delayed_create_from_another_connection(tmp_path: Path) -> None:
+    state_path = tmp_path / "state.sqlite3"
+    create_started = threading.Event()
+    continue_create = threading.Event()
+    with (
+        closing(LocalKeyProvider(MASTER_KEY, state_path=state_path)) as eraser,
+        closing(LocalKeyProvider(MASTER_KEY, state_path=state_path)) as creator,
+        ThreadPoolExecutor(1) as executor,
+    ):
+        intent = _exact_intent(eraser._provision_exact_key_lifecycle())
+
+        def delayed_allocate() -> None:
+            create_started.set()
+            assert continue_create.wait(timeout=5)
+            creator._allocate_exact_key(intent)
+
+        pending = executor.submit(delayed_allocate)
+        try:
+            assert create_started.wait(timeout=5)
+            result = eraser._retire_exact_key(intent)
+            assert result.status is KeyDestroyStatus.DESTROYED
+            assert result.evidence_id
+        finally:
+            continue_create.set()
+        with pytest.raises(KeyUnavailable):
+            pending.result(timeout=5)
+        assert creator._retire_exact_key(intent).evidence_id == result.evidence_id
+
+
+def test_exact_key_needs_provisioned_matching_instance(tmp_path: Path) -> None:
+    with (
+        closing(LocalKeyProvider(MASTER_KEY, state_path=tmp_path / "current.sqlite3")) as owner,
+        closing(LocalKeyProvider(MASTER_KEY, state_path=tmp_path / "replacement.sqlite3")) as replacement,
+    ):
+        intent = _exact_intent(owner._provision_exact_key_lifecycle())
+        wrapped = owner._allocate_exact_key(intent)
+        with pytest.raises(KeyUnavailable):
+            replacement._retire_exact_key(intent)
+        with pytest.raises(KeyUnavailable):
+            replacement._allocate_exact_key(intent)
+        with pytest.raises(KeyUnavailable):
+            replacement.restore_data_key(wrapped)
+        replacement_id = replacement._provision_exact_key_lifecycle()
+        with pytest.raises(ContentBindingMismatch):
+            replacement._retire_exact_key(intent)
+        assert replacement._allocate_exact_key(replace(intent, provider_instance_id=replacement_id))
+        with pytest.raises(KeyUnavailable):
+            replacement.unwrap(TENANT, SESSION, wrapped)
+        assert owner.unwrap(TENANT, SESSION, wrapped)
