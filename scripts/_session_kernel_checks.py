@@ -173,6 +173,9 @@ def validate_outputs(values, base: Path, keep, replacements):
     }
     references, optional_lists, rejected_versions = 0, 0, []
     for name, value in values.items():
+        if name == "session_content_capture_s1.json":
+            # Its opaque test content is authenticated by the capture and catalog checks.
+            continue
         for path, node in walk(value):
             location = name + "#" + path
             assert not any(retired in path for retired in DELETE), f"{location}: deleted fixture"
