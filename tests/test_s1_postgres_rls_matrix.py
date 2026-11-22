@@ -24,12 +24,7 @@ from test_s1_postgres_rls import disposable_pg as disposable_pg
 from test_s1_postgres_rls import rls_database as rls_database
 
 from vv_agent.kernel import _postgres
-from vv_agent.kernel._content import (
-    ContentBindingMismatch,
-    ContentLabels,
-    ContentUnavailable,
-    Principal,
-)
+from vv_agent.kernel._content import ContentLabels, ContentUnavailable, Principal
 from vv_agent.kernel._content_store import ContentState
 from vv_agent.kernel._postgres import SESSION_TABLES
 from vv_agent.kernel._sql import SQLSessionTx
@@ -104,6 +99,7 @@ def _open_tenant(database: RLSDatabase, tenant_id: str) -> Iterator[PostgresStor
     else:
         role, password = database.tenant_b_role, database.tenant_b_password
     with PostgresStore.tenant_standalone(_dsn(database, role, password), tenant_id=tenant_id) as store:
+        store.configure_input_admission(allow_unsigned=True)
         yield store
 
 
@@ -192,8 +188,8 @@ def _actor(
             session_id=session_id,
             key_provider=key_provider,
         )
-        attributes = writer.put_json({"role": subject})
-    return Principal(store.tenant_id, subject, "user", attributes)
+        principal, _attributes = writer.service_principal(subject)
+    return Principal.from_dict(principal)
 
 
 def _set_context(connection: Any, tenant_id: str) -> None:
@@ -428,8 +424,6 @@ def test_tenant_store_content_and_export_method_matrix(rls_database, key_provide
         tenant_b = stack.enter_context(_open_tenant(rls_database, TENANT_B))
         content_a = PostgresContentStore(tenant_a, key_provider)
         content_b = PostgresContentStore(tenant_b, key_provider)
-        tenant_a.configure_input_admission(None, allow_unsigned=True)
-        tenant_b.configure_input_admission(None, allow_unsigned=True)
 
         sessions_a = tenant_a.list_sessions()
         sessions_b = tenant_b.list_sessions()
@@ -580,7 +574,7 @@ def test_forget_and_purge_a_to_b_matrix(rls_database, key_provider: LocalKeyProv
         tenant_a = stack.enter_context(_open_tenant(rls_database, TENANT_A))
         tenant_b = stack.enter_context(_open_tenant(rls_database, TENANT_B))
         content_a = PostgresContentStore(tenant_a, key_provider)
-        deletion = SessionDeletionStore(tenant_a, content_a, allow_unsigned=True)
+        deletion = SessionDeletionStore(tenant_a, content_a)
         actor_a = _actor(tenant_a, key_provider, FORGET, "service/retention-a")
         actor_b = _actor(tenant_b, key_provider, FORGET, "service/retention-b")
 
@@ -588,7 +582,7 @@ def test_forget_and_purge_a_to_b_matrix(rls_database, key_provider: LocalKeyProv
             deletion.forget_session(TENANT_A, B_ONLY, actor=actor_a)
         with pytest.raises(ValueError, match="another tenant"):
             deletion.forget_session(TENANT_B, B_ONLY, actor=actor_b)
-        with pytest.raises(ContentBindingMismatch):
+        with pytest.raises(PermissionError, match="actor belongs to another tenant"):
             deletion.forget_session(TENANT_A, FORGET, actor=actor_b)
         assert tenant_b.read(FORGET).head_seq == 1
 
