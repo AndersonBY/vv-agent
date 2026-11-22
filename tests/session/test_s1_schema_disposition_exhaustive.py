@@ -12,13 +12,14 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from support.s1_fixture_values import content_ref, create_fixture_session, fixture_key_provider, wrap_fixture_store
+from support.s1_fixture_values import content_ref, fixture_key_provider, wrap_fixture_store
 
 from vv_agent.kernel._content import (
     INPUT_ACTOR_ATTRIBUTES,
     INPUT_CONTENT,
     INPUT_SELECTION,
     ContentRef,
+    ContentSessionWriter,
     Principal,
 )
 from vv_agent.kernel._content_publication import (
@@ -938,7 +939,7 @@ def _create_session(wrapped: Any) -> None:
     with wrapped.atomic() as tx:
         writer = SessionContentWriter.bind(tx, tenant_id=TENANT_ID, session_id=SESSION_ID)
 
-        def spec(content: SessionContentWriter) -> SessionSpec:
+        def spec(content: ContentSessionWriter) -> SessionSpec:
             principal_attributes = content.put_json({"attributes": PLAINTEXT["attributes"]})
             principal = Principal(
                 tenant_id=TENANT_ID,
@@ -977,6 +978,20 @@ def _create_session(wrapped: Any) -> None:
             )
 
         writer.create_session(spec, consumers=("events",))
+        child_writer = SessionContentWriter.bind(tx, tenant_id=TENANT_ID, session_id="child/fixture")
+
+        def child_spec(content: ContentSessionWriter) -> SessionSpec:
+            actor, _ = content.service_principal("fixture/child")
+            return SessionSpec(
+                "child/fixture",
+                actor,
+                content.put_json("/tmp").to_dict(),
+                parent_session_id=SESSION_ID,
+                parent_operation_id="op/opaque",
+                attributes={"seed": {"messages": [], "shared_state": {}}},
+            )
+
+        child_writer.create_session(child_spec, consumers=())
 
 
 def _record(kind: str, payload: dict[str, Any], *, turn_id: str | None = "turn/opaque", operation_id: str | None = None):
@@ -1340,9 +1355,9 @@ def _record_fixtures(wrapped: Any) -> tuple[Any, ...]:
 def _build_storage(tmp_path: Path) -> Iterator[BuiltStorage]:
     with SQLiteStore.standalone(str(tmp_path / "s1-dispositions.sqlite")) as raw:
         raw.install_schema()
+        raw.configure_input_admission(allow_unsigned=True)
         wrapped = wrap_fixture_store(raw, fixture_key_provider())
         _create_session(wrapped)
-        create_fixture_session(wrapped, "child/fixture", consumers=())
         for kind in INPUT_PAYLOADS:
             _push_input(wrapped, kind)
         records = _record_fixtures(wrapped)

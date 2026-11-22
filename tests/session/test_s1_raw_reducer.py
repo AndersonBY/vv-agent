@@ -14,6 +14,7 @@ from vv_agent.kernel._hydration import DefinitionContent, KeyUnavailable
 from vv_agent.kernel._record_codec import RecordError
 from vv_agent.kernel._records import Record
 from vv_agent.kernel._reducer import Fold, TransitionError, _operation
+from vv_agent.kernel._requirements import SessionRequirements
 from vv_agent.kernel._state import Attempt, ExecutionState, Operation, Turn
 from vv_agent.kernel._store import StoredRecord
 from vv_agent.session import _recovery_phase
@@ -27,6 +28,7 @@ from vv_agent.session.surfaces import SessionDriver
 from vv_agent.tools.function import function_tool
 from vv_agent.types import LLMResponse
 
+from .conftest import open_store
 from .helpers import content_ref, record
 
 
@@ -50,11 +52,21 @@ class _ModelSelectionView:
     def sid(self) -> str:
         return "s"
 
+    @property
+    def tenant_id(self) -> str | None:
+        raise AssertionError("model selection must not inspect the tenant")
+
     def hydrated_definition(self, record: Record) -> DefinitionContent:
         raise AssertionError(f"model selection must not hydrate {record.kind}")
 
     def hydrate_record_field(self, record: Record, slot: str, ref: object) -> None:
         raise AssertionError(f"model selection must not hydrate {record.kind}/{slot}")
+
+    def hydrate_plan(self, record: Record) -> Record:
+        raise AssertionError(f"model selection must not hydrate {record.kind}")
+
+    def stored_record(self, record: Record) -> StoredRecord:
+        raise AssertionError(f"model selection must not load {record.kind}")
 
     def session_attributes(self) -> dict[str, object]:
         raise AssertionError("model selection must not inspect session attributes")
@@ -207,8 +219,11 @@ def test_raw_compacted_cold_read_and_logical_reopen_preserve_transition(tmp_path
     with SimWorld(path, seed=17) as world:
         result = run_scenario(world, "context_compacted")
         assert result["scenario"] == "context_compacted"
+        signer = world.ledger_signer
 
+    assert signer is not None
     with SQLiteStore.standalone(str(path)) as reopened:
+        reopened.configure_input_admission(signer)
         raw_state, raw_records, _ = reopened.read_state("s")
         compacted = [row.record for row in raw_records if row.record.kind == "context_compacted"]
         assert len(compacted) == 1
@@ -228,7 +243,7 @@ def test_raw_wait_user_cold_read_defers_retained_definition_to_logical_fold(tmp_
     path = tmp_path / "raw-wait-user.sqlite"
     provider = LocalKeyProvider(b"k" * 32)
     question = "Which deployment should run?"
-    with SQLiteStore.standalone(str(path)) as store:
+    with open_store(path) as store:
         sessions = SessionDriver(store=store, content_key_provider=provider)
         sessions.create("s", "/workspace", {"seed": {"messages": [], "shared_state": {}}})
         sessions.push("s", InboxItem("initial", "user", {"content": "go"}))
@@ -248,7 +263,7 @@ def test_raw_wait_user_cold_read_defers_retained_definition_to_logical_fold(tmp_
         turn_id = parked.turn_id
         assert turn_id is not None
 
-    with SQLiteStore.standalone(str(path)) as reopened:
+    with open_store(path) as reopened:
         raw_state, raw_records, _ = reopened.read_state("s")
         retained_turn = next(row.record for row in raw_records if row.record.kind == "turn_started")
         assert declared_content_ref(retained_turn._payload["definition"]) is not None
@@ -281,7 +296,7 @@ def test_raw_operations_endpoint_and_budget_boundary_survive_sqlite_reopen(tmp_p
     def tool() -> str:
         return "ok"
 
-    with SQLiteStore.standalone(str(path)) as store:
+    with open_store(path) as store:
         sessions = SessionDriver(store=store, content_key_provider=provider)
         sessions.create(
             "s",
@@ -379,7 +394,7 @@ def test_raw_operations_endpoint_and_budget_boundary_survive_sqlite_reopen(tmp_p
         assert (turn_id, "budget", "raw-usage") in hot.boundaries
         assert sessions.store.release(lease)
 
-    with SQLiteStore.standalone(str(path)) as reopened:
+    with open_store(path) as reopened:
         raw_state, raw_records, _ = reopened.read_state("s")
         raw_model_attempt = raw_state.operations["t/model/primary/1"].attempts[1]
         assert raw_model_attempt.started
@@ -394,7 +409,7 @@ def test_raw_operations_endpoint_and_budget_boundary_survive_sqlite_reopen(tmp_p
 def test_raw_and_cold_memory_boundary_defers_event_wire_validation_to_hydration(tmp_path: Path) -> None:
     path = tmp_path / "raw-memory-boundary.sqlite"
     provider = LocalKeyProvider(b"k" * 32)
-    with SQLiteStore.standalone(str(path)) as store:
+    with open_store(path) as store:
         sessions = SessionDriver(store=store, content_key_provider=provider)
         sessions.create(
             "s",
@@ -449,7 +464,7 @@ def test_raw_and_cold_memory_boundary_defers_event_wire_validation_to_hydration(
             assert hydrated._payload["data"]["event"] == event
         assert sessions.store.release(lease)
 
-    with SQLiteStore.standalone(str(path)) as reopened:
+    with open_store(path) as reopened:
         raw_state, _records, _ = reopened.read_state("s")
         retained = raw_state.boundaries[(turn_id, "memory_started", "raw-memory")]
         assert declared_content_ref(retained._payload["data"]["event"]) is not None
@@ -476,10 +491,16 @@ def test_model_selection_raw_pointer_hydrates_for_driver_planning(tmp_path: Path
     path = tmp_path / "selection.sqlite"
     provider = LocalKeyProvider(b"k" * 32)
     selection = {"model": "scripted", "model_settings": {"max_tokens": 64}, "route": {}}
-    with SQLiteStore.standalone(str(path)) as store:
-        sessions = SessionDriver(store=store, content_key_provider=provider)
+    requirements = SessionRequirements(level=2, handler_version="1", capabilities=())
+    with open_store(path) as store:
+        store.install_schema()
+        store._rows("UPDATE sk_settings SET write_level=2 WHERE singleton=1")
+        sessions = SessionDriver(store=store, content_key_provider=provider, worker_level=2)
+        sessions._configure_static_worker(level=2, capabilities=(), requirements=requirements)
         sessions.create("s", "/workspace", {"seed": {"messages": [], "shared_state": {}}})
-        sessions.push("s", InboxItem("select", "model_selection", {"selection": selection}))
+        sessions.push(
+            "s", InboxItem("select", "model_selection", {"selection": selection}, feature_level=2, requirements=requirements)
+        )
         runtime = sessions.runtime(
             Agent("raw", "Work.", model="scripted"),
             RunConfig(
@@ -519,11 +540,11 @@ def test_model_selection_raw_pointer_hydrates_for_driver_planning(tmp_path: Path
         assert driver.state.model_selection is not None
         assert sessions.store.release(lease)
 
-    with SQLiteStore.standalone(str(path)) as reopened:
+    with open_store(path) as reopened:
         raw_state, _, _ = reopened.read_state("s")
         assert raw_state.model_selection is not None
 
-        sessions = SessionDriver(store=reopened, content_key_provider=provider)
+        sessions = SessionDriver(store=reopened, content_key_provider=provider, worker_level=2)
         runtime = sessions.runtime(
             Agent("raw", "Work.", model="scripted"),
             RunConfig(
@@ -564,7 +585,7 @@ def test_commit_rejects_nonretryable_retry_before_append(tmp_path: Path) -> None
         "prompt_bundle": {},
         "model_settings": {},
     }
-    with SQLiteStore.standalone(str(path)) as store:
+    with open_store(path) as store:
         sessions = SessionDriver(store=store, content_key_provider=provider)
         sessions.create(
             "s",
@@ -633,7 +654,7 @@ def test_commit_rejects_nonretryable_retry_before_append(tmp_path: Path) -> None
         assert 2 not in driver.state.operations[oid].attempts
         assert sessions.store.release(lease)
 
-    with SQLiteStore.standalone(str(path)) as reopened:
+    with open_store(path) as reopened:
         raw_state, raw_records, _ = reopened.read_state("s")
         assert raw_state.operations[oid].attempts[1].state == "completed"
         assert 2 not in raw_state.operations[oid].attempts
@@ -660,7 +681,7 @@ def test_commit_rejects_invalid_retained_wait_before_append(tmp_path: Path) -> N
     path = tmp_path / "retained-wait.sqlite"
     provider = LocalKeyProvider(b"k" * 32)
     request = _model_request()
-    with SQLiteStore.standalone(str(path)) as store:
+    with open_store(path) as store:
         sessions = SessionDriver(store=store, content_key_provider=provider)
         sessions.create("s", "/workspace", {"seed": {"messages": [], "shared_state": {}}})
         sessions.push("s", InboxItem("input", "user", {"content": "go"}))
@@ -706,7 +727,7 @@ def test_commit_rejects_invalid_retained_wait_before_append(tmp_path: Path) -> N
         assert driver.state.turns[turn_id].wait is None
         assert sessions.store.release(lease)
 
-    with SQLiteStore.standalone(str(path)) as reopened:
+    with open_store(path) as reopened:
         raw_state, raw_records, _ = reopened.read_state("s")
         assert raw_state.turns[turn_id].wait is None
         assert parked.record_id not in {row.record.record_id for row in raw_records}
@@ -716,7 +737,7 @@ def test_commit_rejects_unbound_retained_provider_evidence_before_append(tmp_pat
     path = tmp_path / "retained-evidence.sqlite"
     provider = LocalKeyProvider(b"k" * 32)
     request = _model_request()
-    with SQLiteStore.standalone(str(path)) as store:
+    with open_store(path) as store:
         sessions = SessionDriver(store=store, content_key_provider=provider)
         sessions.create("s", "/workspace", {"seed": {"messages": [], "shared_state": {}}})
         sessions.push("s", InboxItem("input", "user", {"content": "go"}))
@@ -771,7 +792,7 @@ def test_commit_rejects_unbound_retained_provider_evidence_before_append(tmp_pat
         assert driver.state.operations[oid].attempts[1].state == "parked"
         assert sessions.store.release(lease)
 
-    with SQLiteStore.standalone(str(path)) as reopened:
+    with open_store(path) as reopened:
         raw_state, raw_records, _ = reopened.read_state("s")
         assert raw_state.operations[oid].attempts[1].state == "parked"
         assert completed.record_id not in {row.record.record_id for row in raw_records}
@@ -780,7 +801,7 @@ def test_commit_rejects_unbound_retained_provider_evidence_before_append(tmp_pat
 def test_commit_rejects_invalid_retained_boundary_before_append(tmp_path: Path) -> None:
     path = tmp_path / "retained-boundary.sqlite"
     provider = LocalKeyProvider(b"k" * 32)
-    with SQLiteStore.standalone(str(path)) as store:
+    with open_store(path) as store:
         sessions = SessionDriver(store=store, content_key_provider=provider)
         sessions.create("s", "/workspace", {"seed": {"messages": [], "shared_state": {}}})
         sessions.push("s", InboxItem("input", "user", {"content": "go"}))
@@ -812,7 +833,7 @@ def test_commit_rejects_invalid_retained_boundary_before_append(tmp_path: Path) 
         assert driver.state.boundaries == {}
         assert sessions.store.release(lease)
 
-    with SQLiteStore.standalone(str(path)) as reopened:
+    with open_store(path) as reopened:
         raw_state, raw_records, _ = reopened.read_state("s")
         assert raw_state.boundaries == {}
         assert boundary.record_id not in {row.record.record_id for row in raw_records}
@@ -822,7 +843,7 @@ def test_commit_rejects_unbound_producer_ref_before_append(tmp_path: Path) -> No
     path = tmp_path / "unbound-preflight.sqlite"
     provider = LocalKeyProvider(b"k" * 32)
     request = _model_request()
-    with SQLiteStore.standalone(str(path)) as store:
+    with open_store(path) as store:
         sessions = SessionDriver(store=store, content_key_provider=provider)
         sessions.create("s", "/workspace", {"seed": {"messages": [], "shared_state": {}}})
         sessions.push("s", InboxItem("input", "user", {"content": "go"}))
@@ -864,7 +885,7 @@ def test_commit_rejects_unbound_producer_ref_before_append(tmp_path: Path) -> No
         assert driver.state.operations[oid].attempts[1].state == "started"
         assert sessions.store.release(lease)
 
-    with SQLiteStore.standalone(str(path)) as reopened:
+    with open_store(path) as reopened:
         raw_state, raw_records, _ = reopened.read_state("s")
         assert raw_state.operations[oid].attempts[1].state == "started"
         assert completed.record_id not in {row.record.record_id for row in raw_records}

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, ClassVar, cast
+from typing import Any, ClassVar, TypedDict, cast
 
 import pytest
 
@@ -14,6 +14,7 @@ from vv_agent.app_server.processor import CLIENT_METHODS
 from vv_agent.app_server.protocol.tool_result import ToolResultRef
 from vv_agent.app_server.schema import CLIENT_METHOD_SPECS
 from vv_agent.kernel._content import ContentLabels, ContentRef, ContentUnavailable, Principal
+from vv_agent.kernel._sql import LedgerSigner
 from vv_agent.session.content_runtime import SessionContentWriter, durable_content_store
 from vv_agent.session.content_store import InMemoryEncryptedContentStore, LocalKeyProvider
 from vv_agent.session.deletion import DeletionAuthenticity, SessionDeletionStore
@@ -21,6 +22,11 @@ from vv_agent.session.export import export_session
 from vv_agent.session.projection import hydrate_record_payload, hydration_for_session_store
 from vv_agent.types import LLMResponse
 from vv_agent.workspace.resources import ToolResultResourceRef
+
+
+class _DeletionOverrides(TypedDict, total=False):
+    signer: LedgerSigner
+    allow_unsigned: bool
 
 
 def _principal(subject_id: str, tenant_id: str) -> dict[str, Any]:
@@ -533,7 +539,8 @@ def test_a14_export_forget_and_purge_authorization_matrix(store, tmp_path, monke
         assert store._tombstone("source") is None
 
         policy_scoped_calls = scoped_calls
-        for override in ({"signer": cast(Any, object())}, {"allow_unsigned": False}):
+        overrides: tuple[_DeletionOverrides, ...] = ({"signer": cast(LedgerSigner, object())}, {"allow_unsigned": False})
+        for override in overrides:
             with pytest.raises(ValueError, match="cannot override a hash-only admission policy"):
                 SessionDeletionStore(store, content, **override).forget_session(
                     tenant,

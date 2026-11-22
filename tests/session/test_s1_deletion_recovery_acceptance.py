@@ -349,7 +349,7 @@ def test_staged_late_usage_export_and_readback_stay_fenced_at_every_boundary(
             if store_backend == "postgres":
                 assert observer._one("SELECT pg_backend_pid()")[0] != store._one("SELECT pg_backend_pid()")[0]
 
-            destroy_state: list[tuple[str, str]] = []
+            destroy_state: list[tuple[str, str | None]] = []
 
             def unavailable_destroy(_tenant_id: str, _key_id: str) -> KeyDestroyOutcome:
                 destroy_state.append(_session_state(observer, "session"))

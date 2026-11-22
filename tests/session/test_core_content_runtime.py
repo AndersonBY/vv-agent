@@ -196,6 +196,7 @@ def test_drive_store_factory_opens_configured_content_runtime_connections(
             assert drive._root.connection is not heartbeat._root.connection
 
             if store_backend == "sqlite":
+                assert isinstance(raw_store, SQLiteStore)
                 assert drive._root.clock is raw_store.clock
             else:
                 drive_timeouts = drive._one("SELECT current_setting('lock_timeout'),current_setting('statement_timeout')")

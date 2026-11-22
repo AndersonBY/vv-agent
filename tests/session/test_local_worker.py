@@ -33,7 +33,8 @@ def _driver(tmp_path: Path) -> tuple[SessionDriver, Path]:
     database = tmp_path / "worker.sqlite3"
     provider = LocalKeyProvider(b"w" * 32, state_path=tmp_path / "keys.sqlite3")
     driver = SessionDriver(str(database), content_key_provider=provider)
-    driver.store.configure_input_admission(allow_unsigned=True)
+    assert isinstance(driver._root_store, SQLiteStore)
+    driver._root_store.configure_input_admission(allow_unsigned=True)
     return driver, database
 
 
