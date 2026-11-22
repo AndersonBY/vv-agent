@@ -139,6 +139,14 @@ product history they need before crossing the boundary, then use a fresh exact
 S1 store. An old runtime cannot read S1 rows, and rollback cannot make those
 rows old-compatible.
 
+Use separate PostgreSQL databases and non-owner runtime logins for the two
+pools. The released 0.36.0 PostgreSQL store can acquire a lease on an S1 session
+if its login can write to the S1 tables. After the drain, close the old worker
+connections and fence their callback routes before enabling S1. Verify that the
+old login cannot connect to or write the S1 database and that the new login
+can create and acquire an S1 session. Keep any old audit access read-only with
+the pinned pre-S1 runtime. For SQLite, give each pool a separate database path.
+
 This follows from what the session store is for. Its log is the execution
 ledger: it lets a worker resume a turn after a crash, avoid repeating a model
 call that already has a receipt, and prove which inputs were applied. Keeping
