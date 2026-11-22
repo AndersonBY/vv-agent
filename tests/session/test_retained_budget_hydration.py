@@ -91,6 +91,7 @@ def _open_driver(
     try:
         with SQLiteStore.standalone(str(tmp_path / "sessions.sqlite")) as raw_store:
             raw_store.install_schema()
+            raw_store.configure_input_admission(allow_unsigned=True)
             binding = ContentRuntimeBinding(provider, AESGCMCipher())
             store = wrap_session_content_store(raw_store, binding)
             with store.atomic() as tx:
