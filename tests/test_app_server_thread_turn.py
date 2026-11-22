@@ -17,6 +17,7 @@ from vv_agent.llm.scripted import ScriptStep
 from vv_agent.session.app_server import _NotificationPosition
 from vv_agent.session.projection import hydrate_input, hydrate_record_payload, hydration_for_session_store
 from vv_agent.session.records import InboxItem
+from vv_agent.session.surfaces import _KnownSessionOwner
 from vv_agent.types import LLMResponse, ToolCall
 
 pytestmark = pytest.mark.usefixtures("surface")
@@ -678,8 +679,9 @@ def test_child_wait_user_is_exposed_and_reply_targets_child(surface, monkeypatch
             )
 
     worker = server.kernel._worker
-    worker.post_observation(drain_delayed_observer)
-    worker.wait_idle(timeout=5)
+    assert isinstance(worker, _KnownSessionOwner)
+    with worker._observer_lock, server.kernel._open_drive_store() as observation_store:
+        drain_delayed_observer(observation_store)
     assert replay_verified == [True, False]
     assert [params["status"] for method, params in late_notices if method == "turn/completed"] == ["completed"]
     assert not parent_llm.steps and not child_llm.steps

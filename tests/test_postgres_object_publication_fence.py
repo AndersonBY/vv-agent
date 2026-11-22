@@ -5,6 +5,7 @@ from contextlib import closing, nullcontext
 from dataclasses import replace
 from functools import partial
 from threading import Event
+from unittest.mock import Mock
 from uuid import uuid4
 
 import pytest
@@ -584,8 +585,6 @@ def test_postgres_object_worker_defers_journal_lock_timeout(object_publication, 
 
 
 def test_object_key_access_preserves_terminal_failure_classification(monkeypatch):
-    from types import SimpleNamespace
-
     calls = []
 
     def lookup(*args):
@@ -596,8 +595,9 @@ def test_object_key_access_preserves_terminal_failure_classification(monkeypatch
             raise ContentUnavailable("journal role is unavailable")
         return None
 
-    journal = SimpleNamespace(get_key_intent=lookup)
-    objects = _PostgresObjectContent(journal, None, "provider")
+    journal = Mock(spec_set=PostgresObjectJournal)
+    journal.get_key_intent.side_effect = lookup
+    objects = _PostgresObjectContent(journal, Mock(spec_set=S3CiphertextStore), "provider")
     # Test the exact key boundary independently of the installation digest.
     monkeypatch.setattr(_PostgresObjectContent, "_key_prefix", lambda _self: "expected-")
     with pytest.raises(ContentBindingMismatch):

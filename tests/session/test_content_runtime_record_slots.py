@@ -163,7 +163,9 @@ def test_provider_input_slots_use_real_input_owner_writer(
 
         handle = provider.handle
         state = store.read_state(SESSION)[0]
-        assert state.operations[handle["operation_id"]].attempts[handle["attempt"]].state == "parked"
+        operation_id, attempt = handle["operation_id"], handle["attempt"]
+        assert isinstance(operation_id, str) and isinstance(attempt, int)
+        assert state.operations[operation_id].attempts[attempt].state == "parked"
         turn_id = state.active_turn_id
         assert turn_id is not None
         generation = state.turns[turn_id].start._payload["generation"]

@@ -511,7 +511,8 @@ def test_postgres_installs_complete_s1_schema(postgres_database):
         }
         assert tables == TABLES
         assert connection.execute("SELECT singleton,storage_major,write_level FROM sk_settings").fetchall() == [(1, "S1", 1)]
-        database_id, object_binding = connection.execute("SELECT database_id,object_journal_binding FROM sk_settings").fetchone()
+        [settings] = connection.execute("SELECT database_id,object_journal_binding FROM sk_settings").fetchall()
+        database_id, object_binding = settings
         assert len(database_id) == 64 and object_binding is None
         columns = {
             row[0]: {
