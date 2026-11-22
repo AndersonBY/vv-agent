@@ -6,22 +6,32 @@ import json
 import secrets
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import astuple, dataclass
-from typing import TYPE_CHECKING, Any, Literal
+from dataclasses import astuple, dataclass, replace
+from typing import TYPE_CHECKING, Any, Literal, LiteralString
 
-from ._allocation_journal import Allocation, AllocationOwner, JournalIdentity, _require_id, _require_text
-from ._content import ContentCleanupUnavailable, ContentUnavailable
+from ._allocation_journal import Allocation, AllocationOwner, JournalIdentity, KeyIntent, _require_id, _require_text
+from ._content import (
+    _EXACT_KEY_ID_PREFIX,
+    ContentCleanupUnavailable,
+    ContentUnavailable,
+    KeyDestroyOutcome,
+    KeyDestroyStatus,
+    _ExactKeyIntent,
+)
 from ._postgres import CLOCK, _query_rows
 
 if TYPE_CHECKING:
-    from psycopg import Connection
+    from psycopg import Connection, sql
 
 _SCHEMA = "vv_allocation_journal"
 _TABLE = f"{_SCHEMA}.allocation"
 _IDENTITY = f"{_SCHEMA}.identity"
+_KEY_TABLE = f"{_SCHEMA}.key_intent"
 _OWNER = "tenant_id,session_id,content_id,admission_session_id,admission_id,provider_instance_id,key_id"
 _COLUMNS = f"allocation_id,state,pin_until_ms,reservation_etag,{_OWNER}"
-_VERSION = 1
+_KEY_OWNER = "key_id,provider_instance_id,tenant_id,session_id,admission_root_id,admission_id"
+_KEY_COLUMNS = f"{_KEY_OWNER},state,pin_until_ms,evidence_id"
+_VERSION = 2
 
 _DDL = (
     f"""CREATE TABLE {_IDENTITY} (
@@ -53,6 +63,60 @@ _DDL = (
     f"CREATE INDEX allocation_expiry ON {_TABLE}(pin_until_ms,allocation_id) WHERE tenant_id IS NULL",
     f"CREATE INDEX allocation_owner ON {_TABLE}(tenant_id,session_id)",
     f"CREATE INDEX allocation_admission ON {_TABLE}(tenant_id,admission_session_id)",
+    f"CREATE INDEX allocation_key ON {_TABLE}(provider_instance_id,key_id) WHERE key_id IS NOT NULL",
+    f"""CREATE TABLE {_KEY_TABLE} (
+        key_id text NOT NULL CHECK (key_id ~ '^{_EXACT_KEY_ID_PREFIX}[0-9a-f]{{64}}$'),
+        provider_instance_id text NOT NULL CHECK (length(provider_instance_id) > 0),
+        tenant_id text NOT NULL CHECK (length(tenant_id) > 0),
+        session_id text NOT NULL CHECK (length(session_id) > 0),
+        admission_root_id text NOT NULL CHECK (length(admission_root_id) > 0),
+        admission_id text NOT NULL CHECK (length(admission_id) > 0),
+        state text NOT NULL DEFAULT 'reserved' CHECK (state IN ('reserved','allocating','reaping','retired')),
+        pin_until_ms bigint NOT NULL CHECK (pin_until_ms > 0),
+        evidence_id text CHECK (length(evidence_id) > 0),
+        PRIMARY KEY (provider_instance_id,key_id),
+        UNIQUE (provider_instance_id,key_id,tenant_id,session_id),
+        CHECK ((state='retired') = (evidence_id IS NOT NULL))
+    )""",
+    f"CREATE UNIQUE INDEX key_intent_admission ON {_KEY_TABLE}(tenant_id,session_id,admission_root_id,admission_id) "
+    "WHERE state<>'retired'",
+    f"CREATE INDEX key_intent_owner ON {_KEY_TABLE}(tenant_id,session_id)",
+    f"CREATE INDEX key_intent_admission_root ON {_KEY_TABLE}(tenant_id,admission_root_id)",
+    f"""ALTER TABLE {_TABLE} ADD COLUMN exact_key_id text
+        GENERATED ALWAYS AS (CASE WHEN starts_with(key_id,'{_EXACT_KEY_ID_PREFIX}') THEN key_id END) STORED,
+        ADD FOREIGN KEY (provider_instance_id,exact_key_id,tenant_id,session_id)
+        REFERENCES {_KEY_TABLE}(provider_instance_id,key_id,tenant_id,session_id)""",
+    f"""CREATE FUNCTION {_SCHEMA}.validate_key_transition() RETURNS trigger
+        LANGUAGE plpgsql SET search_path=pg_catalog AS $$
+        BEGIN
+            IF NOT ((OLD.state='reserved' AND NEW.state='allocating' AND NEW.pin_until_ms>{CLOCK})
+                 OR (OLD.state IN ('reserved','allocating') AND NEW.state='reaping')
+                 OR (OLD.state='reaping' AND NEW.state='retired')) THEN
+                RAISE EXCEPTION 'invalid key intent transition' USING ERRCODE='42501';
+            END IF;
+            RETURN NEW;
+        END
+        $$""",
+    f"CREATE TRIGGER validate_key_transition BEFORE UPDATE ON {_KEY_TABLE} "
+    f"FOR EACH ROW EXECUTE FUNCTION {_SCHEMA}.validate_key_transition()",
+    f"""CREATE FUNCTION {_SCHEMA}.validate_exact_binding() RETURNS trigger
+        LANGUAGE plpgsql SET search_path=pg_catalog AS $$
+        BEGIN
+            IF OLD.state='unbound' AND NEW.state='bound' AND starts_with(NEW.key_id,'{_EXACT_KEY_ID_PREFIX}') THEN
+                IF NOT EXISTS (
+                    SELECT 1 FROM {_KEY_TABLE}
+                    WHERE provider_instance_id=NEW.provider_instance_id AND key_id=NEW.key_id
+                      AND tenant_id=NEW.tenant_id AND session_id=NEW.session_id AND state='allocating'
+                    FOR SHARE
+                ) THEN
+                    RAISE EXCEPTION 'exact key is unavailable for binding' USING ERRCODE='42501';
+                END IF;
+            END IF;
+            RETURN NEW;
+        END
+        $$""",
+    f"CREATE TRIGGER validate_exact_binding BEFORE UPDATE ON {_TABLE} "
+    f"FOR EACH ROW EXECUTE FUNCTION {_SCHEMA}.validate_exact_binding()",
 )
 
 _SECURITY_DEFINITION = """
@@ -61,11 +125,16 @@ SELECT jsonb_build_array(
     (SELECT jsonb_agg(jsonb_build_array(c.relname,c.relowner,c.relacl,c.relrowsecurity,c.relforcerowsecurity)
                      ORDER BY c.relname)
      FROM pg_class c WHERE c.relnamespace=n.oid AND c.relkind='r'),
-    (SELECT jsonb_agg(jsonb_build_array(a.attname,a.attacl) ORDER BY a.attname)
-     FROM pg_attribute a WHERE a.attrelid=allocation.oid AND a.attnum>0 AND NOT a.attisdropped),
-    (SELECT jsonb_agg(jsonb_build_array(p.polname,p.polcmd,p.polpermissive,p.polroles,
-                    pg_get_expr(p.polqual,p.polrelid),pg_get_expr(p.polwithcheck,p.polrelid)) ORDER BY p.polname)
-     FROM pg_policy p WHERE p.polrelid=allocation.oid)
+    (SELECT jsonb_agg(jsonb_build_array(rel.relname,a.attname,a.attacl) ORDER BY rel.relname,a.attname)
+     FROM pg_attribute a JOIN pg_class rel ON rel.oid=a.attrelid
+     WHERE rel.relnamespace=n.oid AND rel.relkind='r' AND a.attnum>0 AND NOT a.attisdropped),
+    (SELECT jsonb_agg(jsonb_build_array(rel.relname,p.polname,p.polcmd,p.polpermissive,p.polroles,
+                    pg_get_expr(p.polqual,p.polrelid),pg_get_expr(p.polwithcheck,p.polrelid)) ORDER BY rel.relname,p.polname)
+     FROM pg_policy p JOIN pg_class rel ON rel.oid=p.polrelid WHERE rel.relnamespace=n.oid),
+    (SELECT jsonb_agg(pg_get_triggerdef(t.oid) ORDER BY t.tgname)
+     FROM pg_trigger t JOIN pg_class rel ON rel.oid=t.tgrelid WHERE rel.relnamespace=n.oid AND NOT t.tgisinternal),
+    (SELECT jsonb_agg(pg_get_functiondef(f.oid) ORDER BY f.proname)
+     FROM pg_proc f WHERE f.pronamespace=n.oid)
 )::text
 FROM pg_class allocation JOIN pg_namespace n ON n.oid=allocation.relnamespace
 WHERE n.nspname=%s AND allocation.relname='allocation' AND allocation.relkind='r'
@@ -74,11 +143,11 @@ WHERE n.nspname=%s AND allocation.relname='allocation' AND allocation.relkind='r
 
 @dataclass(frozen=True, slots=True)
 class JournalRole:
-    mode: Literal["anonymous", "binder", "scope"]
+    mode: Literal["anonymous", "binder", "scope", "key-intent"]
     tenant_id: str | None = None
 
     def __post_init__(self) -> None:
-        if self.mode == "scope" and self.tenant_id is not None:
+        if self.mode in {"scope", "key-intent", "binder"} and self.tenant_id is not None:
             _require_text(self.tenant_id)
         elif self.tenant_id is not None or self.mode not in {"anonymous", "binder"}:
             raise ValueError("invalid allocation journal role binding")
@@ -114,8 +183,40 @@ def _install_role(connection: Connection[Any], login: str, role: JournalRole, id
     connection.execute(sql.SQL(f"GRANT USAGE ON SCHEMA {_SCHEMA} TO {{}}").format(principal))
     connection.execute(sql.SQL(f"GRANT SELECT ON {_IDENTITY} TO {{}}").format(principal))
     authority = sql.SQL("session_user = {}").format(sql.Literal(login))
+    tenant_scope = sql.SQL("{} AND tenant_id = {}").format(authority, sql.Literal(role.tenant_id))
+
+    def install(
+        table: LiteralString,
+        grants: tuple[LiteralString, ...],
+        transitions: tuple[tuple[LiteralString, sql.Composable | None, sql.Composable | None], ...],
+    ) -> None:
+        for grant in grants:
+            connection.execute(sql.SQL(f"GRANT {grant} ON {table} TO {{}}").format(principal))
+        for command, using, check in transitions:
+            policy = sql.Identifier(login + "_" + command.lower())
+            statement = sql.SQL(f"CREATE POLICY {{}} ON {table} FOR {command} TO {{}}").format(policy, principal)
+            if using is not None:
+                statement += sql.SQL(" USING ({})").format(using)
+            if check is not None:
+                statement += sql.SQL(" WITH CHECK ({})").format(check)
+            connection.execute(statement)
+
+    if role.mode == "key-intent":
+        install(
+            _KEY_TABLE,
+            ("SELECT", f"INSERT({_KEY_OWNER},pin_until_ms)", "UPDATE(state,evidence_id)", "DELETE"),
+            (
+                ("SELECT", tenant_scope, None),
+                ("INSERT", None, tenant_scope + sql.SQL(f" AND state='reserved' AND pin_until_ms>{CLOCK}")),
+                ("UPDATE", tenant_scope + sql.SQL(" AND state<>'retired'"), tenant_scope),
+                ("DELETE", tenant_scope + sql.SQL(" AND state='retired'"), None),
+            ),
+        )
+        install(_TABLE, ("SELECT(provider_instance_id,exact_key_id)",), (("SELECT", tenant_scope, None),))
+        return
     if role.mode == "scope":
-        visible = sql.SQL("{} AND tenant_id = {}").format(authority, sql.Literal(role.tenant_id))
+        visible = tenant_scope
+        install(_KEY_TABLE, ("SELECT",), (("SELECT", tenant_scope, None),))
         grants = ("SELECT", "UPDATE(state)", "DELETE")
         transitions = (
             ("SELECT", visible, None),
@@ -124,6 +225,16 @@ def _install_role(connection: Connection[Any], login: str, role: JournalRole, id
         )
     elif role.mode == "binder":
         visible = authority + sql.SQL(" AND tenant_id IS NULL")
+        if role.tenant_id is None:
+            bound = authority + sql.SQL(f" AND NOT starts_with(key_id,'{_EXACT_KEY_ID_PREFIX}')")
+        else:
+            bound = tenant_scope
+            install(
+                _KEY_TABLE,
+                ("SELECT(provider_instance_id,key_id,tenant_id,session_id,state)", "UPDATE(state)"),
+                # FOR SHARE needs an UPDATE grant. The false WITH CHECK blocks every key update.
+                (("SELECT", tenant_scope, None), ("UPDATE", tenant_scope + sql.SQL(" AND state='allocating'"), sql.SQL("false"))),
+            )
         grants = ("SELECT(allocation_id,state,pin_until_ms)", f"UPDATE(state,reservation_etag,{_OWNER})")
         # PostgreSQL checks SELECT visibility on the new row as well as the old one.
         transitions = (
@@ -131,7 +242,7 @@ def _install_role(connection: Connection[Any], login: str, role: JournalRole, id
             (
                 "UPDATE",
                 visible + sql.SQL(f" AND state='unbound' AND pin_until_ms>{CLOCK}"),
-                authority + sql.SQL(f" AND state='bound' AND pin_until_ms>{CLOCK}"),
+                bound + sql.SQL(f" AND state='bound' AND pin_until_ms>{CLOCK}"),
             ),
         )
     else:
@@ -147,16 +258,7 @@ def _install_role(connection: Connection[Any], login: str, role: JournalRole, id
             ),
             ("DELETE", visible + sql.SQL(" AND state='reaping'"), None),
         )
-    for grant in grants:
-        connection.execute(sql.SQL(f"GRANT {grant} ON {_TABLE} TO {{}}").format(principal))
-    for command, using, check in transitions:
-        policy = sql.Identifier(login + "_" + command.lower())
-        statement = sql.SQL(f"CREATE POLICY {{}} ON {_TABLE} FOR {command} TO {{}}").format(policy, principal)
-        if using is not None:
-            statement += sql.SQL(" USING ({})").format(using)
-        if check is not None:
-            statement += sql.SQL(" WITH CHECK ({})").format(check)
-        connection.execute(statement)
+    install(_TABLE, grants, transitions)
 
 
 class PostgresAllocationJournal:
@@ -171,8 +273,8 @@ class PostgresAllocationJournal:
 
         if admin.info.transaction_status != TransactionStatus.IDLE:
             raise ValueError("journal provisioning requires an idle admin connection")
-        if {role.mode for role in roles.values()} != {"anonymous", "binder", "scope"}:
-            raise ValueError("journal provisioning requires all three authorities")
+        if {role.mode for role in roles.values()} != {"anonymous", "binder", "scope", "key-intent"}:
+            raise ValueError("journal provisioning requires all four authorities")
         identity = JournalIdentity(secrets.token_hex(32), database_id, namespace)
         with admin.transaction():
             admin.execute("SET LOCAL search_path = pg_catalog")
@@ -183,9 +285,10 @@ class PostgresAllocationJournal:
             admin.execute(f"REVOKE ALL ON SCHEMA {_SCHEMA} FROM PUBLIC")
             for statement in _DDL:
                 admin.execute(statement)
-            admin.execute(f"REVOKE ALL ON {_TABLE},{_IDENTITY} FROM PUBLIC")
-            admin.execute(f"ALTER TABLE {_TABLE} ENABLE ROW LEVEL SECURITY")
-            admin.execute(f"ALTER TABLE {_TABLE} FORCE ROW LEVEL SECURITY")
+            admin.execute(f"REVOKE ALL ON {_TABLE},{_KEY_TABLE},{_IDENTITY} FROM PUBLIC")
+            for table in (_TABLE, _KEY_TABLE):
+                admin.execute(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY")
+                admin.execute(f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY")
             for login, role in roles.items():
                 if _role_state(admin, login) != [(None, True)]:
                     raise ValueError("journal roles must be fresh dedicated logins without elevated privileges")
@@ -301,6 +404,16 @@ class PostgresAllocationJournal:
                 (allocation_id,),
             ):
                 return False
+            if owner.key_id.startswith(_EXACT_KEY_ID_PREFIX) and (
+                self._role.tenant_id != owner.tenant_id
+                or not _query_rows(
+                    connection,
+                    f"SELECT key_id FROM {_KEY_TABLE} WHERE provider_instance_id=%s AND key_id=%s "
+                    "AND tenant_id=%s AND session_id=%s AND state='allocating' FOR SHARE",
+                    (owner.provider_instance_id, owner.key_id, owner.tenant_id, owner.session_id),
+                )
+            ):
+                return False
             return (
                 connection.execute(
                     f"UPDATE {_TABLE} SET state='bound',({_OWNER},reservation_etag)=(%s,%s,%s,%s,%s,%s,%s,%s) "
@@ -380,6 +493,143 @@ class PostgresAllocationJournal:
                     f"DELETE FROM {_TABLE} WHERE allocation_id=%s AND state='reaping' AND pin_until_ms=%s "
                     f"AND reservation_etag IS NOT DISTINCT FROM %s AND {owner_match}",
                     (claim.allocation_id, claim.pin_until_ms, claim.reservation_etag, *owner),
+                ).rowcount
+                == 1
+            )
+
+    def _key_rows(self, rows: list[tuple[Any, ...]]) -> tuple[KeyIntent, ...]:
+        return tuple(
+            KeyIntent(self._identity.journal_id, _ExactKeyIntent(*owner), state, pin, evidence)
+            for (*owner, state, pin, evidence) in rows
+        )
+
+    def _get_key(self, connection: Connection[Any], provider: str, key_id: str, *, lock: bool = False) -> KeyIntent | None:
+        suffix = " FOR UPDATE" if lock else ""
+        rows = self._key_rows(
+            _query_rows(
+                connection,
+                f"SELECT {_KEY_COLUMNS} FROM {_KEY_TABLE} WHERE provider_instance_id=%s AND key_id=%s{suffix}",
+                (provider, key_id),
+            )
+        )
+        return rows[0] if rows else None
+
+    def get_key_intent(self, provider_instance_id: str, key_id: str) -> KeyIntent | None:
+        _require_text(provider_instance_id, key_id)
+        with self._transaction() as connection:
+            return self._get_key(connection, provider_instance_id, key_id)
+
+    def reserve_key_intent(self, intent: _ExactKeyIntent, *, pin_until_ms: int) -> KeyIntent | None:
+        if type(pin_until_ms) is not int or not 0 < pin_until_ms < 2**63:
+            raise ValueError("key intent pin must be a positive PostgreSQL millisecond timestamp")
+        with self._transaction() as connection:
+            rows = self._key_rows(
+                _query_rows(
+                    connection,
+                    f"INSERT INTO {_KEY_TABLE}({_KEY_OWNER},pin_until_ms) SELECT %s,%s,%s,%s,%s,%s,%s "
+                    f"WHERE %s>{CLOCK} ON CONFLICT DO NOTHING RETURNING {_KEY_COLUMNS}",
+                    (*astuple(intent), pin_until_ms, pin_until_ms),
+                )
+            )
+            return rows[0] if rows else None
+
+    def key_intents_for_admission(
+        self, tenant_id: str, session_id: str, admission_root_id: str, admission_id: str
+    ) -> tuple[KeyIntent, ...]:
+        _require_text(tenant_id, session_id, admission_root_id, admission_id)
+        with self._transaction() as connection:
+            return self._key_rows(
+                _query_rows(
+                    connection,
+                    f"SELECT {_KEY_COLUMNS} FROM {_KEY_TABLE} WHERE tenant_id=%s AND session_id=%s "
+                    "AND admission_root_id=%s AND admission_id=%s ORDER BY provider_instance_id,key_id",
+                    (tenant_id, session_id, admission_root_id, admission_id),
+                )
+            )
+
+    def scoped_key_intents(self, tenant_id: str, session_ids: tuple[str, ...]) -> tuple[KeyIntent, ...]:
+        _require_text(tenant_id, *session_ids)
+        with self._transaction() as connection:
+            return self._key_rows(
+                _query_rows(
+                    connection,
+                    f"SELECT {_KEY_COLUMNS} FROM {_KEY_TABLE} WHERE tenant_id=%s "
+                    "AND (session_id=ANY(%s) OR admission_root_id=ANY(%s)) ORDER BY provider_instance_id,key_id",
+                    (tenant_id, list(session_ids), list(session_ids)),
+                )
+            )
+
+    def claim_key_allocation(self, expected: KeyIntent) -> KeyIntent | None:
+        """Only an acknowledged transition authorizes one provider dispatch."""
+        if expected.journal_id != self._identity.journal_id or expected.state != "reserved":
+            return None
+        provider, key_id = expected.intent.provider_instance_id, expected.intent.key_id
+        with self._transaction() as connection:
+            if self._get_key(connection, provider, key_id, lock=True) != expected:
+                return None
+            rows = self._key_rows(
+                _query_rows(
+                    connection,
+                    f"UPDATE {_KEY_TABLE} SET state='allocating' WHERE provider_instance_id=%s AND key_id=%s "
+                    f"AND pin_until_ms>{CLOCK} RETURNING {_KEY_COLUMNS}",
+                    (provider, key_id),
+                )
+            )
+            return rows[0] if rows else None
+
+    def claim_key_intent(self, expected: KeyIntent, *, require_expired_pin: bool = True) -> KeyIntent | None:
+        """The trusted reconciler must hold the primary fence and verify SQL disposition."""
+        if expected.journal_id != self._identity.journal_id or expected.state == "retired":
+            return None
+        provider, key_id = expected.intent.provider_instance_id, expected.intent.key_id
+        with self._transaction() as connection:
+            if self._get_key(connection, provider, key_id, lock=True) != expected:
+                return None
+            if expected.state == "reaping":
+                return expected
+            rows = self._key_rows(
+                _query_rows(
+                    connection,
+                    f"UPDATE {_KEY_TABLE} SET state='reaping' WHERE provider_instance_id=%s AND key_id=%s "
+                    f"AND (NOT %s OR pin_until_ms<={CLOCK}) RETURNING {_KEY_COLUMNS}",
+                    (provider, key_id, require_expired_pin),
+                )
+            )
+            return rows[0] if rows else None
+
+    def record_key_retirement(self, claim: KeyIntent, outcome: KeyDestroyOutcome) -> KeyIntent | None:
+        if outcome.status not in {KeyDestroyStatus.DESTROYED, KeyDestroyStatus.ALREADY_DESTROYED} or not outcome.evidence_id:
+            raise ContentCleanupUnavailable("exact key retirement has no terminal provider evidence")
+        if claim.journal_id != self._identity.journal_id or claim.state != "reaping":
+            return None
+        provider, key_id = claim.intent.provider_instance_id, claim.intent.key_id
+        retired = replace(claim, state="retired", evidence_id=outcome.evidence_id)
+        with self._transaction() as connection:
+            if self._get_key(connection, provider, key_id, lock=True) != claim:
+                current = self._get_key(connection, provider, key_id)
+                return current if current == retired else None
+            rows = self._key_rows(
+                _query_rows(
+                    connection,
+                    f"UPDATE {_KEY_TABLE} SET state='retired',evidence_id=%s "
+                    f"WHERE provider_instance_id=%s AND key_id=%s RETURNING {_KEY_COLUMNS}",
+                    (outcome.evidence_id, provider, key_id),
+                )
+            )
+            return rows[0] if rows else None
+
+    def finish_key_intent(self, retired: KeyIntent) -> bool:
+        """Release exact scope metadata after the key retires and its objects are gone."""
+        if retired.journal_id != self._identity.journal_id or retired.state != "retired":
+            return False
+        provider, key_id = retired.intent.provider_instance_id, retired.intent.key_id
+        owner_match = " AND ".join(f"{column}=%s" for column in _KEY_OWNER.split(","))
+        with self._transaction() as connection:
+            return (
+                connection.execute(
+                    f"DELETE FROM {_KEY_TABLE} WHERE {owner_match} AND state='retired' AND pin_until_ms=%s AND evidence_id=%s "
+                    f"AND NOT EXISTS (SELECT 1 FROM {_TABLE} WHERE provider_instance_id=%s AND exact_key_id=%s)",
+                    (*astuple(retired.intent), retired.pin_until_ms, retired.evidence_id, provider, key_id),
                 ).rowcount
                 == 1
             )
