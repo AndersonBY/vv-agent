@@ -468,8 +468,12 @@ def test_committed_record_progress_immediately_resets_observation_backoff(record
 
         def read(self, session_id: str, *, after_seq: int, limit: int):
             assert session_id == "thread_1"
-            assert after_seq == 0 and limit == 1
-            return SimpleNamespace(records=[object()] if self.committed else [])
+            assert after_seq == 0 and limit == 256
+            if not self.committed:
+                return SimpleNamespace(records=())
+            kind = "op_parked" if record_kind == "approval" else "turn_started"
+            record = SimpleNamespace(kind=kind, _payload={"handle": {"kind": "approval"}})
+            return SimpleNamespace(records=(SimpleNamespace(seq=1, record=record),))
 
     delivered: list[str] = []
     position = SimpleNamespace(seq=0, due=20.0, delay=0.8, warning_at=0.0, replay_approvals=False)
@@ -479,14 +483,13 @@ def test_committed_record_progress_immediately_resets_observation_backoff(record
     adapter._notification_positions = {"thread_1": position}
     adapter._state_manager = SimpleNamespace(subscribers=lambda _sid: {"conn_1"})
     adapter._publish_operational_error = lambda _sid, _store: False
-    adapter._next_approval_seq = lambda _sid, _store, *, after_seq: 1 if record_kind == "approval" and store.committed else None
 
     def send_pending_approvals(*_args, **_kwargs):
         delivered.append("approval")
         return None
 
     def publish_turns(*_args, **kwargs):
-        if not store.committed or kwargs.get("through_seq") == 0:
+        if not kwargs["rows"]:
             return False
         if record_kind == "turn":
             delivered.append("turn")

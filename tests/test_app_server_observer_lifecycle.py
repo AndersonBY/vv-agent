@@ -594,7 +594,8 @@ def test_reconnect_replays_same_request_and_standard_response_answers_it(tmp_pat
         assert calls == ["ran"]
 
 
-def test_reconnect_while_model_runs_moves_live_owner_without_duplicate_approval(tmp_path):
+@pytest.mark.parametrize("commit_during_projection", [False, True])
+def test_reconnect_while_model_runs_moves_live_owner_without_duplicate_approval(tmp_path, monkeypatch, commit_during_projection):
     entered, release = threading.Event(), threading.Event()
     calls: list[str] = []
 
@@ -623,7 +624,7 @@ def test_reconnect_while_model_runs_moves_live_owner_without_duplicate_approval(
         stack.callback(release.set)
         request(server, 1, "thread/start", {"inputId": "thread"})
         tid = request(server, 2, "turn/start", submission())["result"]["turnId"]
-        assert entered.wait(5)
+        assert entered.wait(15)
         server.processor.disconnect_connection("A")
         assert server.run_adapter._turn_connections[("thread", tid)] is None
         assert server.kernel.store.lease_status("thread")[2] > 0
@@ -639,8 +640,29 @@ def test_reconnect_while_model_runs_moves_live_owner_without_duplicate_approval(
         _request_with_messages(server, reconnected, 4, "thread/resume", {"threadId": "thread"})
         assert server.run_adapter._turn_connections[("thread", tid)] == "B"
 
-        release.set()
-        approval, _ = _until(reconnected, lambda message: message.get("method") == "approval/request")
+        if commit_during_projection:
+            publish_turns = server.run_adapter._publish_turns
+
+            def commit_before_publish(*args, **kwargs):
+                if not release.is_set():
+                    release.set()
+                    _eventually(
+                        lambda: any(
+                            row.record.kind == "op_parked" and row.record._payload["handle"]["kind"] == "approval"
+                            for row in server.kernel.store.read_state("thread")[1]
+                        )
+                    )
+                return publish_turns(*args, **kwargs)
+
+            monkeypatch.setattr(server.run_adapter, "_publish_turns", commit_before_publish)
+            server.run_adapter.wake("thread")
+        else:
+            release.set()
+        approval, messages = _until(reconnected, lambda message: message.get("method") == "approval/request")
+        assert approval["params"]["turnId"] == tid
+        assert [message["params"]["requestId"] for message in messages if message.get("method") == "approval/requested"] == [
+            approval["id"]
+        ]
         assert "A" not in server.state_manager.subscribers("thread")
         assert server.router.pending_server_request_count() == 1
         _send(
@@ -652,11 +674,12 @@ def test_reconnect_while_model_runs_moves_live_owner_without_duplicate_approval(
                 "result": {"decision": "allow", "reason": "reconnected owner"},
             },
         )
-        _, messages = _until(
+        completion, messages = _until(
             reconnected,
             lambda message: message.get("method") == "turn/completed" and message["params"]["status"] == "completed",
         )
-        assert not any(message.get("method") == "approval/request" for message in messages)
+        assert completion["params"]["turnId"] == tid
+        assert not any(message.get("method") in {"approval/request", "approval/requested"} for message in messages)
         assert calls == ["ran"]
 
 
