@@ -721,7 +721,7 @@ def _run_task_cli(argv: list[str], *, store=None, session_id: str = "cli") -> in
         task = _build_cli_task(args, resolved, task_id=f"task_{uuid.uuid4().hex[:8]}")
         from vv_agent.session.surfaces import SessionDriver
 
-        driver = SessionDriver(store=store)
+        driver = SessionDriver(store=store, _known_sessions=True)
         driver.create(session_id, args.workspace)
         handle = driver.start(
             session_id,

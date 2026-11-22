@@ -768,7 +768,7 @@ class InteractiveAgentClient:
         from vv_agent.session.surfaces import SessionDriver
 
         self.options = options
-        self.driver = SessionDriver(store=store or options.session_store)
+        self.driver = SessionDriver(store=store or options.session_store, _known_sessions=True)
 
     def create_session(
         self,

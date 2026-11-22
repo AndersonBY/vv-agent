@@ -148,7 +148,7 @@ class Runner:
         from vv_agent.session.surfaces import SessionDriver
 
         config = effective_run_config(agent, run_config or RunConfig())
-        driver = SessionDriver()
+        driver = SessionDriver(_known_sessions=True)
         sid = uuid.uuid4().hex
         try:
             _configure_owned_driver(driver, agent, config)
@@ -177,7 +177,7 @@ class Runner:
         from vv_agent.session.surfaces import SessionDriver
 
         config = effective_run_config(agent, run_config or RunConfig())
-        driver = SessionDriver()
+        driver = SessionDriver(_known_sessions=True)
         sid = uuid.uuid4().hex
         try:
             _configure_owned_driver(driver, agent, config)

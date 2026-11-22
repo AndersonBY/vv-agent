@@ -37,6 +37,7 @@ from vv_agent.session.runtime import (
 from vv_agent.session.sqlite import SQLiteStore
 from vv_agent.session.store import Conflict
 from vv_agent.session.surfaces import SessionDriver
+from vv_agent.tools.base import ToolContext
 from vv_agent.tools.function import function_tool
 from vv_agent.types import AgentStatus, LLMResponse, SubAgentConfig, ToolCall
 
@@ -872,6 +873,83 @@ def test_runner_start_handle_close_releases_worker_and_temporary_store() -> None
     assert worker_thread is not None and not worker_thread.is_alive()
 
 
+def test_known_session_owner_recovers_observer_and_leaves_unregistered_input(monkeypatch) -> None:
+    with ExitStack() as stack:
+        driver = SessionDriver(_known_sessions=True)
+        stack.callback(driver.close)
+        driver.create("unregistered", ".")
+        driver.push("unregistered", InboxItem("foreign", "user", {"content": "preserve"}))
+        driver.create("registered", ".")
+
+        observe = driver._observe_registered_handles
+        retried = Event()
+        faults = iter((BackendKeyUnavailable("observer interrupted"), Conflict("observer cursor collision")))
+
+        def observe_after_fault(store, **kwargs):
+            fault = next(faults, None)
+            if fault is not None:
+                raise fault
+            retried.set()
+            return observe(store, **kwargs)
+
+        def scan(*_args, **_kwargs):
+            pytest.fail("local SDK owner started a tenant-wide scan")
+
+        monkeypatch.setattr(driver, "_observe_registered_handles", observe_after_fault)
+        monkeypatch.setattr(CoreSQLiteStore, "claim_runnable", scan)
+        handle = driver.start(
+            "registered",
+            Agent("known", "Answer.", model="m"),
+            RunConfig(model_provider=ScriptedModelProvider.new("scripted", "m", [LLMResponse("done")])),
+            "go",
+        )
+        assert handle.result(timeout=8).final_output == "done"
+        assert retried.is_set()
+        assert driver.store.lease_status("unregistered")[1:] == (0, 0)
+        assert [entry.item.input_id for entry in driver.store.peek_inbox("unregistered")] == ["foreign"]
+
+
+@pytest.mark.parametrize("cooperative", [False, True])
+def test_runner_closes_after_local_cancellation(cooperative) -> None:
+    started, release, stopped = Event(), Event(), Event()
+
+    @function_tool
+    def blocked(ctx: ToolContext) -> str:
+        started.set()
+        try:
+            while not release.wait(0.01):
+                if cooperative:
+                    assert ctx.ctx is not None
+                    ctx.ctx.check_cancelled()
+            return "late"
+        finally:
+            stopped.set()
+
+    handle = Runner.start(
+        Agent("local", "Use the tool.", model="m", tools=[blocked]),
+        "go",
+        run_config=RunConfig(
+            model_provider=ScriptedModelProvider.new("scripted", "m", [LLMResponse("", [ToolCall("t", "blocked", {})])])
+        ),
+    )
+    assert handle.kernel.path is not None
+    path = Path(handle.kernel.path)
+    with ExitStack() as stack:
+        stack.callback(handle.close)
+        stack.callback(release.set)
+        assert started.wait(3)
+        assert handle.cancel()
+        assert not handle.cancel()
+        result = handle.result(timeout=6)
+        assert result.completion_reason.value == "cancelled"
+        assert [event.type for event in handle.events()].count("run_cancelled") == 1
+        handle.close()
+        assert not path.exists()
+        assert not handle.kernel._worker.running
+        release.set()
+        assert stopped.wait(2)
+
+
 def test_explicit_open_store_factory_is_used_for_worker_drive(tmp_path: Path) -> None:
     database = tmp_path / "custom-drive.sqlite"
     opened = 0
@@ -1154,8 +1232,9 @@ def test_custom_factory_capabilities_keep_an_l1_session(
             driver.close()
 
 
-def test_closing_unstarted_handle_releases_runtime_reservation() -> None:
-    driver = SessionDriver()
+@pytest.mark.parametrize("known_sessions", [False, True])
+def test_closing_unstarted_handle_releases_runtime_reservation(known_sessions) -> None:
+    driver = SessionDriver(_known_sessions=known_sessions)
     try:
         driver.create("session", ".")
         provider = ScriptedModelProvider.new("scripted", "m", [LLMResponse("done")])

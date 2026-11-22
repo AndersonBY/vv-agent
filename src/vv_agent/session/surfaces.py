@@ -6,10 +6,12 @@ import secrets
 import sqlite3
 import warnings
 from collections.abc import Callable, Iterator, Mapping
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import AbstractContextManager, contextmanager, suppress
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from threading import Event, Lock, Thread, current_thread
 from time import sleep
 from typing import Any, cast
 from uuid import uuid4
@@ -661,6 +663,141 @@ def _reject_public_provider_ingress(
         raise Conflict("provider-recovery actor is reserved for trusted recovery ingress")
 
 
+class _KnownSessionOwner:
+    """Drive this client's registered sessions and their retained descendants."""
+
+    scan_interval = 0.25
+
+    def __init__(self, driver: SessionDriver, support: WorkerSupport) -> None:
+        self.support = support
+        self._driver = driver
+        self._lock = Lock()
+        self._changed = Event()
+        self._stop = Event()
+        self._thread: Thread | None = None
+        self._drive_thread: Thread | None = None
+        self._hints: set[str] = set()
+        self._projected: dict[str, int] = {}
+        self._last_sid = ""
+
+    @property
+    def running(self) -> bool:
+        thread = self._thread
+        return thread is not None and thread.is_alive() and not self._stop.is_set()
+
+    @property
+    def drive_available(self) -> bool:
+        return self.support.drive is not None and self._drive_thread is None and not self._stop.is_set()
+
+    def start(self) -> None:
+        with self._lock:
+            if self._thread is None and not self._stop.is_set():
+                self._thread = Thread(target=self._run, name="session-client-observer", daemon=True)
+                self._thread.start()
+
+    def wake(self, sid: str) -> None:
+        with self._lock:
+            if self._stop.is_set():
+                return
+            self._hints.add(sid)
+            self._changed.set()
+
+    def close(self) -> bool:
+        with self._lock:
+            thread = self._thread
+            self._stop.set()
+            self._changed.set()
+        if current_thread() in (thread, self._drive_thread):
+            raise RuntimeError("SessionDriver cannot close from its own execution thread")
+        if thread is not None:
+            thread.join()
+        return True
+
+    def _run(self) -> None:
+        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="session-client-drive") as executor:
+            future: Future[None] | None = None
+            while not self._stop.is_set():
+                try:
+                    with self._driver._open_drive_store() as store:
+                        while not self._stop.is_set():
+                            with self._lock:
+                                hints = self._hints
+                                self._hints = set()
+                                self._changed.clear()
+                            if future is not None and future.done():
+                                completed = future
+                                future = None
+                                completed.result()
+                            sid = self._observe_and_select(store, hints, drive=future is None)
+                            if sid is not None and not self._stop.is_set():
+                                future = executor.submit(self._drive, sid)
+                                future.add_done_callback(lambda _: self._changed.set())
+                            self._changed.wait(self.scan_interval)
+                except Exception:
+                    # The next pass reopens the observer connection. The
+                    # drive job keeps its own connection and lease lifecycle.
+                    self._stop.wait(self.scan_interval)
+
+    def _observe_and_select(self, store: SessionStore, hints: set[str], *, drive: bool) -> str | None:
+        from .bindings import MissingHostBinding
+
+        driver = self._driver
+        driver._configure_store_support(store)
+        # Observation errors must not suppress an independently runnable drive.
+        with suppress(Exception):
+            driver._observe_registered_handles(store, discover_unobserved=True)
+        roots = {sid for sid, registration in tuple(driver._runtimes.items()) if registration.armed}
+        candidates = roots | hints | set(driver._observer_cursors)
+        for sid in sorted(candidates, key=lambda sid: (sid <= self._last_sid, sid)):
+            try:
+                registration, chain = driver._runtime_lineage(store, sid)
+            except (Conflict, MissingHostBinding) as exc:
+                if isinstance(exc, Conflict) and driver._is_deleted_session_conflict(exc):
+                    driver._drop_deleted_session_observation(sid)
+                    self._projected.pop(sid, None)
+                continue
+            if not registration.armed:
+                continue
+            if chain:
+                with suppress(KeyUnavailable, Conflict):
+                    driver._discover_child_runtimes(store, sid)
+                    head = store.read(sid, limit=1).head_seq
+                    if self._projected.get(sid, 0) < head:
+                        through = driver._deliver_child_session(store, sid)
+                        self._projected[sid] = through or head
+            if drive and self.drive_available and store.is_runnable(sid):
+                failure = driver._failure_after_progress(store, sid, driver._errors.get(sid))
+                if failure is None or not failure.terminal or isinstance(failure.error, ProviderResultInvalid):
+                    self._last_sid = sid
+                    return sid
+        return None
+
+    def _drive(self, sid: str) -> None:
+        self._drive_thread = current_thread()
+        try:
+            with self._driver._open_drive_store() as store:
+                if self._stop.is_set() or not store.is_runnable(sid):
+                    return
+                callback = self.support.drive
+                if callback is None:
+                    return
+                lease = store.acquire(sid, owner=f"session-client/{uuid4().hex}", ttl_ms=self.support.lease_ttl_ms)
+                if lease is not None:
+                    if self._stop.is_set():
+                        with suppress(LeaseLost):
+                            store.release(lease)
+                        return
+                    callback(store, sid, lease=lease)
+        except (SessionNotLive, KeyUnavailable, sqlite3.OperationalError):
+            pass
+        except LedgerIntegrityError as exc:
+            policy = self._driver._lease_retry_policy(None, None)
+            self._driver._errors.setdefault(sid, _SessionFailure(None, exc, 1, 0, True, *policy))
+        finally:
+            self._driver._notify_session(sid)
+            self._drive_thread = None
+
+
 class SessionDriver:
     def __init__(
         self,
@@ -676,6 +813,7 @@ class SessionDriver:
         worker_level: int = 1,
         handler_versions: tuple[str, ...] = ("1",),
         capabilities: tuple[str, ...] = (),
+        _known_sessions: bool = False,
     ) -> None:
         if runtime_factory is not None and not callable(runtime_factory):
             raise TypeError("runtime_factory must be callable or None")
@@ -789,19 +927,18 @@ class SessionDriver:
         self._errors: dict[str, _SessionFailure] = {}
         self._close_callbacks = []
         self._next_session_requirements: SessionRequirements | None = None
-        self._worker = LocalWorker(
-            WorkerSupport(
-                open_store=self._open_drive_store,
-                drive=self._drive_worker_session if self._execution_capable else None,
-                project=self._project_worker_session if self._execution_capable and not pg_objects else None,
-                observe=self._observe_registered_handles,
-                projection_consumers=("child_delivery",) if self._execution_capable and not pg_objects else (),
-                open_claim_store=self._open_claim_store if open_claim_store is not None else None,
-                level=self._worker_supports.max_level,
-                handler_versions=self._worker_supports.handler_versions,
-                capabilities=self._worker_supports.capabilities,
-            )
+        support = WorkerSupport(
+            open_store=self._open_drive_store,
+            drive=self._drive_worker_session if self._execution_capable else None,
+            project=self._project_worker_session if self._execution_capable and not pg_objects else None,
+            observe=self._observe_registered_handles,
+            projection_consumers=("child_delivery",) if self._execution_capable and not pg_objects else (),
+            open_claim_store=self._open_claim_store if open_claim_store is not None else None,
+            level=self._worker_supports.max_level,
+            handler_versions=self._worker_supports.handler_versions,
+            capabilities=self._worker_supports.capabilities,
         )
+        self._worker = _KnownSessionOwner(self, support) if _known_sessions and not pg_objects else LocalWorker(support)
         self._closed = False
 
     @property
@@ -1304,7 +1441,7 @@ class SessionDriver:
         config = replace(parent.config, model=None, workspace=created["workspace"], max_cycles=None, no_tool_policy=None)
         return self._retained_projection_runtime(sid, agent, config, retained.record, retained.record.task())
 
-    def _observe_registered_handles(self, store: SessionStore) -> None:
+    def _observe_registered_handles(self, store: SessionStore, *, discover_unobserved: bool = False) -> None:
         """Advance one coordinator-owned durable projection cursor per session."""
 
         roots = tuple(self._runtimes)
@@ -1315,12 +1452,21 @@ class SessionDriver:
             registration = self._runtimes.get(root)
             if registration is not None:
                 config = registration.config
-                if config.event_store is None and config.stream is None and not trace_processors(config):
+                if (
+                    not discover_unobserved
+                    and config.event_store is None
+                    and config.stream is None
+                    and not trace_processors(config)
+                ):
                     self._observer_cursors[root] = store.lease_status(root)[0]
                     self._notify_session(root)
                     continue
             try:
                 child_ids = self._discover_child_runtimes(store, root)
+            except KeyUnavailable:
+                if not discover_unobserved:
+                    raise
+                continue
             except Conflict as exc:
                 if not self._is_deleted_session_conflict(exc):
                     raise
@@ -1350,6 +1496,10 @@ class SessionDriver:
                     self._notify_session(sid)
                     continue
                 self._deliver_projected_events(store, sid, runtime)
+            except KeyUnavailable:
+                if not discover_unobserved:
+                    raise
+                continue
             except Conflict as exc:
                 if not self._is_deleted_session_conflict(exc):
                     raise
