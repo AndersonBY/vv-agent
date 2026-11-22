@@ -51,6 +51,10 @@ class LeaseLost(Conflict):
     pass
 
 
+class ObjectPublicationBusy(Conflict):
+    """An external content publication transaction could not take its locks."""
+
+
 @dataclass(frozen=True)
 class WorkerSupports:
     """The immutable, deterministically serializable worker support declaration."""

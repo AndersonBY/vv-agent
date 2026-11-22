@@ -3,6 +3,8 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, nullcontext
 from dataclasses import replace
+from functools import partial
+from threading import Event
 from uuid import uuid4
 
 import pytest
@@ -11,20 +13,24 @@ from test_s1_postgres_rls import TENANT_A, TENANT_B, _dsn, _provision
 from test_s1_postgres_rls import disposable_pg as disposable_pg
 from test_s1_postgres_rls import rls_database as rls_database
 
+from vv_agent import Agent, RunConfig
 from vv_agent.kernel._content import ContentRef, ContentUnavailable, KeyUnavailable
 from vv_agent.kernel._content_runtime import ContentRuntimeUnavailable, _provision_postgres_object_content, bind_content_runtime
 from vv_agent.kernel._content_sql import _read_ciphertext
 from vv_agent.kernel._external_content import _PostgresObjectContent
 from vv_agent.kernel._postgres_allocation_journal import JournalRole, PostgresAllocationJournal, PostgresObjectJournal
 from vv_agent.kernel._store import Conflict
+from vv_agent.model import ScriptedModelProvider
 from vv_agent.session.content_runtime import SESSION_WORKSPACE
 from vv_agent.session.content_store import AESGCMCipher, LocalKeyProvider
 from vv_agent.session.fork import fork_thread
 from vv_agent.session.postgres import PostgresStore
 from vv_agent.session.records import InboxItem
+from vv_agent.session.result import project_result
 from vv_agent.session.s3_content import S3CiphertextStore
 from vv_agent.session.surfaces import SessionDriver
 from vv_agent.session.timing import SystemClock
+from vv_agent.types import LLMResponse
 
 
 @pytest.fixture
@@ -37,6 +43,7 @@ def object_publication(rls_database):
     _provision(database)
     cluster_dsn = _dsn(database, database.cluster.admin_role, database.cluster.admin_password)
     owner_dsn = _dsn(database, database.migration_role, database.migration_password)
+    worker_dsn = _dsn(database, database.worker_role, database.worker_password)
     primary = {
         TENANT_A: _dsn(database, database.tenant_a_role, database.tenant_a_password),
         TENANT_B: _dsn(database, database.tenant_b_role, database.tenant_b_password),
@@ -65,6 +72,7 @@ def object_publication(rls_database):
             with PostgresStore.schema_admin_standalone(owner_dsn) as owner:
                 owner.install_tenant_rls(TENANT_A, database.tenant_a_role, database.tenant_a_password)
                 owner.install_tenant_rls(TENANT_B, database.tenant_b_role, database.tenant_b_password)
+                owner.install_worker_rls(database.worker_role, database.worker_password)
                 (database_id,) = owner._one("SELECT database_id FROM sk_settings")
                 with psycopg.connect(make_conninfo(cluster_dsn, dbname=journal_database), autocommit=True) as journal_admin:
                     identity = PostgresAllocationJournal.provision(
@@ -85,7 +93,7 @@ def object_publication(rls_database):
                     )
                     for tenant in primary
                 }
-                yield owner, primary, journals
+                yield owner, primary, journals, worker_dsn
         finally:
             admin.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(journal_database)))
             for role in roles:
@@ -98,7 +106,7 @@ _TEST_CONTENT_DIGEST = "1" * 64
 def test_postgres_publication_checks_tenant_binding_and_outer_transaction(object_publication, monkeypatch):
     from psycopg import IsolationLevel
 
-    owner, primary, journals = object_publication
+    owner, primary, journals, _ = object_publication
     journal = journals[TENANT_A]
 
     def check_deadline():
@@ -193,7 +201,7 @@ def test_postgres_publication_checks_tenant_binding_and_outer_transaction(object
 
 
 def test_postgres_publication_is_nonblocking_and_releases_on_commit_and_rollback(object_publication):
-    owner, primary, journals = object_publication
+    owner, primary, journals, _ = object_publication
     journal = journals[TENANT_A]
     owner._provision_object_journal(journal, content_digest=_TEST_CONTENT_DIGEST)
     expired = False
@@ -243,25 +251,31 @@ def test_postgres_publication_is_nonblocking_and_releases_on_commit_and_rollback
                 check_fence()
 
 
-def test_postgres_sdk_root_object_create_push_and_cold_read(object_publication, tmp_path, monkeypatch):
-    owner, primary, journals = object_publication
-    journal = journals[TENANT_A]
+class _SdkObjectClient(_Client):
+    def __init__(self, journal: PostgresObjectJournal, session_id: str):
+        super().__init__(lambda allocation_id: journal._scope.get(allocation_id) or journal.get_anonymous(allocation_id))
+        self.journal = journal
+        self.session_id = session_id
 
-    class Client(_Client):
-        def put_object(self, **request):
-            if "IfMatch" in request:
-                allocation_id = bytes.fromhex(request["Key"].rsplit("/", 1)[1])
-                row = journal._scope.get(allocation_id)
-                assert row is not None and row.owner is not None
-                key = journal.get_key_intent(row.owner.provider_instance_id, row.owner.key_id)
-                assert key is not None and key.state == "allocating"
-                assert row.owner.tenant_id == TENANT_A and row.owner.session_id == "objects"
-                self.owner = row.owner
-            return super().put_object(**request)
+    def put_object(self, **request):
+        if "IfMatch" in request:
+            allocation_id = bytes.fromhex(request["Key"].rsplit("/", 1)[1])
+            row = self.journal._scope.get(allocation_id)
+            assert row is not None and row.owner is not None
+            key = self.journal.get_key_intent(row.owner.provider_instance_id, row.owner.key_id)
+            assert key is not None and key.state == "allocating"
+            assert row.owner.tenant_id == self.journal.tenant_id and row.owner.session_id == self.session_id
+            self.owner = row.owner
+        return super().put_object(**request)
+
+
+def test_postgres_sdk_root_object_create_push_and_cold_read(object_publication, tmp_path, monkeypatch):
+    owner, primary, journals, _ = object_publication
+    journal = journals[TENANT_A]
 
     key_path = tmp_path / "keys.sqlite"
     master_key = b"x" * 32
-    client = Client(lambda allocation_id: journal._scope.get(allocation_id) or journal.get_anonymous(allocation_id))
+    client = _SdkObjectClient(journal, "objects")
 
     with closing(LocalKeyProvider(master_key, state_path=key_path)) as provider:
         provider_instance = provider._provision_exact_key_lifecycle()
@@ -312,10 +326,10 @@ def test_postgres_sdk_root_object_create_push_and_cold_read(object_publication, 
                     with pytest.raises(KeyUnavailable, match="persistence budget expired"):
                         driver.push("objects", InboxItem("failed", "user", {"content": "object payload"}))
                 assert [row.item.input_id for row in store.peek_inbox("objects")] == ["input"]
-                with pytest.raises(ContentRuntimeUnavailable, match="root create or push"), driver.store.atomic():
+                with pytest.raises(ContentRuntimeUnavailable, match="fenced root publication transaction"), driver.store.atomic():
                     pytest.fail("generic mutation entered PostgreSQL object store")
-                with pytest.raises(ContentRuntimeUnavailable, match="worker execution"), driver._open_drive_store():
-                    pytest.fail("worker opened a PostgreSQL object store")
+                with pytest.raises(ContentRuntimeUnavailable, match="requires open_claim_store"):
+                    driver.start("objects", Agent("test", "Answer the user.", model="m"), RunConfig(), None)
                 assert set(
                     store._rows(
                         "SELECT ciphertext IS NULL, octet_length(object_locator) FROM sk_content WHERE session_id='objects'"
@@ -345,3 +359,145 @@ def test_postgres_sdk_root_object_create_push_and_cold_read(object_publication, 
             assert driver.read_input_content("objects", persisted.input_id, ref) == "object payload"
             with pytest.raises(ContentUnavailable, match="exact object locator"):
                 _read_ciphertext(objects, TENANT_A, "objects", ref, bytes(12), bytes(16), None)
+
+
+@pytest.mark.parametrize("mode", ["start-input", "queued-input", "resume-receipt", "contended-publication"])
+def test_postgres_sdk_worker_publishes_root_turn(object_publication, tmp_path, monkeypatch, mode):
+    owner, primary, journals, worker_dsn = object_publication
+    journal = journals[TENANT_A]
+    session_id, input_id = "worker-root", "first-input"
+    prompt, answer = "read the stored worker input", "published worker result"
+    key_path = tmp_path / "keys.sqlite"
+    master_key = b"x" * 32
+    client = _SdkObjectClient(journal, session_id)
+    open_tenant = partial(PostgresStore.tenant_standalone, primary[TENANT_A], tenant_id=TENANT_A)
+    open_claim_store = partial(PostgresStore.worker_standalone, worker_dsn)
+    claims = []
+    renewals = []
+    drive_pids = []
+    model_calls = []
+    contended = Event()
+    claim_runnable, renew = PostgresStore.claim_runnable, PostgresStore.renew
+
+    def record_claim(store, **kwargs):
+        claimed = claim_runnable(store, **kwargs)
+        for work in claimed:
+            if work.lease is not None:
+                assert store.runtime_mode == "worker" and not store.claims_all_tenants
+                claims.append((store.connection.info.backend_pid, work.lease))
+        return claimed
+
+    def record_renewal(store, lease, **kwargs):
+        poll = renew(store, lease, **kwargs)
+        assert store.credential_tenant_id == TENANT_A
+        renewals.append((store.connection.info.backend_pid, poll.lease))
+        return poll
+
+    monkeypatch.setattr(PostgresStore, "claim_runnable", record_claim)
+    monkeypatch.setattr(PostgresStore, "renew", record_renewal)
+
+    def model_response(request):
+        assert any(message.role == "user" and message.content == prompt for message in request.messages)
+        model_calls.append(request)
+        return LLMResponse(answer)
+
+    agent = Agent("test", "Answer the user.", model="m")
+    config = RunConfig(model_provider=ScriptedModelProvider.from_callback("scripted", "m", model_response))
+    with closing(LocalKeyProvider(master_key, state_path=key_path)) as provider, open_tenant() as store:
+        provider_instance = provider._provision_exact_key_lifecycle()
+        objects = _PostgresObjectContent(journal, S3CiphertextStore(client, bucket="fixture", journal=journal), provider_instance)
+        _provision_postgres_object_content(owner, key_provider=provider, objects=objects)
+        store.configure_input_admission(allow_unsigned=True)
+        bind_content_runtime(store, key_provider=provider, cipher=AESGCMCipher(), _object_content=objects)
+        with closing(SessionDriver(store=store, open_claim_store=open_claim_store)) as driver:
+            if mode == "contended-publication":
+                defer = PostgresStore.defer_drive
+
+                def observe_deferral(store, lease, *, retry_after_ms):
+                    result = defer(store, lease, retry_after_ms=retry_after_ms)
+                    if lease.session_id == session_id:
+                        contended.set()
+                    return result
+
+                monkeypatch.setattr(PostgresStore, "defer_drive", observe_deferral)
+
+            def runtime_factory(drive_store, agent, config, task, session_id):
+                assert drive_store.credential_tenant_id == TENANT_A
+                drive_pids.append(drive_store.connection.info.backend_pid)
+                runtime = driver.runtime(agent, config, task, session_id=session_id, store=drive_store)
+                if mode == "resume-receipt":
+
+                    def stop_after_receipt(point, record):
+                        if point == "after_commit" and record is not None and record.kind == "op_completed":
+                            raise RuntimeError("stop after committed model receipt")
+
+                    runtime.hook = stop_after_receipt
+                return runtime
+
+            driver.runtime_factory = runtime_factory
+            driver.create(session_id, str(tmp_path))
+            if mode in {"queued-input", "contended-publication"}:
+                driver.push(session_id, InboxItem(input_id, "user", {"content": prompt}))
+                if mode == "contended-publication":
+                    with (
+                        open_tenant() as contender,
+                        contender._object_publication_atomic(
+                            journal, content_digest=objects._binding_digest(), check_deadline=lambda: None
+                        ),
+                    ):
+                        handle = driver.start(session_id, agent, config, None)
+                        assert contended.wait(10)
+                        assert model_calls == []
+                else:
+                    handle = driver.start(session_id, agent, config, None)
+            else:
+                handle = driver.start(session_id, agent, config, prompt, input_id=input_id)
+            try:
+                if mode == "resume-receipt":
+                    with pytest.raises(RuntimeError, match="stop after committed model receipt"):
+                        handle.result(timeout=20)
+                    assert store.read_state(session_id)[0].active_turn_id == handle.run_id
+                else:
+                    assert handle.result(timeout=20).final_output == answer
+            except TimeoutError as exc:
+                raise exc from driver._worker.last_error
+            run_id = handle.run_id
+
+        root_pid = store.connection.info.backend_pid
+        claim_pids = {pid for pid, _ in claims}
+        assert all((claim.tenant_id, claim.session_id) == (TENANT_A, session_id) for _, claim in claims)
+        if mode == "contended-publication":
+            assert len({claim.epoch for _, claim in claims}) >= 2
+        elif mode != "resume-receipt":
+            assert len(claims) == 1
+        assert drive_pids and claim_pids
+        assert root_pid not in set(drive_pids) | claim_pids
+        assert claim_pids.isdisjoint(drive_pids)
+        assert renewals
+        claimed = {(lease.owner, lease.epoch, lease.session_id, lease.tenant_id) for _, lease in claims}
+        for heartbeat_pid, renewed in renewals:
+            assert heartbeat_pid not in {root_pid} | claim_pids | set(drive_pids)
+            assert (renewed.owner, renewed.epoch, renewed.session_id, renewed.tenant_id) in claimed
+        assert store.peek_inbox(session_id) == ()
+        assert store._one("SELECT lease_owner,lease_until_ms FROM sk_session WHERE session_id=%s", (session_id,)) == (None, None)
+        assert store._one(
+            "SELECT count(*) FROM sk_content WHERE session_id=%s AND (ciphertext IS NOT NULL OR object_locator IS NULL)",
+            (session_id,),
+        ) == (0,)
+
+    with closing(LocalKeyProvider(master_key, state_path=key_path)) as provider, open_tenant() as cold_store:
+        cold_store.configure_input_admission(allow_unsigned=True)
+        bind_content_runtime(cold_store, key_provider=provider, cipher=AESGCMCipher(), _object_content=objects)
+        with closing(SessionDriver(store=cold_store, open_claim_store=open_claim_store)) as cold:
+            if mode == "resume-receipt":
+                resumed = cold.start(session_id, agent, config, None)
+                assert resumed.run_id == run_id
+                assert resumed.result(timeout=20).final_output == answer
+            assert len(model_calls) == 1
+            body, consumed_seq = cold_store._one(
+                "SELECT body,consumed_seq FROM sk_inbox WHERE session_id=%s AND input_id=%s", (session_id, input_id)
+            )
+            item = InboxItem.parse(body)
+            assert consumed_seq is not None
+            assert cold.read_input_content(session_id, input_id, ContentRef.from_dict(item.payload["content"])) == prompt
+            assert project_result(cold.store, session_id, run_id).final_output == answer

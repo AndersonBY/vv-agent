@@ -11,7 +11,15 @@ from uuid import uuid4
 from vv_agent.kernel._content import KeyUnavailable
 from vv_agent.kernel._lease_scope import Clock, Signal
 from vv_agent.kernel._sql import SQLStore, UnsupportedFeatureLevel, UnsupportedWorkerCapabilities
-from vv_agent.kernel._store import Lease, LeaseLost, LeasePoll, SequenceConflict, SessionStore, StoredRecord
+from vv_agent.kernel._store import (
+    Lease,
+    LeaseLost,
+    LeasePoll,
+    ObjectPublicationBusy,
+    SequenceConflict,
+    SessionStore,
+    StoredRecord,
+)
 
 FACTORY_LEASE_TTL_MS = 60000
 FACTORY_HEARTBEAT_SECONDS = 0.25
@@ -279,7 +287,7 @@ def drive_core(
                 scope_close_succeeded = True
         key_unavailable = isinstance(exc, KeyUnavailable)
         if (
-            (scheduled or key_unavailable)
+            (scheduled or key_unavailable or isinstance(exc, ObjectPublicationBusy))
             and (scope is None or scope_close_succeeded)
             and isinstance(exc, Exception)
             and not _is_typed_heartbeat_failure(exc)

@@ -565,7 +565,11 @@ class CoreDriver:
 
         try:
             check_deadline()
-            with ExitStack() as latch, self.store.atomic() as tx:
+            publication_atomic = getattr(self.store, "_leased_publication_atomic", None)
+            transaction = (
+                publication_atomic(self.scope.lease, check_deadline) if callable(publication_atomic) else self.store.atomic()
+            )
+            with ExitStack() as latch, transaction as tx:
                 bind_deadline = getattr(tx, "_bind_persistence_deadline", None)
                 # PostgreSQL can renew until a session row lock is requested.
                 # External allocations must share the deadline taken before prepare.

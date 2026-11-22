@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from queue import Empty, Queue
 from threading import Condition, Event, Thread, current_thread
@@ -46,6 +46,7 @@ class WorkerSupport:
     handler_versions: tuple[str, ...] = ("1",)
     capabilities: tuple[str, ...] = ()
     all_tenants: bool = False
+    open_claim_store: Callable[[], AbstractContextManager[SessionStore]] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -419,19 +420,23 @@ class LocalWorker:
                 future.add_done_callback(self._future_done)
 
         try:
-            _tick(
-                store,
-                dispatch_claimed=dispatch_claimed,
-                project=project,
-                project_claimed=project_claimed,
-                page_size=support.page_size,
-                failure_backoff_ms=support.failure_backoff_ms,
-                claim_owner=self._owner,
-                claim_ttl_ms=support.lease_ttl_ms,
-                work_kinds=tuple(kinds),
-                projection_consumers=support.projection_consumers,
-                stop_after_claimed_drive=True,
-            )
+            opener = support.open_claim_store
+            with opener() if opener is not None else nullcontext(store) as claim_store:
+                if opener is not None:
+                    self._configure_store(claim_store, all_tenants=support.all_tenants, support=support)
+                _tick(
+                    claim_store,
+                    dispatch_claimed=dispatch_claimed,
+                    project=project,
+                    project_claimed=project_claimed,
+                    page_size=support.page_size,
+                    failure_backoff_ms=support.failure_backoff_ms,
+                    claim_owner=self._owner,
+                    claim_ttl_ms=support.lease_ttl_ms,
+                    work_kinds=tuple(kinds),
+                    projection_consumers=support.projection_consumers,
+                    stop_after_claimed_drive=True,
+                )
         except Exception as exc:
             error = self._combine_errors(error, exc)
         return error

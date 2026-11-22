@@ -996,7 +996,7 @@ class _ContentSessionStoreAdapter:
     @contextmanager
     def atomic(self) -> Iterator[SessionTx]:
         if isinstance(self._binding._object_content, _PostgresObjectContent):
-            raise ContentRuntimeUnavailable("PostgreSQL object sessions require the root create or push entry point")
+            raise ContentRuntimeUnavailable("PostgreSQL object sessions require a fenced root publication transaction")
         with self._store.atomic() as tx, self._adapt_transaction(tx) as adapter:
             yield adapter
 
@@ -1009,8 +1009,20 @@ class _ContentSessionStoreAdapter:
             adapter._write_memo.clear()
             adapter._published_refs.clear()
 
+    def _root_publication_atomic(self, clock: Clock) -> AbstractContextManager[SessionTx]:
+        deadline = clock.monotonic() + 5
+
+        def check_deadline() -> None:
+            if clock.monotonic() >= deadline:
+                raise KeyUnavailable("external content persistence budget expired")
+
+        return self._publication_atomic(check_deadline)
+
+    def _leased_publication_atomic(self, lease: Lease, check_deadline: Callable[[], None]) -> AbstractContextManager[SessionTx]:
+        return self._publication_atomic(check_deadline, lease=lease)
+
     @contextmanager
-    def _root_publication_atomic(self, clock: Clock) -> Iterator[SessionTx]:
+    def _publication_atomic(self, check_deadline: Callable[[], None], *, lease: Lease | None = None) -> Iterator[SessionTx]:
         objects = self._binding._object_content
         if not isinstance(objects, _PostgresObjectContent):
             with self.atomic() as tx:
@@ -1019,17 +1031,10 @@ class _ContentSessionStoreAdapter:
         root = _root_store(self)
         if not isinstance(root, PostgresStore):
             raise ContentRuntimeUnavailable("PostgreSQL object publication requires its PostgreSQL store")
-        deadline = clock.monotonic() + 5
-
-        def check_deadline() -> None:
-            if clock.monotonic() >= deadline:
-                raise KeyUnavailable("external content persistence budget expired")
-
         digest = objects._binding_digest()
-        with root._object_publication_atomic(objects.journal, content_digest=digest, check_deadline=check_deadline) as (
-            tx,
-            check_publication,
-        ):
+        with root._object_publication_atomic(
+            objects.journal, content_digest=digest, check_deadline=check_deadline, lease=lease
+        ) as (tx, check_publication):
             if objects.verify_installation(objects.journal.identity.database_id, self._binding.key_provider) != digest:
                 raise ContentUnavailable("PostgreSQL object content binding changed during publication")
             check_publication()

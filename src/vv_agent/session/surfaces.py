@@ -41,7 +41,12 @@ from vv_agent.kernel._content_publication import (
     link_declared_input_content,
     publish_session_created_content,
 )
-from vv_agent.kernel._content_runtime import _uses_postgres_objects, _verify_content_binding
+from vv_agent.kernel._content_runtime import (
+    _PostgresObjectContent,
+    _root_store,
+    _uses_postgres_objects,
+    _verify_content_binding,
+)
 from vv_agent.kernel._driver_inputs import _pending_batch_in_state, _steer_held_in_state
 from vv_agent.kernel._postgres import PostgresStore as CorePostgresStore
 from vv_agent.kernel._postgres import _bind_tenant_context
@@ -62,7 +67,7 @@ from vv_agent.kernel._sql import (
     _TenantSQLStore,
 )
 from vv_agent.kernel._sqlite import SQLiteStore as CoreSQLiteStore
-from vv_agent.kernel._store import DEFAULT_TENANT_ID, LeaseRetryExhausted
+from vv_agent.kernel._store import DEFAULT_TENANT_ID, LeaseRetryExhausted, ObjectPublicationBusy
 from vv_agent.memory import MemoryManager
 from vv_agent.model import ModelError, resolve_model_selection, resolve_run_model
 from vv_agent.result import RunResult
@@ -667,6 +672,7 @@ class SessionDriver:
         content_key_provider: KeyProvider | None = None,
         runtime_factory: RuntimeFactory | None = None,
         open_store: Callable[[], AbstractContextManager[SessionStore]] | None = None,
+        open_claim_store: Callable[[], AbstractContextManager[SessionStore]] | None = None,
         worker_level: int = 1,
         handler_versions: tuple[str, ...] = ("1",),
         capabilities: tuple[str, ...] = (),
@@ -675,6 +681,8 @@ class SessionDriver:
             raise TypeError("runtime_factory must be callable or None")
         if open_store is not None and not callable(open_store):
             raise TypeError("open_store must be callable or None")
+        if open_claim_store is not None and not callable(open_claim_store):
+            raise TypeError("open_claim_store must be callable or None")
         if isinstance(worker_level, bool) or not isinstance(worker_level, int) or worker_level < 1:
             raise ValueError("worker_level must be a positive integer")
         normalized_handlers = tuple(sorted(set(handler_versions)))
@@ -686,6 +694,7 @@ class SessionDriver:
         self.model_resolver = model_resolver
         self.runtime_factory = runtime_factory
         self.open_store = open_store
+        self.open_claim_store = open_claim_store
         self.handler_versions = normalized_handlers
         self.default_handler_version = normalized_handlers[0]
         self.capabilities = normalized_capabilities
@@ -700,14 +709,7 @@ class SessionDriver:
             self._root_store = SQLiteStore(str(path))
             if self._temporary_store_directory is not None:
                 self._root_store.configure_input_admission(allow_unsigned=True)
-        concrete_store = self._root_store
-        seen: set[int] = set()
-        while id(concrete_store) not in seen:
-            seen.add(id(concrete_store))
-            parent = getattr(concrete_store, "_root_store", None) or getattr(concrete_store, "_root", None)
-            if parent is None or parent is concrete_store:
-                break
-            concrete_store = parent
+        concrete_store = _root_store(self._root_store)
         if isinstance(concrete_store, CorePostgresStore) and not isinstance(concrete_store, SessionPostgresStore):
             raise ValueError(
                 "raw kernel PostgreSQL stores cannot be used as a runtime entry point; use session.postgres.PostgresStore"
@@ -734,6 +736,11 @@ class SessionDriver:
             "worker",
             "unbound-internal",
         }
+        pg_objects = _uses_postgres_objects(self._root_store)
+        if open_claim_store is not None and (not pg_objects or not self.credential_isolation):
+            raise ValueError("open_claim_store requires a credential-isolated PostgreSQL object session store")
+        if pg_objects:
+            self._execution_capable = open_claim_store is not None
         self._store = self._root_store if bound_tenant == self.tenant_id else self._root_store.for_tenant(self.tenant_id)
         bound_provider = content_key_provider_for(self._root_store)
         self.uses_development_content_key_provider = content_key_provider is None and bound_provider is None
@@ -787,9 +794,10 @@ class SessionDriver:
             WorkerSupport(
                 open_store=self._open_drive_store,
                 drive=self._drive_worker_session if self._execution_capable else None,
-                project=self._project_worker_session if self._execution_capable else None,
+                project=self._project_worker_session if self._execution_capable and not pg_objects else None,
                 observe=self._observe_registered_handles,
-                projection_consumers=("child_delivery",) if self._execution_capable else (),
+                projection_consumers=("child_delivery",) if self._execution_capable and not pg_objects else (),
+                open_claim_store=self._open_claim_store if open_claim_store is not None else None,
                 level=worker_level,
                 handler_versions=self.handler_versions,
                 capabilities=self.capabilities,
@@ -810,22 +818,46 @@ class SessionDriver:
         return self._closed
 
     @contextmanager
+    def _open_claim_store(self) -> Iterator[SessionStore]:
+        opener = self.open_claim_store
+        assert opener is not None
+        binding = content_runtime_binding_for(self.store)
+        assert binding is not None and isinstance(binding._object_content, _PostgresObjectContent)
+        objects = binding._object_content
+        identity = objects.journal.identity
+        pin = identity.database_id, CorePostgresStore._object_journal_digest(identity, objects._binding_digest())
+        with opener() as store:
+            root = _root_store(store)
+            if not isinstance(root, SessionPostgresStore) or root.runtime_mode != "worker" or root._object_installation() != pin:
+                raise ContentUnavailable("object claims require a verified worker login on the bound PostgreSQL installation")
+            configured, allow_unsigned, signer = cast(CorePostgresStore, _root_store(self.store))._input_admission_policy()
+            if configured:
+                root.configure_input_admission(signer, allow_unsigned=allow_unsigned)
+            yield root.for_tenant(self.tenant_id)
+
+    @contextmanager
     def _open_drive_store(self):
-        if _uses_postgres_objects(self.store):
-            raise ContentRuntimeUnavailable("worker execution is unavailable for PostgreSQL object sessions")
         manager = self.open_store() if self.open_store is not None else self._open_default_drive_store()
         with manager as store:
             if getattr(store, "tenant_id", None) != self.tenant_id:
                 store = store.for_tenant(self.tenant_id)
             current = content_runtime_binding_for(store)
             binding = content_runtime_binding_for(self._root_store)
+            if (
+                binding is not None
+                and isinstance(binding._object_content, _PostgresObjectContent)
+                and not isinstance(_root_store(store), CorePostgresStore)
+            ):
+                raise ContentUnavailable("PostgreSQL object drive requires a PostgreSQL data connection")
             if binding is not None and binding._object_content is not None:
-                if current is None:
+                if current is not None:
+                    _verify_content_binding(store, binding)
+                    if isinstance(binding._object_content, _PostgresObjectContent) and not _uses_postgres_objects(store):
+                        raise ContentUnavailable("PostgreSQL drive requires the pinned object content binding")
+                else:
                     bind_content_runtime(
                         store, key_provider=binding.key_provider, cipher=binding.cipher, _object_content=binding._object_content
                     )
-                else:
-                    _verify_content_binding(store, binding)
             elif current is None:
                 bind_content_key_provider(store, self.content_key_provider)
             store = wrap_session_content_store(store, self.content_key_provider)
@@ -833,7 +865,15 @@ class SessionDriver:
             # The drive factory may return a bare core store. LeaseKeeper needs
             # the caller-owned root's renewal connection, never this drive store
             # and never a borrowed heartbeat connection for model/host work.
+            @contextmanager
+            def open_heartbeat_store():
+                with self._heartbeat_store_factory() as heartbeat_store:
+                    _verify_content_binding(heartbeat_store, binding)
+                    yield heartbeat_store
+
             def heartbeat_factory():
+                if binding is not None and isinstance(binding._object_content, _PostgresObjectContent):
+                    return open_heartbeat_store
                 return self._heartbeat_store_factory
 
             cast(Any, store).heartbeat_store_factory = heartbeat_factory
@@ -1601,6 +1641,16 @@ class SessionDriver:
         return None
 
     def _drive_worker_session(self, store: SessionStore, session_id: str, *, lease: Lease) -> None:
+        if _uses_postgres_objects(store):
+            try:
+                cast(Any, store)._require_object_root_session(session_id)
+            except Exception:
+                try:
+                    store.defer_drive(lease, retry_after_ms=self._worker.support.failure_backoff_ms)
+                finally:
+                    with suppress(LeaseLost):
+                        store.release(lease)
+                raise
         try:
             registration, _ = self._runtime_lineage(store, session_id)
         except Exception:
@@ -1867,8 +1917,10 @@ class SessionDriver:
                                 jitter=retry_jitter,
                             ),
                         )
-            elif isinstance(exc, sqlite3.OperationalError) and _sqlite_lock_error(exc):
-                # Keep SQLite contention inside the normal bounded DriveCore retry
+            elif isinstance(exc, ObjectPublicationBusy) or (
+                isinstance(exc, sqlite3.OperationalError) and _sqlite_lock_error(exc)
+            ):
+                # Keep storage contention inside the normal bounded DriveCore retry
                 # path. Any committed op_started marker is still reconciled as an
                 # unknown outcome before another external call can be planned.
                 if (
@@ -2624,11 +2676,14 @@ class SessionDriver:
         actor: PrincipalInput | None = None,
         actor_subject_id: str = "local",
     ) -> RunHandle:
-        if _uses_postgres_objects(self.store):
-            raise ContentRuntimeUnavailable("worker execution is unavailable for PostgreSQL object sessions")
+        pg_objects = _uses_postgres_objects(self.store)
+        if pg_objects and not self._execution_capable:
+            raise ContentRuntimeUnavailable("PostgreSQL object execution requires open_claim_store")
         if self._closed:
             raise RuntimeError("SessionDriver is closed")
         state, source_records, inbox_seq = self.store.read_state(sid)
+        if pg_objects:
+            cast(Any, self.store)._require_object_root_session(sid)
         if state.closed or state.archived:
             raise RuntimeError("session is closed or archived")
         if any(handle.session_id == sid and handle._runtime_reservation is not None for handle in self.handles):
@@ -2788,14 +2843,16 @@ class SessionDriver:
     ) -> None:
         """Bind one initial input under the session's existing SQL admission lock."""
 
-        if _uses_postgres_objects(self.store):
-            raise ContentRuntimeUnavailable("worker execution is unavailable for PostgreSQL object sessions")
+        pg_objects = _uses_postgres_objects(self.store)
         armed = replace(registration, armed=True)
-        with self.store.atomic() as tx:
-            ceiling = cast(Any, self.store)._write_ceiling()
-            tx.lock_session(sid)
-            previous_registration = self._runtimes.get(sid)
-            try:
+        previous_registration = None
+        try:
+            with self._root_publication_atomic() as tx:
+                ceiling = cast(Any, self.store)._write_ceiling()
+                tx.lock_session(sid)
+                if pg_objects:
+                    cast(Any, self.store)._require_object_root_session(sid)
+                previous_registration = self._runtimes.get(sid)
                 state, _, _ = self.store.read_state(sid)
                 if state.closed or state.archived:
                     raise RuntimeError("session is closed or archived")
@@ -2803,6 +2860,9 @@ class SessionDriver:
                     entry.item.kind in {"user", "follow_up"} for entry in self.store.peek_inbox(sid)
                 ):
                     raise Conflict("session already has an active RunHandle or pending input")
+                token = armed.config.cancellation_token
+                if pg_objects and token is not None and token.cancelled:
+                    raise ContentRuntimeUnavailable("worker controls are unavailable for PostgreSQL object sessions")
                 self._runtimes[sid] = armed
                 self._push_in_transaction(
                     tx,
@@ -2813,8 +2873,9 @@ class SessionDriver:
                     registration=armed,
                     ceiling=ceiling,
                 )
-                token = armed.config.cancellation_token
                 if token is not None and token.cancelled:
+                    if pg_objects:
+                        raise ContentRuntimeUnavailable("worker controls are unavailable for PostgreSQL object sessions")
                     turn_id = f"{sid}/turn/{item.input_id}"
                     self._push_in_transaction(
                         tx,
@@ -2825,13 +2886,13 @@ class SessionDriver:
                         registration=armed,
                         ceiling=ceiling,
                     )
-            except BaseException:
-                if self._runtimes.get(sid) is armed:
-                    if previous_registration is None:
-                        self._runtimes.pop(sid, None)
-                    else:
-                        self._runtimes[sid] = previous_registration
-                raise
+        except BaseException:
+            if self._runtimes.get(sid) is armed:
+                if previous_registration is None:
+                    self._runtimes.pop(sid, None)
+                else:
+                    self._runtimes[sid] = previous_registration
+            raise
         _DRIVERS[(self.tenant_id, sid)] = self
         self._errors.pop(sid, None)
 
@@ -2948,10 +3009,7 @@ class SessionDriver:
         with self._root_publication_atomic() as tx:
             if pg_objects:
                 tx.lock_session(sid)
-                if cast(Any, self.store)._one(
-                    "SELECT parent_session_id FROM sk_session WHERE tenant_id=%s AND session_id=%s", (self.tenant_id, sid)
-                ) != (None,):
-                    raise ContentRuntimeUnavailable("child input is unavailable for PostgreSQL object sessions")
+                cast(Any, self.store)._require_object_root_session(sid)
             receipt = self._push_in_transaction(
                 tx,
                 sid,
@@ -2961,7 +3019,7 @@ class SessionDriver:
             )
         if receipt.replayed:
             return receipt
-        if not pg_objects:
+        if not pg_objects or self._execution_capable:
             self._worker.wake(sid)
             self._notify_session(sid)
         return receipt

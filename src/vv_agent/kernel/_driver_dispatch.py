@@ -15,6 +15,7 @@ from ._boundary_hydration import hydrate_input
 from ._call_context import CompiledCallFacts
 from ._child_store import ChildSession, InvalidChildBatch, create_child
 from ._child_summary import child_summary
+from ._content_runtime import ContentRuntimeUnavailable, _uses_postgres_objects
 from ._driver import CoreDriver
 from ._driver_planning import (
     InvalidW3Command,
@@ -368,6 +369,12 @@ def dispatch(driver: CoreDriver, attempt: Attempt) -> Generator[object, Any, Non
         stored_plan = attempt.execution_plan
         plan = driver.hydrate_plan(stored_plan)
         kind = plan._payload["op_kind"]
+        if kind != "model" and _uses_postgres_objects(getattr(driver, "store", None)):
+            name = plan._payload["request"]["name"]
+            if kind == "interaction" or name == "ask_user":
+                raise ContentRuntimeUnavailable("interactions are unavailable for PostgreSQL object sessions")
+            if (yield ChildBinding(name)) or (yield HasChild(name)) or (yield HasDelegation(name)):
+                raise ContentRuntimeUnavailable("child admission is unavailable for PostgreSQL object sessions")
         approval = normalize_approval_decision(attempt.approval) if attempt.approval is not None else None
         w3_command = kind != "model" and is_w3_command_plan(driver, plan)
         assert driver.state.active_turn_id is not None

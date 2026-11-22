@@ -19,7 +19,7 @@ from vv_agent.kernel._content_sql import CoreSQLContentStore
 from vv_agent.kernel._content_store import ContentCipher
 from vv_agent.kernel._reducer import Fold
 from vv_agent.kernel._sql import SQLSessionTx, SQLStore, _TenantSQLStore
-from vv_agent.kernel._store import Conflict, Lease, SessionStore
+from vv_agent.kernel._store import Conflict, Lease, LeaseLost, ObjectPublicationBusy, SessionStore
 
 if TYPE_CHECKING:
     from psycopg import Connection
@@ -981,6 +981,7 @@ class PostgresStore(SQLStore):
         *,
         check_deadline: Callable[[], None],
         content_digest: str,
+        lease: Lease | None = None,
     ) -> Iterator[tuple[SQLSessionTx, Callable[[], None]]]:
         """Open the primary transaction that owns one tenant's publication lock."""
 
@@ -1008,7 +1009,21 @@ class PostgresStore(SQLStore):
                 )
                 lock_id = int.from_bytes(sha256(frame).digest()[:8], "big", signed=True)
                 if self._one("SELECT pg_catalog.pg_try_advisory_xact_lock(%s::bigint)", (lock_id,)) != (True,):
-                    raise Conflict("object publication is busy for this tenant")
+                    raise ObjectPublicationBusy("object publication is busy for this tenant")
+                if lease is not None:
+                    from psycopg import errors
+
+                    if lease.tenant_id != tenant_id:
+                        raise LeaseLost("object publication lease belongs to another tenant")
+                    check_deadline()
+                    self._rows("SELECT set_config('lock_timeout','250ms',true)")
+                    try:
+                        self._write_ceiling()
+                        row = self._lock(lease.session_id)
+                    except errors.LockNotAvailable as exc:
+                        raise ObjectPublicationBusy("object publication could not lock the leased session") from exc
+                    self._check_lease(lease.session_id, lease, row, self._now())
+                    self._require_object_root_session(lease.session_id)
                 tx = SQLSessionTx(self)
                 tx._bind_external_deadline(check_deadline)
 
@@ -1021,8 +1036,18 @@ class PostgresStore(SQLStore):
                 yield tx, check_fence
                 check_fence()
                 tx._finalize_lease_fence()
+                if lease is not None:
+                    self._check_lease(lease.session_id, lease, row, self._now())
+                check_deadline()
         finally:
             self._connection_lock.release()
+
+    def _require_object_root_session(self, session_id: str) -> None:
+        if self._one(
+            "SELECT parent_session_id FROM sk_session WHERE tenant_id=%s AND session_id=%s",
+            (self.tenant_id, session_id),
+        ) != (None,):
+            raise ContentUnavailable("PostgreSQL object publication requires a root session")
 
     def _verify_object_journal(self, journal: _PostgresContentJournal, content_digest: str) -> None:
         if self.credential_tenant_id != journal.tenant_id or self.tenant_id != journal.tenant_id:

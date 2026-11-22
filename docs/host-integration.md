@@ -105,6 +105,13 @@ the signature `runtime_factory(store, agent, config, task, session_id)` and must
 return a fresh `Runtime` for each call. `SessionDriver` can call it while
 preparing a worker claim and always passes the exact tenant-bound drive store.
 
+For root sessions on a PostgreSQL installation bound to external content, use
+the authenticated tenant store as `store` and provide
+`open_claim_store` as a separate opener for a dedicated
+`PostgresStore.worker_standalone()` login on that installation. SessionDriver
+scopes the claim to its tenant and applies the tenant store's configured ledger
+policy. The drive and heartbeat use independent tenant connections.
+
 For a configured child claim, the agent, configuration, task and `session_id`
 passed by the factory identify the registered root even when the physical claim
 is the child. That call rebuilds the root template against the child claim's
@@ -533,9 +540,11 @@ transaction. The final expiry check still rejects writes that outlive the Lease.
 Heartbeat renewal is neither a callback
 timeout nor permission to run indefinitely. Give network and database operations
 bounded timeouts. Once a callback locks the parent session row for writing, it must do no
-file or network I/O: another connection cannot renew a row that this transaction
-has locked for writing. Do not wrap a whole `drive` in an outer host transaction;
-leaving a savepoint does not release the outer transaction's locks.
+file or network I/O because another connection cannot renew the locked row.
+SDK-owned external content persistence uses the remaining lease safety budget
+while the publication transaction holds that row. Do not wrap a whole `drive`
+in an outer host transaction because leaving a savepoint keeps that
+transaction's locks.
 
 If the database lease expires or another owner takes over, the final append
 raises `LeaseLost` and the transaction rolls back. Do not catch that error and
