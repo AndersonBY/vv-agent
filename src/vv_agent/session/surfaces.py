@@ -1392,13 +1392,15 @@ class SessionDriver:
     def _discover_child_runtimes(self, store: SessionStore, sid: str) -> tuple[str, ...]:
         concrete = _tenant_bound_sql_store(store)
         transaction_in_progress = isinstance(concrete, SQLStore) and concrete._transaction_in_progress()
-        parent, _ = self._runtime_lineage(store, sid)
         state, _, _ = store.read_state(sid)
+        parent = None
         child_ids: list[str] = []
         for operation in state.operations.values():
             for attempt in operation.attempts.values():
                 if attempt.child_handle is None:
                     continue
+                if parent is None:
+                    parent, _ = self._runtime_lineage(store, sid)
                 for child in child_handles(attempt.child_handle):
                     child_sid = child["session_id"]
                     try:
