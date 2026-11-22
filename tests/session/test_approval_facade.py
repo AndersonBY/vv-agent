@@ -11,9 +11,16 @@ from vv_agent.session import approval, kernel
 from vv_agent.session._driver_scope import _Scope
 from vv_agent.types import LLMResponse, ToolCall
 
+from .helpers import wrap_fixture_store
 from .test_tools_control_parity import Decisions, admit, records, runtime
 
 pytestmark = pytest.mark.sqlite_file
+
+
+@pytest.fixture
+def store(store, tmp_path, monkeypatch):
+    monkeypatch.setenv("VV_AGENT_LOCAL_KEY_STATE", str(tmp_path / "content-key-state.sqlite3"))
+    return wrap_fixture_store(store)
 
 
 def _park(store, database, tmp_path, effects):
