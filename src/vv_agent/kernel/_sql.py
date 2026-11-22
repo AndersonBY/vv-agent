@@ -3095,6 +3095,21 @@ class SQLSessionTx:
         self._active()
         self.store._require_live_row(self.store._lock(session_id))
 
+    def preflight_create(self, session_id: str) -> bool:
+        """Check the creation identity before preparing content and return whether it exists."""
+        self._active()
+        store = self.store
+        store._require_create_isolation()
+        tenant_id = store.tenant_id
+        deletion_state, tombstoned = store._one(
+            "SELECT (SELECT deletion_state FROM sk_session WHERE tenant_id=%s AND session_id=%s), "
+            "EXISTS (SELECT 1 FROM sk_tombstone WHERE tenant_id=%s AND session_id=%s)",
+            (tenant_id, session_id, tenant_id, session_id),
+        )
+        if tombstoned or deletion_state not in {None, "live"}:
+            raise SessionNotLive("a deleted session identity cannot be reused")
+        return deletion_state == "live"
+
     def create(self, spec: SessionSpec, *, consumers: tuple[str, ...]) -> CreateReceipt:
         self._active()
         self.store._require_configured_ledger("session creation")
