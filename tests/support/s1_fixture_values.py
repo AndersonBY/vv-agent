@@ -135,12 +135,13 @@ def append_fixture_records(
     *,
     commit_id: str = "fixture",
     consume_input_ids: tuple[str, ...] = (),
+    setup_lease_ttl_ms: int = 60_000,
 ):
     """Append logical producer records through the S1 content inventory."""
 
     records = tuple(records)
     head = store.read(session_id, limit=1)
-    lease = store.acquire(session_id, owner="s1-fixture-append", ttl_ms=60_000)
+    lease = store.acquire(session_id, owner="s1-fixture-append", ttl_ms=setup_lease_ttl_ms)
     if lease is None:
         raise RuntimeError("fixture could not acquire the session lease")
     try:

@@ -239,7 +239,8 @@ def seed_completed_prefix(store, database, size=5000):
             payload=record("turn_ended", tid=tid).payload | {"budget": DEFAULT_BUDGET},
         )
     )
-    append_fixture_records(store, "s", rows, commit_id="capacity-prefix")
+    # Publishing the large fixture can take longer than the normal setup lease under CI load.
+    append_fixture_records(store, "s", rows, commit_id="capacity-prefix", setup_lease_ttl_ms=600_000)
     assert store.read("s").head_seq == size
 
 
