@@ -60,11 +60,11 @@ def request_with_outbound(server, identity, method, params):
             return message, outbound
 
 
-def until_method(server, method, *, timeout=10):
+def until_method(server, method, *, timeout=10, predicate=None):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         message = server.transport.receive_outbound(timeout=max(0.0, deadline - time.monotonic()))
-        if message.get("method") == method:
+        if message.get("method") == method and (predicate is None or predicate(message)):
             return message
     raise AssertionError(f"Timed out waiting for {method}")
 
@@ -753,8 +753,11 @@ def test_level_two_approval_turn_start_replays_after_process_restart(tmp_path):
             resumed.transport.connection_id,
             {"jsonrpc": "2.0", "id": replayed["id"], "result": {"decision": "allow"}},
         )
-        completed = until_method(resumed, "turn/completed")
-        assert completed["params"]["turnId"] == turn_id
+        completed = until_method(
+            resumed,
+            "turn/completed",
+            predicate=lambda message: message["params"]["turnId"] == turn_id and message["params"]["status"] != "interrupted",
+        )
         assert completed["params"]["status"] == "completed"
         assert calls == [arguments]
 
