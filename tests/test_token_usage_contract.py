@@ -1,12 +1,20 @@
 from __future__ import annotations
 
+import base64
+import hmac
 import json
-from pathlib import Path
 from typing import Any
 
 import pytest
+from support.contract import fixture_root
+from support.s1_capture import CapturedContent
 
+from vv_agent.core_types import AgentTask, canonical_json_bytes
+from vv_agent.kernel._boundary_hydration import SessionHydration
 from vv_agent.runtime.token_usage import normalize_token_usage
+from vv_agent.session.projection import hydrate_records
+from vv_agent.session.records import Record
+from vv_agent.session.store import StoredRecord
 from vv_agent.types import (
     CacheUsage,
     ModelCallOperation,
@@ -17,11 +25,47 @@ from vv_agent.types import (
     UsageSource,
 )
 
-FIXTURE_PATH = Path(__file__).parent / "fixtures" / "parity" / "token_usage.json"
-
 
 def _contract() -> dict[str, Any]:
-    return json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
+    return json.loads((fixture_root() / "token_usage.json").read_text(encoding="utf-8"))
+
+
+def _compaction_sources(reference: str, session_id: str) -> dict[str, list[dict[str, Any]]]:
+    fixture, fragment = reference.split("#", 1)
+    assert fixture in {"session_projection.json", "session_projection_s1.json"}
+    assert fragment == f"/source_records/{session_id}"
+    root = fixture_root()
+    source = json.loads((root / fixture).read_text(encoding="utf-8"))["source_records"]
+    session_ids = {session_id, "summary"}
+    # Contract 41 still points to the immutable Contract 39 fixture during S1 authoring.
+    if fixture == "session_projection.json":
+        catalog = json.loads((root / "session_content_catalog.json").read_text(encoding="utf-8"))
+        keys = {entry["key_id"]: base64.b64decode(entry["key_base64"], validate=True) for entry in catalog["keys"]}
+        fields = {"turn_started": "definition", "op_planned": "request", "op_completed": "result"}
+        historical_records = {sid: [row["wire"] for row in source[sid]] for sid in session_ids}
+        for sid, wires in historical_records.items():
+            for wire in wires:
+                field = fields.get(wire["kind"])
+                if field is not None:
+                    ref = wire["payload"][field]
+                    entry = catalog["contents"][ref["content_id"]]
+                    assert (entry["session_id"], entry["key_id"], entry["boundary"]) == (sid, ref["key_id"], field)
+                    body = canonical_json_bytes(entry["value"], field)
+                    assert len(body) == ref["size"] and hmac.digest(keys[ref["key_id"]], body, "sha256").hex() == ref["mac"]
+                    wire["payload"][field] = entry["value"]
+        return historical_records
+
+    catalog = json.loads((root / "session_content_capture_s1.json").read_text(encoding="utf-8"))
+    reader = CapturedContent(catalog)
+    result = {}
+    for sid in session_ids:
+        records = tuple(
+            StoredRecord(Record(**row["wire"]), row["seq"], row["commit_id"], row["writer_epoch"], row["created_ms"])
+            for row in source[sid]
+        )
+        hydration = SessionHydration(reader, tenant_id="default", session_id=sid)
+        result[sid] = [row.record.to_dict() for row in hydrate_records(records, hydration)]
+    return result
 
 
 def test_normalization_matches_canonical_token_usage_cases() -> None:
@@ -200,7 +244,7 @@ def test_compaction_accounting_real_producer(case):
     from vv_agent.memory import MemoryManager
     from vv_agent.microcompaction import MicrocompactionPolicy
     from vv_agent.session.kernel import drive
-    from vv_agent.session.records import InboxItem, Record
+    from vv_agent.session.records import InboxItem
     from vv_agent.session.result import project_result
     from vv_agent.session.surfaces import SessionDriver
     from vv_agent.tools import ToolRegistry, build_default_registry
@@ -208,13 +252,18 @@ def test_compaction_accounting_real_producer(case):
     from vv_agent.workspace import MemoryWorkspaceBackend
 
     sid = case["input"]["session_id"]
-    source = json.loads((FIXTURE_PATH.parent / "session_projection.json").read_text())["source_records"][sid]
-    wires = [r["wire"] for r in source]
+    source = _compaction_sources(case["input"]["transcript_ref"], sid)
+    wires = source[sid]
     start = next(r for r in wires if r["kind"] == "turn_started")
     definition = start["payload"]["definition"]
-    task = Record(**start).task()
-    summary_source = json.loads((FIXTURE_PATH.parent / "session_projection.json").read_text())["source_records"]["summary"]
-    summary = next(r["wire"]["payload"]["result"]["content"] for r in summary_source if r["wire"]["kind"] == "op_completed")
+    task = AgentTask.from_dict(definition["task"])
+    summary_source = source["summary"]
+    summary_plan = next(r for r in summary_source if r["kind"] == "op_planned" and r["payload"]["purpose"] == "compaction")
+    summary = next(
+        r["payload"]["result"]["content"]
+        for r in summary_source
+        if r["kind"] == "op_completed" and r["operation_id"] == summary_plan["operation_id"]
+    )
     steps: list[ScriptStep]
     if sid == "micro":
         steps = [LLMResponse("done")]

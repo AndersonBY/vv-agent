@@ -163,7 +163,7 @@ def _yield_from_raw_driver(store, session_id: str, runtime, item: InboxItem):
 def test_provider_yield_callback_and_receipt_use_owner_bound_values(tmp_path: Path, provider_evidence: str | list[str]) -> None:
     workspace = tmp_path / "provider-workspace"
     workspace.mkdir()
-    sessions = SessionDriver(tmp_path / "provider.sqlite", content_key_provider=_key_provider())
+    sessions = SessionDriver(content_key_provider=_key_provider())
     provider = _YieldProvider(provider_evidence)
     try:
         sessions.create(PROVIDER_SESSION, str(workspace), {})
@@ -292,7 +292,7 @@ def _child_runtime(sessions: SessionDriver, session_id: str, workspace: Path):
 def test_child_yield_callback_and_receipt_use_owner_bound_completion(tmp_path: Path) -> None:
     workspace = tmp_path / "child-workspace"
     workspace.mkdir()
-    sessions = SessionDriver(tmp_path / "child.sqlite", content_key_provider=_key_provider())
+    sessions = SessionDriver(content_key_provider=_key_provider())
     callback_handles: list[list[dict[str, Any]]] = []
 
     def render(plan, handles, reason):

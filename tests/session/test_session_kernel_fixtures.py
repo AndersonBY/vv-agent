@@ -7,7 +7,6 @@ import runpy
 import subprocess
 import sys
 from collections import Counter, defaultdict
-from collections.abc import Mapping
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import replace
@@ -21,6 +20,7 @@ import pytest
 from jsonschema import Draft202012Validator
 from support.contract import fixture_root
 from support.interactions import displayed_target
+from support.s1_capture import CapturedContent
 
 from vv_agent import Agent, InteractionAnswer, RunConfig, Runner
 from vv_agent.approval import ApprovalBroker
@@ -767,20 +767,8 @@ def test_session_kernel_fixtures_deterministic_and_revalidated(generated_fixture
         for vector in read(name)[key]:
             value = {k: v for k, v in vector.items() if k not in {"bytes_base64", "sha256", "record_id"}}
             assert checked_bytes(vector) == AUTHOR["independent_bytes"]([value])[0]
-    captured_catalog = read("session_content_capture_s1.json")["contents"]
     projection_fixture = read("session_projection_s1.json")
-
-    class CapturedContent:
-        def __init__(self, entries: Mapping[str, Any]) -> None:
-            self.entries = entries
-
-        def read(self, tenant_id: str, session_id: str, owner: str, slot: str, ref: ContentRef) -> bytes:
-            entry = self.entries[ref.content_id]
-            assert entry["tenant_id"] == tenant_id and entry["session_id"] == session_id
-            assert entry["key_id"] == ref.key_id, (owner, slot)
-            return base64.b64decode(entry["bytes_base64"], validate=True)
-
-    reader = CapturedContent(captured_catalog)
+    reader = CapturedContent(read("session_content_capture_s1.json"))
     for vector in invalid_fixture["logical_vectors"]:
         sid = vector["session_id"]
         prefix = tuple(
