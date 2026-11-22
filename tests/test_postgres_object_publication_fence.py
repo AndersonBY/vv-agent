@@ -20,6 +20,7 @@ from vv_agent.kernel._content_sql import _read_ciphertext
 from vv_agent.kernel._external_content import _PostgresObjectContent
 from vv_agent.kernel._postgres_allocation_journal import JournalRole, PostgresAllocationJournal, PostgresObjectJournal
 from vv_agent.kernel._store import Conflict
+from vv_agent.memory.token_utils import count_tokens
 from vv_agent.model import ScriptedModelProvider
 from vv_agent.session.content_runtime import SESSION_WORKSPACE
 from vv_agent.session.content_store import AESGCMCipher, LocalKeyProvider
@@ -252,21 +253,22 @@ def test_postgres_publication_is_nonblocking_and_releases_on_commit_and_rollback
 
 
 class _SdkObjectClient(_Client):
-    def __init__(self, journal: PostgresObjectJournal, session_id: str):
-        super().__init__(lambda allocation_id: journal._scope.get(allocation_id) or journal.get_anonymous(allocation_id))
+    def __init__(self, journal: PostgresObjectJournal, session_id: str, *, check_key_intent: bool = False):
+        super().__init__(self._lookup)
         self.journal = journal
         self.session_id = session_id
+        self.check_key_intent = check_key_intent
 
-    def put_object(self, **request):
-        if "IfMatch" in request:
-            allocation_id = bytes.fromhex(request["Key"].rsplit("/", 1)[1])
-            row = self.journal._scope.get(allocation_id)
-            assert row is not None and row.owner is not None
-            key = self.journal.get_key_intent(row.owner.provider_instance_id, row.owner.key_id)
-            assert key is not None and key.state == "allocating"
+    def _lookup(self, allocation_id: bytes):
+        row = self.journal._scope.get(allocation_id) or self.journal.get_anonymous(allocation_id)
+        if row is not None and row.state == "bound":
+            assert row.owner is not None
             assert row.owner.tenant_id == self.journal.tenant_id and row.owner.session_id == self.session_id
+            if self.check_key_intent:
+                key = self.journal.get_key_intent(row.owner.provider_instance_id, row.owner.key_id)
+                assert key is not None and key.state == "allocating"
             self.owner = row.owner
-        return super().put_object(**request)
+        return row
 
 
 def test_postgres_sdk_root_object_create_push_and_cold_read(object_publication, tmp_path, monkeypatch):
@@ -275,7 +277,7 @@ def test_postgres_sdk_root_object_create_push_and_cold_read(object_publication, 
 
     key_path = tmp_path / "keys.sqlite"
     master_key = b"x" * 32
-    client = _SdkObjectClient(journal, "objects")
+    client = _SdkObjectClient(journal, "objects", check_key_intent=True)
 
     with closing(LocalKeyProvider(master_key, state_path=key_path)) as provider:
         provider_instance = provider._provision_exact_key_lifecycle()
@@ -402,6 +404,8 @@ def test_postgres_sdk_worker_publishes_root_turn(object_publication, tmp_path, m
         return LLMResponse(answer)
 
     agent = Agent("test", "Answer the user.", model="m")
+    # Initialize the scripted model's tokenizer before timing the PostgreSQL worker.
+    count_tokens(prompt, "m")
     config = RunConfig(model_provider=ScriptedModelProvider.from_callback("scripted", "m", model_response))
     with closing(LocalKeyProvider(master_key, state_path=key_path)) as provider, open_tenant() as store:
         provider_instance = provider._provision_exact_key_lifecycle()
