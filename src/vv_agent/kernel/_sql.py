@@ -1311,33 +1311,30 @@ class SQLStore:
         if len(records_by_seq) != len(record_rows) or len(records_by_id) != len(record_rows):
             raise LedgerIntegrityError("duplicate ledger record identity")
 
-        # These append-only tables are read as one bounded inventory per pass.
-        # A commit body is still parsed only after its current SQL digest matches.
-        consumed_inputs = self._rows(
-            "SELECT input_id,consumed_seq FROM sk_inbox "
-            "WHERE tenant_id=%s AND session_id=%s AND consumed_seq IS NOT NULL AND consumed_seq<=%s ORDER BY input_id",
-            (self.tenant_id, session_id, through),
+        # Fetch the inventories in one statement. Input consumption is bounded
+        # by record sequence here, independently of the inbox read watermark.
+        inventory = self._rows(
+            "SELECT 2 AS row_kind,commit_id AS identity,body,digest,record_sequences,head_seq AS seq,created_ms "
+            "FROM sk_commit WHERE tenant_id=%s AND session_id=%s AND head_seq<=%s "
+            "UNION ALL SELECT 0,input_id,NULL,NULL,NULL,consumed_seq,NULL FROM sk_inbox "
+            "WHERE tenant_id=%s AND session_id=%s AND consumed_seq IS NOT NULL AND consumed_seq<=%s "
+            "UNION ALL SELECT 1,consumer,NULL,NULL,NULL,NULL,NULL FROM sk_consumer "
+            "WHERE tenant_id=%s AND session_id=%s ORDER BY row_kind,created_ms,identity",
+            (self.tenant_id, session_id, through, self.tenant_id, session_id, through, self.tenant_id, session_id),
         )
         consumed_by_id: dict[str, Any] = {}
-        for input_id, consumed_seq in consumed_inputs:
-            if input_id in consumed_by_id:
-                raise LedgerIntegrityError("commit consumed input identity is duplicated")
-            consumed_by_id[input_id] = consumed_seq
-        committed_consumers = {
-            row[0]
-            for row in self._rows(
-                "SELECT consumer FROM sk_consumer WHERE tenant_id=%s AND session_id=%s ORDER BY consumer",
-                (self.tenant_id, session_id),
-            )
-        }
-
-        commits = self._rows(
-            "SELECT commit_id,body,digest,record_sequences,head_seq,created_ms FROM sk_commit "
-            "WHERE tenant_id=%s AND session_id=%s AND head_seq<=%s ORDER BY created_ms,commit_id",
-            (self.tenant_id, session_id, through),
-        )
+        committed_consumers: set[str] = set()
         claimed: dict[int, tuple[str, str, int]] = {}
-        for commit_id, body, checksum, sequence_body, stored_head, created_ms in commits:
+        for row_kind, identity, body, checksum, sequence_body, seq, created_ms in inventory:
+            if row_kind == 0:
+                if identity in consumed_by_id:
+                    raise LedgerIntegrityError("commit consumed input identity is duplicated")
+                consumed_by_id[identity] = seq
+                continue
+            if row_kind == 1:
+                committed_consumers.add(identity)
+                continue
+            commit_id, stored_head = identity, seq
             _identity(commit_id)
             _natural(stored_head, "commit head_seq")
             _natural(created_ms, "commit created_ms")
@@ -3551,17 +3548,16 @@ class SQLSessionTx:
                     "UPDATE sk_inbox SET consumed_seq=%s WHERE tenant_id=%s AND session_id=%s AND input_id=%s",
                     (seq, s.tenant_id, session_id, input_id),
                 )
+            stored_inputs = s._stored_inputs(session_id, row[1]) if applications else prefix.stored_inputs
             added = tuple(StoredRecord(record, seq, commit_id, lease.epoch, now) for _, record, seq in new)
             if new:
-                added_for_routing = added
-                stored_inputs = s._stored_inputs(session_id, row[1])
                 routing_prefix = _Prefix(
                     s.tenant_id,
                     session_id,
                     lease.epoch,
                     previous_chain,
                     reducer,
-                    prefix.records + added_for_routing,
+                    prefix.records + added,
                     stored_inputs,
                     row[1],
                     prefix.chains + tuple(new_chains),
@@ -3589,17 +3585,15 @@ class SQLSessionTx:
             )
             receipt = CommitReceipt(commit_id, tuple(sequences), head, records=added, inbox_seq=row[1])
             self._commit(session_id, commit_id, body, receipt.record_sequences, head, now)
-            checksum = previous_chain
-            retained_inputs = stored_inputs if new else s._stored_inputs(session_id, row[1])
             s._retain_prefix(
                 _Prefix(
                     s.tenant_id,
                     session_id,
                     lease.epoch,
-                    checksum,
+                    previous_chain,
                     reducer,
                     prefix.records + added,
-                    retained_inputs,
+                    stored_inputs,
                     row[1],
                     prefix.chains + tuple(new_chains),
                 )

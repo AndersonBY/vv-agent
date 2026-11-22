@@ -690,6 +690,7 @@ def test_session_kernel_fixtures_deterministic_and_revalidated(generated_fixture
     for kind, name in (("record", "session_records.jsonl"), ("inbox", "session_inbox.jsonl")):
         assert (first / name).read_bytes() == b"".join(checked_bytes(v) + b"\n" for v in corpus["vectors"] if v["type"] == kind)
 
+    reader = CapturedContent(read("session_content_capture_s1.json"))
     invalid_fixture = read("session_invalid.json")
     for wire in invalid_fixture["source_records"]:
         record = Record(**wire)
@@ -754,9 +755,14 @@ def test_session_kernel_fixtures_deterministic_and_revalidated(generated_fixture
         else:
             assert layer == "admission"
             item = InboxItem.parse(raw)
-            audit = records[(vector["session_id"], vector["audit_record_id"])]
-            assert audit.payload["disposition"] == "rejected" and audit.payload["reason"] == vector["reason"]
-            assert InboxItem(**audit.payload["input"]).encode() == item.encode()
+            sid = vector["session_id"]
+            audit = records[(sid, vector["audit_record_id"])]
+            payload = audit.payload
+            assert payload["disposition"] == "rejected"
+            hydration = SessionHydration(reader, tenant_id="default", session_id=sid)
+            reason = hydration.read(audit.record_id, "input_reason", ContentRef.from_dict(payload["reason"]))
+            assert reason == vector["reason"]
+            assert InboxItem(**payload["input"]).encode() == item.encode()
 
     for name, key in (
         ("session_semantics.json", "cases"),
@@ -768,7 +774,6 @@ def test_session_kernel_fixtures_deterministic_and_revalidated(generated_fixture
             value = {k: v for k, v in vector.items() if k not in {"bytes_base64", "sha256", "record_id"}}
             assert checked_bytes(vector) == AUTHOR["independent_bytes"]([value])[0]
     projection_fixture = read("session_projection_s1.json")
-    reader = CapturedContent(read("session_content_capture_s1.json"))
     for vector in invalid_fixture["logical_vectors"]:
         sid = vector["session_id"]
         prefix = tuple(
@@ -1489,7 +1494,7 @@ def test_commit_verification_rejects_tampered_sql_after_warmed_pass(tamper, erro
         kernel.close()
 
 
-def test_commit_verification_reads_inbox_and_consumer_inventory_once_per_pass():
+def test_commit_verification_reads_fresh_inventories_in_one_query_per_pass():
     kernel = SessionDriver()
     try:
         handle = start_runner(
@@ -1534,12 +1539,12 @@ def test_commit_verification_reads_inbox_and_consumer_inventory_once_per_pass():
             raw._verified_records(sid, head)
             raw._verified_records(sid, head)
 
-        commit_rows_prefix = "SELECT commit_id,body,digest,record_sequences,head_seq,created_ms"
-        assert sum(query.startswith(commit_rows_prefix) for query in queries) == 2
-        assert sum("FROM sk_inbox" in query and "consumed_seq IS NOT NULL" in query for query in queries) == 2
-        assert sum("FROM sk_consumer" in query for query in queries) == 2
-        assert not any("FROM sk_inbox" in query and "input_id=%s" in query for query in queries)
-        assert not any("FROM sk_consumer" in query and "consumer=%s" in query for query in queries)
+        inventory_queries = [query for query in queries if "FROM sk_inbox" in query or "FROM sk_consumer" in query]
+        assert len(inventory_queries) == 2
+        for query in inventory_queries:
+            assert "FROM sk_commit" in query
+            assert "FROM sk_consumer" in query
+            assert "FROM sk_inbox" in query and "consumed_seq<=%s" in query
         assert canonical_calls == 2 * len(commit_count)
         assert len(raw._commit_parse_cache) == len(commit_count) <= 1024
     finally:
