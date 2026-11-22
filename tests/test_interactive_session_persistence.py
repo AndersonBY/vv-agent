@@ -12,16 +12,18 @@ from support.s1_fixture_values import append_fixture_records, clear_fixture_stat
 from vv_agent import (
     Agent,
     AgentSessionOptions,
+    AgentStatus,
     InteractiveAgentClient,
     InteractiveAgentDefinition,
     Message,
     ScriptedModelProvider,
     SQLiteStore,
+    handoff,
 )
 from vv_agent.kernel._budget_values import RunBudgetLimits
 from vv_agent.session.records import digest
 from vv_agent.session.store import Conflict
-from vv_agent.types import LLMResponse
+from vv_agent.types import LLMResponse, ToolCall
 
 
 def client(tmp_path, steps, store=None, *, model_provider=None):
@@ -32,6 +34,13 @@ def client(tmp_path, steps, store=None, *, model_provider=None):
         ),
         store=store,
     )
+
+
+def file_store(database, key_provider):
+    store = wrap_fixture_store(SQLiteStore(str(database)), key_provider)
+    store.install_schema()
+    store.configure_input_admission(allow_unsigned=True)
+    return store
 
 
 @pytest.mark.capability("interactive")
@@ -47,8 +56,7 @@ def test_creation_seed_hydrates_and_reuses_durable_session_without_duplicates(tm
         "shared_state": {"host": "seeded"},
     }
     provider = fixture_key_provider()
-    store = wrap_fixture_store(SQLiteStore(str(tmp_path / "sessions.sqlite")), provider)
-    store.install_schema()
+    store = file_store(tmp_path / "sessions.sqlite", provider)
     first_client = client(tmp_path, [respond], store)
     first = first_client.create_session(agent=Agent("assistant", "Remember context."), session_id="thread", session=seed)
     assert [m.content for m in first.messages] == ["earlier question", "earlier answer"]
@@ -56,8 +64,7 @@ def test_creation_seed_hydrates_and_reuses_durable_session_without_duplicates(tm
     assert result.raw_result.session_id == "thread"
     first_client.driver.close()
     store.connection.close()
-    reopened = wrap_fixture_store(SQLiteStore(str(tmp_path / "sessions.sqlite")), provider)
-    reopened.install_schema()
+    reopened = file_store(tmp_path / "sessions.sqlite", provider)
     second_client = client(tmp_path, [respond], reopened)
     second = second_client.create_session(agent=Agent("assistant", "Remember context."), session_id="thread")
     assert second.shared_state["host"] == "seeded"
@@ -68,13 +75,140 @@ def test_creation_seed_hydrates_and_reuses_durable_session_without_duplicates(tm
     reopened.connection.close()
 
 
+@pytest.mark.parametrize("inline", [False, True])
+def test_cold_reopen_is_read_only_and_answers_the_retained_turn(tmp_path, monkeypatch, inline):
+    database = tmp_path / "parked.sqlite"
+    key_provider = fixture_key_provider()
+    store = file_store(database, key_provider)
+    requests = []
+
+    def ask(request):
+        requests.append(request)
+        return LLMResponse("", [ToolCall("ask", "ask_user", {"question": "Choose a value."})])
+
+    def finish(request):
+        requests.append(request)
+        return LLMResponse("resumed")
+
+    agent = InteractiveAgentDefinition(description="Ask.", model="m") if inline else Agent("desktop", "Ask.", model="m")
+    first_client = client(tmp_path, [ask], store)
+    first = first_client.create_session(agent=agent, session_id="parked")
+    try:
+        waiting = first.prompt("go", auto_follow_up=False)
+        assert waiting.status == AgentStatus.WAIT_USER
+        messages = first.messages
+        form = waiting.metadata["session_waits"][0]["interaction"]
+        assert len(requests) == 1
+    finally:
+        first_client.driver.close()
+        store.connection.close()
+
+    store = file_store(database, key_provider)
+    second_client = client(tmp_path, [finish], store)
+    driver = second_client.driver
+    sid = "parked"
+    try:
+        baseline = driver.store.read_state(sid), driver.store.peek_inbox(sid), store.connection.total_changes
+
+        def forbidden(*_args, **_kwargs):
+            pytest.fail("projection tried to use an execution callback or a write transaction")
+
+        with monkeypatch.context() as readonly:
+            for callback in ("resolve", "client", "default_settings", "default_model_ref"):
+                readonly.setattr(ScriptedModelProvider, callback, forbidden)
+            readonly.setattr(driver._worker, "start", forbidden)
+            readonly.setattr(type(driver.store), "atomic", forbidden)
+            second = second_client.create_session(agent=agent, session_id=sid)
+            restored = second.latest_run
+            assert restored is not None
+            assert restored.status == AgentStatus.WAIT_USER
+            assert restored.run_id == waiting.run_id
+            assert restored.metadata["session_waits"][0]["interaction"] == form
+            assert restored.resolved_model is not None
+            assert (restored.resolved_model.backend, restored.resolved_model.model_id) == ("test", "m")
+            assert restored.resolved_model.context_length == waiting.resolved_model.context_length
+            assert restored.resolved_model.max_output_tokens == waiting.resolved_model.max_output_tokens
+            assert second.messages == messages
+            del second
+            second = second_client.create_session(agent=agent, session_id=sid)
+        assert not driver._runtimes
+        assert (driver.store.read_state(sid), driver.store.peek_inbox(sid), store.connection.total_changes) == baseline
+
+        resumed = second.continue_run("chosen value")
+        assert resumed.final_output == "resumed"
+        assert resumed.run_id == waiting.run_id
+        assert len(requests) == 2
+        state, rows, _ = driver.store.read_state(sid)
+        assert len(state.turns) == 1
+        assert sum(row.record.kind == "turn_started" for row in rows) == 1
+        assert sum(row.record.kind == "turn_ended" for row in rows) == 1
+        replies = [
+            row.record.payload["input"]
+            for row in rows
+            if row.record.kind == "input_applied" and row.record.payload["input"]["target_turn_id"] == form["turnId"]
+        ]
+        assert len(replies) == 1
+        assert replies[0]["generation"] == form["generation"]
+        assert not driver.store.peek_inbox(sid)
+    finally:
+        driver.close()
+        store.connection.close()
+
+
+def test_cold_reopen_projects_typed_handoff_result(tmp_path, monkeypatch):
+    database = tmp_path / "handoff.sqlite"
+    key_provider = fixture_key_provider()
+    store = file_store(database, key_provider)
+    store._rows("UPDATE sk_settings SET write_level=2 WHERE singleton=1")
+    writer = Agent("writer", "Write a JSON object.", model="writer")
+    triage = Agent("triage", "Transfer.", model="triage", handoffs=[handoff(agent=writer, description="Write.")])
+    owner = client(
+        tmp_path,
+        [
+            LLMResponse("", [ToolCall("transfer", "transfer_to_writer", {"input": "Write it."})]),
+            LLMResponse('{"answer":"done"}'),
+        ],
+        store,
+    )
+    try:
+        first = owner.create_session(agent=triage, session_id="handoff")
+        result = first.prompt("go")
+        assert result.final_output == '{"answer":"done"}'
+    finally:
+        owner.driver.close()
+        store.connection.close()
+
+    store = file_store(database, key_provider)
+    owner = client(tmp_path, [], store)
+    try:
+        writer.output_type = dict
+
+        def forbidden(*_args, **_kwargs):
+            pytest.fail("opening a completed handoff tried to call its provider")
+
+        monkeypatch.setattr(ScriptedModelProvider, "resolve", forbidden)
+        monkeypatch.setattr(ScriptedModelProvider, "client", forbidden)
+        restored = owner.create_session(agent=triage, session_id="handoff").latest_run
+        assert restored is not None
+        assert (restored.run_id, restored.agent_name, restored.final_output) == (
+            result.run_id,
+            "writer",
+            {"answer": "done"},
+        )
+        assert restored.resolved_model is not None and restored.resolved_model.model_id == "writer"
+        assert not owner.driver._runtimes
+    finally:
+        owner.driver.close()
+        store.connection.close()
+
+
 def test_create_session_retries_after_missing_session_lookup(tmp_path: Path, monkeypatch):
     owner = client(tmp_path, [])
 
-    def missing(_session_id):
-        raise KeyError(_session_id)
+    def missing(_store, session_id):
+        raise KeyError(session_id)
 
-    monkeypatch.setattr(owner.driver, "session_attributes", missing)
+    monkeypatch.setattr(owner.driver, "_created_payload", missing)
     session = owner.create_session(
         agent=InteractiveAgentDefinition(description="desktop agent", model="m"),
         session_id="new-id",
@@ -90,9 +224,7 @@ def test_interactive_definition_restores_and_continues_hydrated_active_turn(tmp_
     provider = ScriptedModelProvider.from_steps("test", "m", [LLMResponse("done")])
     key_provider = fixture_key_provider()
     database = str(tmp_path / "sessions.sqlite")
-    raw_store = SQLiteStore(database)
-    raw_store.install_schema()
-    store = wrap_fixture_store(raw_store, key_provider)
+    store = file_store(database, key_provider)
     first_client = client(tmp_path, [], store, model_provider=provider)
     first_client.driver.create("active", str(tmp_path), {"seed": {"messages": [], "shared_state": {}}})
     agent = InteractiveAgentDefinition(description="desktop agent", model="m")
@@ -127,11 +259,9 @@ def test_interactive_definition_restores_and_continues_hydrated_active_turn(tmp_
     )
     first_client.driver.close()
     clear_fixture_state_cache(store)
-    raw_store.connection.close()
+    store.connection.close()
 
-    raw_store = SQLiteStore(database)
-    raw_store.install_schema()
-    store = wrap_fixture_store(raw_store, key_provider)
+    store = file_store(database, key_provider)
     owner = client(tmp_path, [], store, model_provider=provider)
 
     class StopExecute(Exception):
@@ -150,7 +280,7 @@ def test_interactive_definition_restores_and_continues_hydrated_active_turn(tmp_
     assert retained["task"].user_prompt == "go"
     assert retained["task"].prompt_bundle == first_task.prompt_bundle
     owner.driver.close()
-    raw_store.connection.close()
+    store.connection.close()
 
 
 def test_creation_seed_is_immutable_and_transcript_is_detached(tmp_path):

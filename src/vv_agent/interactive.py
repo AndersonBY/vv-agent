@@ -27,7 +27,7 @@ from vv_agent.runtime.background_sessions import background_session_manager
 from vv_agent.runtime.cancellation import CancellationToken
 from vv_agent.runtime.hooks import RuntimeHook
 from vv_agent.session.projection import hydrate_stored_record, hydration_for_session_store
-from vv_agent.session.records import InboxItem, Record, copy_json
+from vv_agent.session.records import InboxItem, Record, copy_json, digest
 from vv_agent.session.result import project_result
 from vv_agent.tools import ToolRegistry, build_default_registry
 from vv_agent.types import (
@@ -253,13 +253,16 @@ class AgentSessionState:
 class AgentSession:
     """Interactive lifecycle over retained session history, state and inbox inputs."""
 
-    def __init__(self, *, client, agent, workspace, shared_state, session_id, seed_messages: list[Message]):
+    def __init__(self, *, client, agent, workspace, shared_state, session_id, seed_messages: list[Message], _reopening=False):
         self._client = client
         self.driver = client.driver
         sid = session_id or uuid4().hex[:12]
-        self.driver.create(
-            sid, str(workspace), {"seed": {"messages": [m.to_dict() for m in seed_messages], "shared_state": shared_state or {}}}
-        )
+        if not _reopening:
+            self.driver.create(
+                sid,
+                str(workspace),
+                {"seed": {"messages": [m.to_dict() for m in seed_messages], "shared_state": shared_state or {}}},
+            )
         definition = client._apply_startup_shell_defaults(agent) if isinstance(agent, InteractiveAgentDefinition) else None
         self._execute_run = client._execute
         self._owns_approval_broker = client.options.approval_broker is None
@@ -282,14 +285,21 @@ class AgentSession:
         self._active_run_handle: Any | None = None
         self._active_approval_broker: ApprovalBroker | None = None
         self._lock = RLock()
-        state, _, _ = self.driver.store.read_state(sid)
+        snapshot = self.driver.store.read_state(sid)
+        state, records, _ = snapshot
         self._closed = state.closed
         if state.turns:
-            result = project_result(self.driver.store, sid, next(reversed(state.turns)), runtime=self._runtime())
-            waits = self.driver.waits(sid)
+            turn_id = next(reversed(state.turns))
+            start = next(row for row in records if row.record.record_id == state.turns[turn_id].start.record_id)
+            retained = hydrate_stored_record(start, hydration_for_session_store(self.driver.store, sid)).record
+            runtime = client._retained_projection(sid, agent, self.workspace, retained)
+            result = project_result(self.driver.store, sid, turn_id, runtime=runtime, snapshot=snapshot)
+            waits = self.driver.waits(sid, snapshot=snapshot)
             if waits:
                 result.metadata["session_waits"] = [{"session_id": owner, **wait} for owner, _, wait in waits]
+                result.raw_result.wait_reason = waits[0][2].get("question", result.raw_result.wait_reason)
             self._latest_run = AgentSessionRun.from_run_result(result)
+        self._reopening = _reopening
         self._initialized = True
 
     def _close_subscriptions(self) -> bool:
@@ -398,7 +408,10 @@ class AgentSession:
     def __del__(self) -> None:
         if getattr(self, "_initialized", False):
             with suppress(Exception):
-                self.close()
+                if self._reopening:
+                    self._close_subscriptions()
+                else:
+                    self.close()
 
     def query(self, prompt: str, *, require_completed: bool = True) -> str:
         run = self.prompt(prompt)
@@ -427,6 +440,8 @@ class AgentSession:
     def _run_once(
         self,
         prompt: str,
+        *,
+        continuation: bool = False,
     ) -> AgentSessionRun:
         with self._lock:
             self._ensure_open_locked()
@@ -445,7 +460,7 @@ class AgentSession:
         try:
             self._emit("session_run_start", prompt=prompt, existing_messages=existing_message_count)
             run_kwargs: dict[str, Any] = {
-                "prompt": prompt,
+                "prompt": "" if continuation else prompt,
                 "session_id": self.session_id,
                 "agent": self._agent_source,
                 "task_name": self.agent_name,
@@ -704,8 +719,8 @@ class AgentSession:
                     for k in ("sessionId", "turnId", "generation", "interactionId", "operationId", "attempt", "requestDigest")
                 }
             )
-            self.driver.answer(self.session_id, self._runtime(), target, InteractionAnswer("text", text=text), uuid4().hex)
-        run = self._run_once(text)
+            self.driver.answer(self.session_id, None, target, InteractionAnswer("text", text=text), uuid4().hex)
+        run = self._run_once(text, continuation=state.active_turn_id is not None)
         while auto_follow_up and run.status == AgentStatus.COMPLETED:
             state, _, _ = self.driver.store.read_state(self.session_id)
             latest_turn = next(reversed(state.turns), None)
@@ -728,7 +743,7 @@ class AgentSession:
         return self._run_once("")
 
     def approve(self, request_id, decision):
-        self.driver.approve(self.session_id, self._runtime(), request_id, decision, f"approval/{request_id}/answer")
+        self.driver.approve(self.session_id, None, request_id, decision, f"approval/{request_id}/answer")
 
     def archive(self, *, input_id="interactive/archive"):
         return self.driver.control(self.session_id, "archive", input_id, runtime=self._runtime())
@@ -774,12 +789,14 @@ class InteractiveAgentClient:
     ) -> AgentSession:
         from vv_agent.session.store import Conflict
 
+        effective_workspace = self._resolve_workspace(workspace)
         seed = session if session is not None else {"messages": [], "shared_state": shared_state or {}}
-        if session is None and shared_state is None and session_id is not None:
-            try:
-                retained_seed = self.driver.session_attributes(session_id).get("seed")
-            except (Conflict, KeyError):
-                retained_seed = None
+        created = None
+        if session_id:
+            with suppress(Conflict, KeyError):
+                created = self.driver._created_payload(self.driver.store, session_id)
+        if created is not None and session is None and shared_state is None:
+            retained_seed = created["attributes"].get("seed")
             if retained_seed is not None:
                 if not isinstance(retained_seed, dict):
                     raise ValueError("session seed must be an object")
@@ -792,14 +809,42 @@ class InteractiveAgentClient:
         if not isinstance(seed["messages"], list):
             raise ValueError("seed messages must be a list")
         messages = [Message.from_dict(m) for m in seed["messages"]]
+        if created is not None:
+            requested = {
+                "attributes": {"seed": {"messages": [m.to_dict() for m in messages], "shared_state": seed["shared_state"] or {}}},
+                "parent_operation_id": None,
+                "parent_session_id": None,
+                "principal": {
+                    "attributes": {"role": "local"},
+                    "subject_id": "local",
+                    "subject_kind": "service",
+                    "tenant_id": self.driver.tenant_id,
+                },
+                "workspace": str(effective_workspace),
+            }
+            if digest(created) != digest(requested):
+                raise Conflict("create identity has different bytes")
         return AgentSession(
             client=self,
             agent=agent,
-            workspace=self._resolve_workspace(workspace),
+            workspace=effective_workspace,
             shared_state=seed["shared_state"],
             session_id=session_id,
             seed_messages=messages,
+            _reopening=created is not None,
         )
+
+    def _retained_projection(self, sid: str, agent: Agent | InteractiveAgentDefinition, workspace: Path, record: Record):
+        task = record.task()
+        config = RunConfig(
+            model_provider=self.options.model_provider,
+            workspace=workspace,
+            tool_policy=self.options.tool_policy,
+        )
+        if isinstance(agent, InteractiveAgentDefinition):
+            config = replace(config, max_cycles=task.max_cycles, metadata=dict(task.metadata))
+            agent = self._inline_agent(agent, task, name="inline")
+        return self.driver._retained_projection_runtime(sid, agent, config, record, task)
 
     def prepare_task(
         self,
@@ -970,13 +1015,7 @@ class InteractiveAgentClient:
                 context_providers=context_providers,
             )
 
-        sdk_agent = Agent(
-            name=run_name,
-            instructions=task.prompt_bundle,
-            model=definition.model,
-            metadata=dict(task.metadata),
-            sub_agents=dict(definition.sub_agents),
-        )
+        sdk_agent = self._inline_agent(definition, task, name=run_name)
 
         run_config = RunConfig(
             model=model_ref,
@@ -1066,6 +1105,16 @@ class InteractiveAgentClient:
             raise ValueError("execution requires an admitted session")
         state, _, _ = self.driver.store.read_state(session_id)
         return None if state.active_turn_id or not prompt else prompt
+
+    @staticmethod
+    def _inline_agent(definition: InteractiveAgentDefinition, task: AgentTask, *, name: str) -> Agent:
+        return Agent(
+            name=name,
+            instructions=task.prompt_bundle,
+            model=definition.model,
+            metadata=dict(task.metadata),
+            sub_agents=dict(definition.sub_agents),
+        )
 
     def _apply_context_providers_to_task(
         self,

@@ -89,6 +89,12 @@ To start a session with existing history, pass it at creation:
 just `shared_state=...`. The seed holds exactly those two keys, and
 `shared_state` must be JSON. See [the creation-time seed](upgrading.md#creation-time-seed).
 
+To reopen an Interactive session after a restart, create a client for the same
+durable store and supply the session ID, original workspace and trusted agent
+definition to `create_session`. The client restores the latest result and pending
+question from stored records without connecting to the model provider. Call
+`continue_run(answer)` to resume execution for the displayed question.
+
 Three ways to send more input:
 
 - `steer()` adds a message to the current turn. The model sees it at its next

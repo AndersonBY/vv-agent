@@ -357,6 +357,7 @@ def test_interactive_client_preserves_complete_public_agent(surface, tmp_path: P
 
 
 def test_interactive_client_preserves_public_agent_handoff(surface, tmp_path: Path) -> None:
+    surface.store._rows("UPDATE sk_settings SET write_level=2 WHERE singleton=1")
     provider = ScriptedModelProvider.new(
         "test",
         "shared-model",

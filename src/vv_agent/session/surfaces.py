@@ -17,6 +17,7 @@ from weakref import WeakKeyDictionary, WeakValueDictionary
 
 from vv_agent.agent import Agent
 from vv_agent.approval import ApprovalDecision
+from vv_agent.budget import RunBudgetLimits
 from vv_agent.config import ResolvedModelConfig
 from vv_agent.constants import SUB_TASK_STATUS_TOOL_NAME
 from vv_agent.events import (
@@ -92,10 +93,11 @@ from .projection import (
     fold_hydrated_records,
     hydrate_record_payload,
     hydrate_records,
+    hydrate_stored_record,
     hydration_for_session_store,
     project_records,
 )
-from .records import InboxItem, SessionSpec
+from .records import InboxItem, Record, SessionSpec
 from .reducer import _fold_factory_for
 from .result import project_result
 from .runtime import (
@@ -290,6 +292,7 @@ class _ProjectionRuntime:
     clock: SystemClock = field(default_factory=SystemClock)
     content_reader: Any = None
     frozen_task: AgentTask | None = None
+    retained_session_id: str | None = None
     _registry: Any = field(default=None, init=False, repr=False)
 
     @property
@@ -308,6 +311,8 @@ class _ProjectionRuntime:
         return self._registry
 
     def child_runtime(self, store: SessionStore, session_id: str) -> _ProjectionRuntime:
+        if self.retained_session_id is not None:
+            return self.owner._retained_handoff_projection(self, store, session_id)
         return self.owner._projection_runtime_view(session_id, store=store)
 
     def child_tasks(self, store: SessionStore, session_id: str):
@@ -1198,6 +1203,55 @@ class SessionDriver:
 
     def _runtime_view(self, sid: str) -> _ProjectionRuntime:
         return self._projection_runtime_view(sid)
+
+    def _retained_projection_runtime(
+        self,
+        sid: str,
+        agent: Agent,
+        config: RunConfig,
+        record: Record,
+        task: AgentTask,
+    ) -> _ProjectionRuntime:
+        """Use the retained model identity without consulting the execution provider."""
+        payload = record.payload
+        model = payload["definition"]["model_binding"]
+        model_id = model["model"]
+        config = replace(config, budget_limits=RunBudgetLimits.from_dict(payload["budget"]))
+        return _ProjectionRuntime(
+            owner=self,
+            agent=agent,
+            config=effective_run_config(agent, config),
+            _resolved=ResolvedModelConfig(
+                backend=model["backend"],
+                requested_model=model_id,
+                selected_model=model_id,
+                model_id=model_id,
+                endpoint_options=[],
+                context_length=model.get("context_length"),
+                max_output_tokens=model.get("max_output_tokens"),
+            ),
+            handler_version=self.default_handler_version,
+            frozen_task=task,
+            retained_session_id=sid,
+        )
+
+    def _retained_handoff_projection(self, parent: _ProjectionRuntime, store: SessionStore, sid: str) -> _ProjectionRuntime:
+        from .bindings import MissingHostBinding
+
+        state, records, _ = store.read_state(sid)
+        hydration = hydration_for_session_store(store, sid)
+        created = hydrate_record_payload(records[0], hydration)
+        attributes = created["attributes"]
+        admission = attributes.get("child_admission")
+        if created["parent_session_id"] != parent.retained_session_id or not admission or admission["mode"] != "handoff":
+            raise Conflict("retained handoff does not belong to the projection parent")
+        agent = next((edge.agent for edge in parent.agent.handoffs if edge.tool_name == admission["selector"]), None)
+        if agent is None:
+            raise MissingHostBinding("retained handoff requires its trusted agent")
+        start = state.turns[attributes["child_handle"]["turn_id"]].start
+        retained = hydrate_stored_record(next(row for row in records if row.record.record_id == start.record_id), hydration)
+        config = replace(parent.config, model=None, workspace=created["workspace"], max_cycles=None, no_tool_policy=None)
+        return self._retained_projection_runtime(sid, agent, config, retained.record, retained.record.task())
 
     def _observe_registered_handles(self, store: SessionStore) -> None:
         """Advance one coordinator-owned durable projection cursor per session."""
@@ -2686,6 +2740,22 @@ class SessionDriver:
                         actor_subject_id=actor_subject_id,
                     )
 
+            elif state.active_turn_id is not None or pending_input is not None or queued is not None:
+                registration = self._static_registration(
+                    sid,
+                    agent,
+                    config,
+                    task,
+                    handler_version=selected_handler,
+                    armed=True,
+                )
+
+                def submission() -> None:
+                    assert registration is not None
+                    if self._runtimes.setdefault(sid, registration) is not registration:
+                        raise Conflict("session already has an active RunHandle")
+                    _DRIVERS[(self.tenant_id, sid)] = self
+
             else:
                 submission = None
             handle = RunHandle(self, sid, tid, None, consumer, handler_version=selected_handler)
@@ -2755,6 +2825,7 @@ class SessionDriver:
                     else:
                         self._runtimes[sid] = previous_registration
                 raise
+        _DRIVERS[(self.tenant_id, sid)] = self
         self._errors.pop(sid, None)
 
     def _route_inbox_item(
@@ -3137,7 +3208,7 @@ class SessionDriver:
     def answer(
         self,
         sid: str,
-        runtime: Runtime | _ProjectionRuntime,
+        runtime: Runtime | _ProjectionRuntime | None,
         target,
         answer,
         input_id: str,
@@ -3198,7 +3269,7 @@ class SessionDriver:
     def approve(
         self,
         sid: str,
-        runtime: Runtime | _ProjectionRuntime,
+        runtime: Runtime | _ProjectionRuntime | None,
         request_id: str,
         decision: ApprovalDecision | str,
         input_id: str,
