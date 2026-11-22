@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from contextlib import closing
 from dataclasses import replace
+from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from pathlib import Path
@@ -15,6 +15,13 @@ import pytest
 from vv_agent.kernel import _allocation_journal
 from vv_agent.kernel._allocation_journal import Allocation, AllocationOwner, SQLiteAllocationJournal
 from vv_agent.kernel._content import ContentBindingMismatch, ContentCleanupUnavailable, ContentIntegrityError, ContentUnavailable
+from vv_agent.session._s3_transport import (
+    _configure_client,
+    _S3ProcessTransport,
+    _S3Reply,
+    _S3Request,
+    _sdk_request,
+)
 from vv_agent.session.s3_content import CiphertextTemporarilyUnavailable, S3CiphertextStore, _disable_region_redirect
 
 _OWNER = AllocationOwner("tenant", "child", "content", "parent", "admission", "provider", "key")
@@ -42,6 +49,12 @@ class _Client:
         self.config = self
         self.events = self
         self.retries = {"total_max_attempts": 1}
+
+    def execute(self, request: _S3Request, *, deadline_ns: int, authorize: Callable[[], int] | None = None) -> _S3Reply:
+        if authorize is not None:
+            deadline_ns = min(deadline_ns, authorize())
+        assert time.monotonic_ns() < deadline_ns
+        return _sdk_request(self, request)
 
     def register_first(self, event: str, _handler: Any, *, unique_id: str) -> None:
         assert (event, unique_id) in {
@@ -313,7 +326,7 @@ def test_rejects_client_retry_policy_and_versioned_bucket(adapter) -> None:
     journal, client, _ = adapter
     client.retries["total_max_attempts"] = 2
     with pytest.raises(ValueError, match="total_max_attempts"):
-        S3CiphertextStore(client, bucket="fixture", journal=journal)
+        _configure_client(client)
     client.retries["total_max_attempts"] = 1
     client.versioned = True
     with pytest.raises(ContentCleanupUnavailable, match="unversioned"):
@@ -326,10 +339,29 @@ def test_fixed_region_handler_initializes_missing_redirect_context() -> None:
     assert request_dict["context"] == {"client_region": "us-east-1", "s3_redirect": {"redirected": True}}
 
 
-@pytest.mark.parametrize("region_hint", [False, True])
-def test_botocore_does_not_discover_or_retry_after_region_redirect(adapter, region_hint: bool) -> None:
+def _redirect_test_client(endpoint_url: str) -> Any:
     boto3 = pytest.importorskip("boto3")
     config = pytest.importorskip("botocore.config")
+
+    return boto3.client(
+        "s3",
+        endpoint_url=endpoint_url,
+        region_name="us-east-1",
+        aws_access_key_id="fixture-access-key",
+        aws_secret_access_key="fixture-secret-key",
+        config=config.Config(
+            connect_timeout=1,
+            read_timeout=1,
+            proxies={},
+            retries={"total_max_attempts": 1, "mode": "standard"},
+            s3={"addressing_style": "path"},
+        ),
+    )
+
+
+@pytest.mark.parametrize("region_hint", [False, True])
+def test_botocore_does_not_discover_or_retry_after_region_redirect(adapter, region_hint: bool) -> None:
+    pytest.importorskip("boto3")
     journal, _, _ = adapter
     requests: list[str] = []
 
@@ -363,23 +395,9 @@ def test_botocore_does_not_discover_or_retry_after_region_redirect(adapter, regi
         thread = Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
         thread.start()
         try:
-            with closing(
-                boto3.client(
-                    "s3",
-                    endpoint_url=f"http://127.0.0.1:{server.server_port}",
-                    region_name="us-east-1",
-                    aws_access_key_id="fixture-access-key",
-                    aws_secret_access_key="fixture-secret-key",
-                    config=config.Config(
-                        connect_timeout=1,
-                        read_timeout=1,
-                        proxies={},
-                        retries={"total_max_attempts": 1, "mode": "standard"},
-                        s3={"addressing_style": "path"},
-                    ),
-                ),
-            ) as client:
-                store = S3CiphertextStore(client, bucket="fixture", journal=journal)
+            endpoint_url = f"http://127.0.0.1:{server.server_port}"
+            with _S3ProcessTransport(partial(_redirect_test_client, endpoint_url), endpoint_url=endpoint_url) as transport:
+                store = S3CiphertextStore(transport, bucket="fixture", journal=journal)
                 with pytest.raises(CiphertextTemporarilyUnavailable):
                     store.put(_OWNER, _CIPHERTEXT, pin_until_ms=_pin(), check_fence=lambda: None)
         finally:
