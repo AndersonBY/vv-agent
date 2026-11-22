@@ -50,6 +50,7 @@ def _principal(tenant_id: str, subject_id: str) -> dict[str, Any]:
 
 
 def _create_session(store: Any, *, tenant_id: str = TENANT, session_id: str = SESSION) -> None:
+    store.configure_input_admission(allow_unsigned=True)
     scoped = store.for_tenant(tenant_id)
     with scoped.atomic() as tx:
         tx.create(
