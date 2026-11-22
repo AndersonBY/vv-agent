@@ -6,7 +6,7 @@ import json
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -960,6 +960,170 @@ def test_record_batch_does_not_prefetch_unused_input_owner_links(content_setup, 
     assert len(hydrated) == len(records)
     assert any("record_seq IN" in statement for statement in statements)
     assert not any("input_id IN" in statement for statement in statements)
+
+
+def test_postgres_frame_exact_reads_use_primary_key_any(monkeypatch: pytest.MonkeyPatch) -> None:
+    from vv_agent.kernel._postgres import _PostgresContentBackend
+
+    backend = _PostgresContentBackend(cast(Any, None), None)
+    calls: list[tuple[str, tuple[Any, ...]]] = []
+
+    def capture(statement: str, parameters: tuple[Any, ...] = ()) -> list[tuple[Any, ...]]:
+        calls.append((statement, parameters))
+        return []
+
+    monkeypatch.setattr(backend, "fetchall", capture)
+    assert backend.fetch_exact_record_links("tenant", SESSION, 1, 256) == []
+    assert backend.fetch_exact_content_rows("tenant", SESSION, ("content-a", "content-b")) == []
+
+    link_statement, link_parameters = calls[0]
+    assert "record_seq BETWEEN {p} AND {p}" in link_statement
+    assert "ORDER BY record_seq,slot" in link_statement
+    assert link_parameters == ("tenant", SESSION, 1, 256)
+
+    content_statement, content_parameters = calls[1]
+    assert content_statement == (
+        f"SELECT {_content_sql._CONTENT_COLUMNS} FROM sk_content "
+        "WHERE tenant_id={p} AND session_id={p} AND content_id=ANY({p}::text[])"
+    )
+    assert content_parameters == ("tenant", SESSION, ["content-a", "content-b"])
+    assert len(calls) == 2
+
+
+def test_frame_passes_all_sorted_deduplicated_content_ids_to_one_exact_read() -> None:
+    calls: list[tuple[str, tuple[str, ...]]] = []
+
+    class ExactBackend:
+        lock_clause = ""
+
+        @contextmanager
+        def read_snapshot(self) -> Iterator[None]:
+            yield
+
+        def fetchone(self, query: str, params: tuple[Any, ...] = ()) -> tuple[Any, ...]:
+            return ("live",)
+
+        def fetchall(self, query: str, params: tuple[Any, ...] = ()) -> list[tuple[Any, ...]]:
+            raise AssertionError("dense exact links must not use generic fetchall")
+
+        def fetch_exact_record_links(self, tenant_id, session_id, first, last):
+            return [
+                (seq, None, "slot", ("content-c" if seq == 1 else "content-a" if seq == 2 else "content-b"))
+                for seq in range(first, last + 1)
+            ]
+
+        def fetch_exact_content_rows(self, tenant_id, session_id, content_ids):
+            calls.append((session_id, content_ids))
+            return []
+
+        def run(self, query: str, params: tuple[Any, ...] = ()) -> int:
+            raise AssertionError("read frame must not write")
+
+        def require_transaction(self) -> None:
+            raise AssertionError("read frame must not require a write transaction")
+
+        def now_ms(self) -> int:
+            raise AssertionError("read frame must not read a clock")
+
+    backend = ExactBackend()
+    store = CoreSQLContentStore(cast(Any, backend), cast(Any, type("Key", (), {"provider_id": "test"})()), cast(Any, None))
+
+    with store._read_frame(tenant_id="tenant", session_id=SESSION, record_seqs=range(1, 257)):
+        pass
+
+    assert calls == [(SESSION, ("content-a", "content-b", "content-c"))]
+
+
+def test_postgres_large_exact_read_uses_bounded_server_cursor(monkeypatch: pytest.MonkeyPatch) -> None:
+    import psycopg
+
+    from vv_agent.kernel._postgres import _PostgresContentBackend
+
+    rows = [(f"content-{index:03d}",) for index in range(257)]
+    cursors: list[Any] = []
+
+    class FakeServerCursor:
+        def __init__(self, connection, name: str, *, row_factory) -> None:
+            self.connection = connection
+            self.name = name
+            self.row_factory = row_factory
+            self.itersize = 0
+            self.itersize_at_execute: int | None = None
+            self.executed: tuple[str, tuple[Any, ...], bool] | None = None
+            self.fetch_sizes: list[int] = []
+            self.offset = 0
+            self.closed = False
+            cursors.append(self)
+
+        def execute(self, query: str, params: tuple[Any, ...], *, binary: bool) -> None:
+            self.itersize_at_execute = self.itersize
+            self.executed = (query, params, binary)
+
+        def fetchmany(self, size: int) -> list[tuple[Any, ...]]:
+            self.fetch_sizes.append(size)
+            batch = rows[self.offset : self.offset + size]
+            self.offset += len(batch)
+            return batch
+
+        def close(self) -> None:
+            self.closed = True
+
+    monkeypatch.setattr(psycopg, "ServerCursor", FakeServerCursor)
+    backend = _PostgresContentBackend(cast(Any, object()), None)
+    content_ids = tuple(f"content-{index:03d}" for index in range(257))
+
+    assert backend.fetch_exact_content_rows("tenant", SESSION, content_ids) == rows
+
+    assert len(cursors) == 1
+    cursor = cursors[0]
+    assert cursor.name.startswith("vv_content_frame_")
+    assert cursor.itersize_at_execute == 256
+    assert cursor.fetch_sizes == [256, 256, 256]
+    assert cursor.executed is not None
+    query, params, binary = cursor.executed
+    assert query == (
+        f"SELECT {_content_sql._CONTENT_COLUMNS} FROM sk_content "
+        "WHERE tenant_id=%s AND session_id=%s AND content_id=ANY(%s::text[])"
+    )
+    assert params == ("tenant", SESSION, list(content_ids))
+    assert binary is True
+    assert cursor.closed
+
+
+def test_postgres_large_exact_read_closes_server_cursor_on_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    import psycopg
+
+    from vv_agent.kernel._postgres import _PostgresContentBackend
+
+    cursors: list[Any] = []
+
+    class FailingServerCursor:
+        def __init__(self, connection, name: str, *, row_factory) -> None:
+            self.itersize = 0
+            self.closed = False
+            cursors.append(self)
+
+        def execute(self, query: str, params: tuple[Any, ...], *, binary: bool) -> None:
+            raise RuntimeError("execute failed")
+
+        def close(self) -> None:
+            self.closed = True
+
+    monkeypatch.setattr(psycopg, "ServerCursor", FailingServerCursor)
+    backend = _PostgresContentBackend(cast(Any, object()), None)
+
+    with pytest.raises(RuntimeError, match="execute failed"):
+        backend.fetch_exact_content_rows("tenant", SESSION, tuple(f"content-{index:03d}" for index in range(257)))
+
+    assert len(cursors) == 1
+    assert cursors[0].closed
+
+
+def test_dense_record_range_requires_a_full_contiguous_batch() -> None:
+    assert _content_sql._dense_record_range(()) is None
+    assert _content_sql._dense_record_range(tuple(range(1, 256))) is None
+    assert _content_sql._dense_record_range(tuple(range(1, 257))) == (1, 256)
+    assert _content_sql._dense_record_range((*range(1, 256), 257)) is None
 
 
 def test_shared_nested_definition_content_decodes_once_but_validates_each_owner(content_setup, database, monkeypatch) -> None:

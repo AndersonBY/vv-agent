@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any, Literal, LiteralString, cast
 from vv_agent.kernel._allocation_journal import JournalIdentity
 from vv_agent.kernel._canonical_json import canonical_json_bytes, validate_sha256
 from vv_agent.kernel._content import ContentUnavailable, KeyProvider
-from vv_agent.kernel._content_sql import CoreSQLContentStore
+from vv_agent.kernel._content_sql import _CONTENT_COLUMNS, _READ_FRAME_OWNER_BATCH, CoreSQLContentStore
 from vv_agent.kernel._content_store import ContentCipher
 from vv_agent.kernel._reducer import Fold
 from vv_agent.kernel._sql import SQLSessionTx, SQLStore, _ObjectDeadline, _TenantSQLStore
@@ -1334,6 +1334,63 @@ class _PostgresContentBackend:
             # Ciphertext rows contain BYTEA. Binary results avoid hex round trips.
             cursor.execute(self._query(query), params, binary=True)
             return [tuple(row) for row in cursor.fetchall()]
+
+    def fetch_exact_record_links(
+        self,
+        tenant_id: str,
+        session_id: str,
+        first_record_seq: int,
+        last_record_seq: int,
+    ) -> list[tuple[Any, ...]]:
+        """Read one exact dense owner range in link order."""
+
+        return self.fetchall(
+            "SELECT record_seq,input_id,slot,content_id FROM sk_content_link "
+            "WHERE tenant_id={p} AND session_id={p} AND record_seq BETWEEN {p} AND {p} "
+            "ORDER BY record_seq,slot",
+            (tenant_id, session_id, first_record_seq, last_record_seq),
+        )
+
+    def fetch_exact_content_rows(
+        self,
+        tenant_id: str,
+        session_id: str,
+        content_ids: tuple[str, ...],
+    ) -> list[tuple[Any, ...]]:
+        """Read one exact content-id set inside the frame's existing snapshot."""
+
+        if not content_ids:
+            return []
+        query = (
+            f"SELECT {_CONTENT_COLUMNS} FROM sk_content "
+            "WHERE tenant_id={p} AND session_id={p} AND content_id=ANY({p}::text[])"
+        )
+        parameters = (tenant_id, session_id, list(content_ids))
+        if len(content_ids) <= _READ_FRAME_OWNER_BATCH:
+            return self.fetchall(query, parameters)
+
+        from psycopg import ServerCursor
+        from psycopg.rows import tuple_row
+
+        with self._serialized():
+            cursor = ServerCursor(
+                self.connection,
+                f"vv_content_frame_{secrets.token_hex(8)}",
+                row_factory=tuple_row,
+            )
+            try:
+                cursor.itersize = _READ_FRAME_OWNER_BATCH
+                cursor.execute(self._query(query), parameters, binary=True)
+                rows: list[tuple[Any, ...]] = []
+                while batch := cursor.fetchmany(_READ_FRAME_OWNER_BATCH):
+                    rows.extend(tuple(row) for row in batch)
+            except BaseException:
+                with suppress(BaseException):
+                    cursor.close()
+                raise
+            else:
+                cursor.close()
+                return rows
 
     def run(self, query: str, params: tuple[Any, ...] = ()) -> int:
         with self._serialized(), self.connection.cursor() as cursor:
