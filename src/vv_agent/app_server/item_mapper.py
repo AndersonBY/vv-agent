@@ -42,7 +42,9 @@ def item_id_for_event(event: RunEvent) -> str:
     return f"item_{event.event_id}"
 
 
-def map_run_event(event: RunEvent, *, thread_id: str, turn_id: str) -> ItemProjection:
+def map_run_event(
+    event: RunEvent, *, thread_id: str, turn_id: str, approval_arguments: dict[str, Any] | None = None
+) -> ItemProjection:
     if isinstance(event, (MemoryCompactStarted, MemoryCompactCompleted)):
         requests = [key for key in event.metadata.get("requested_by", []) if re.fullmatch(r"compaction/[0-9a-f]{64}", key)]
         state = (
@@ -222,6 +224,7 @@ def map_run_event(event: RunEvent, *, thread_id: str, turn_id: str) -> ItemProje
         )
         return _projection(item, "item/completed")
     if isinstance(event, ApprovalRequestedEvent):
+        arguments = approval_arguments if approval_arguments is not None else {}
         item = _item(
             event,
             thread_id=thread_id,
@@ -233,7 +236,7 @@ def map_run_event(event: RunEvent, *, thread_id: str, turn_id: str) -> ItemProje
                 "toolName": event.tool_name,
                 "toolCallId": event.tool_call_id,
                 "message": event.message,
-                "arguments": dict(event.metadata.get("arguments") or {}),
+                "arguments": dict(arguments),
             },
         )
         return _projection(
@@ -249,7 +252,7 @@ def map_run_event(event: RunEvent, *, thread_id: str, turn_id: str) -> ItemProje
                         tool_call_id=event.tool_call_id,
                         tool_name=event.tool_name,
                         preview=event.message,
-                        arguments=dict(event.metadata.get("arguments") or {}),
+                        arguments=dict(arguments),
                     ).to_dict(),
                 ),
             ),

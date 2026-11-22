@@ -157,13 +157,16 @@ def project_records(
     records: Iterable[StoredRecord],
     *,
     hydration: SessionHydration | None = None,
+    approval_arguments: dict[str, dict[str, Any]] | None = None,
 ) -> list[RunEvent]:
-    """Pass a prefix including plans; callers filter emitted metadata.session_seq by cursor."""
+    """Project a prefix including plans. App Server can collect approval arguments by event ID."""
     with projection_records_frame(records, hydration) as hydrated_records:
-        return _project_hydrated_records(hydrated_records)
+        return _project_hydrated_records(hydrated_records, approval_arguments=approval_arguments)
 
 
-def _project_hydrated_records(records: Iterable[StoredRecord]) -> list[RunEvent]:
+def _project_hydrated_records(
+    records: Iterable[StoredRecord], *, approval_arguments: dict[str, dict[str, Any]] | None = None
+) -> list[RunEvent]:
     plans, events, turns = {}, [], {}
     delegations: dict[tuple[str, int], dict] = {}
     interactions: dict[tuple[str, int], HostInteractionRequest] = {}
@@ -510,11 +513,12 @@ def _project_hydrated_records(records: Iterable[StoredRecord]) -> list[RunEvent]
                 elif r.kind == "op_parked":
                     h = p["handle"]
                     if h["kind"] == "approval":
-                        arguments = request.get("arguments")
-                        if type(arguments) is not dict or _contains_content_ref(arguments):
-                            raise HydrationError("trusted approval arguments are unavailable")
-                        common["metadata"] = common["metadata"] | {"arguments": deepcopy(arguments)}
                         event = ApprovalRequestedEvent(**common, **tool, request_id=h["request_id"], message="Approval required")
+                        if approval_arguments is not None:
+                            arguments = request.get("arguments")
+                            if type(arguments) is not dict or _contains_content_ref(arguments):
+                                raise HydrationError("trusted approval arguments are unavailable")
+                            approval_arguments[event.event_id] = deepcopy(arguments)
                     elif h["kind"] == "user":
                         common["metadata"]["interaction"] = user_interaction(
                             r.session_id,

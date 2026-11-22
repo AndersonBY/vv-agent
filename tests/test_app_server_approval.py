@@ -20,7 +20,7 @@ from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.events import ApprovalRequestedEvent
 from vv_agent.llm import ScriptedLLM
 from vv_agent.model import resolve_model_selection
-from vv_agent.runtime.hooks import BaseRuntimeHook, BeforeToolCallPatch
+from vv_agent.runtime.hooks import BaseRuntimeHook, BeforeToolCallPatch, RuntimeHook
 from vv_agent.session.app_server import _JoinDriveState, _KernelRunAdapter
 from vv_agent.session.reducer import ExecutionState
 from vv_agent.types import LLMResponse, ToolCall
@@ -111,7 +111,7 @@ def test_wake_keeps_committed_progress_in_forward_approval_order(monkeypatch: py
 
 def test_app_server_approval_request_includes_tool_arguments() -> None:
     calls: list[dict[str, object]] = []
-    arguments = {"path": "notes/private.txt", "force": True}
+    arguments: dict[str, object] = {"path": "notes/private.txt", "force": True}
     server, transport = _server_with_parameterized_approval_tool(calls, arguments)
 
     approval_request = _start_and_wait_for_approval(server, transport)
@@ -141,7 +141,7 @@ def test_app_server_approval_request_includes_tool_arguments() -> None:
 
 def test_app_server_approval_uses_prepared_arguments_and_bound_digest(surface) -> None:
     calls: list[dict[str, object]] = []
-    original = {"path": "notes/original.txt", "force": False}
+    original: dict[str, object] = {"path": "notes/original.txt", "force": False}
     prepared = {"path": "notes/safe.txt", "force": True}
 
     class RewriteArguments(BaseRuntimeHook):
@@ -151,8 +151,10 @@ def test_app_server_approval_uses_prepared_arguments_and_bound_digest(surface) -
     server, transport = _server_with_parameterized_approval_tool(calls, original, hooks=[RewriteArguments()])
     approval_request = _start_and_wait_for_approval(server, transport)
     approval_params = cast(dict[str, object], approval_request["params"])
+    requested = cast(dict[str, object], approval_request["_requested"])
 
     assert approval_params["arguments"] == prepared
+    assert cast(dict[str, object], requested["params"])["arguments"] == prepared
     assert calls == []
 
     state, _, _ = surface.store.read_state("thread_1")
@@ -177,6 +179,14 @@ def test_app_server_approval_uses_prepared_arguments_and_bound_digest(surface) -
     assert answer is not None
     assert answer._payload["input"]["payload"]["request_digest"] == request_digest
     assert _completed_status(outbound) == "completed"
+
+    _send(transport, server, {"jsonrpc": "2.0", "id": 3, "method": "thread/read", "params": {"threadId": "thread_1"}})
+    read = _drain_until(transport, lambda message: message.get("id") == 3)
+    items = cast(dict[str, object], read["result"])["items"]
+    approval = next(
+        item for item in cast(list[dict[str, object]], items) if item["type"] == "approval" and item["status"] == "started"
+    )
+    assert cast(dict[str, object], approval["payload"])["arguments"] == prepared
 
 
 def test_app_server_approval_fails_closed_without_trusted_execution_plan() -> None:
@@ -710,7 +720,7 @@ def test_app_server_approval_deadline_is_retained_after_subscriber_disconnect(su
         cast(Any, server.run_adapter).join()
         assert time.monotonic() - join_started < 3
         before_deadline = _drain_available(observer)
-        assert not any(message.get("method") == "turn/completed" for message in before_deadline)
+        assert not any(_is_terminal_turn_notification(message) for message in before_deadline)
         time.sleep(max(0.0, (deadline_ms - time.time() * 1000) / 1000) + 0.02)
         now_ms[0] = deadline_ms
         cast(Any, server.run_adapter).recover(observer.connection_id, thread_id)
@@ -1162,7 +1172,7 @@ def _server_with_parameterized_approval_tool(
     calls: list[dict[str, object]],
     arguments: dict[str, object],
     *,
-    hooks: list[BaseRuntimeHook] | None = None,
+    hooks: list[RuntimeHook] | None = None,
 ) -> tuple[AppServer, ChannelTransport]:
     @function_tool(needs_approval=True)
     def dangerous_tool(path: str, force: bool) -> str:
@@ -1328,13 +1338,26 @@ def _drain_until(
     raise AssertionError("Timed out waiting for App Server message")
 
 
+def _is_terminal_turn_notification(message: dict[str, object]) -> bool:
+    params = message.get("params")
+    return (
+        message.get("method") == "turn/completed"
+        and isinstance(params, dict)
+        and cast(dict[str, object], params).get("status")
+        in (
+            "completed",
+            "failed",
+        )
+    )
+
+
 def _drain_until_turn_completed(transport: ChannelTransport, *, timeout: float = 10) -> list[dict[str, object]]:
     outbound: list[dict[str, object]] = []
     deadline = time.monotonic() + timeout
     while True:
         message = transport.receive_outbound(timeout=max(0.0, deadline - time.monotonic()))
         outbound.append(message)
-        if message.get("method") == "turn/completed":
+        if _is_terminal_turn_notification(message):
             return outbound
 
 

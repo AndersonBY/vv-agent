@@ -488,8 +488,14 @@ class _KernelThreadStore:
                 )
             )
         items = []
-        for event in project_records(records, hydration=hydration):
-            projection = map_run_event(event, thread_id=thread_id, turn_id=event.run_id)
+        approval_arguments: dict[str, dict[str, Any]] = {}
+        for event in project_records(records, hydration=hydration, approval_arguments=approval_arguments):
+            projection = map_run_event(
+                event,
+                thread_id=thread_id,
+                turn_id=event.run_id,
+                approval_arguments=approval_arguments[event.event_id] if isinstance(event, ApprovalRequestedEvent) else None,
+            )
             if projection.item:
                 items.append(projection.item)
         return ThreadSnapshot(
@@ -1124,10 +1130,18 @@ class _KernelRunAdapter(RunAdapter):
                     )
                 )
         sequences = {row.seq for row in rows}
-        for event in project_records(store.projection_context(sid, rows), hydration=self._hydration(sid, store)):
+        approval_arguments: dict[str, dict[str, Any]] = {}
+        for event in project_records(
+            store.projection_context(sid, rows), hydration=self._hydration(sid, store), approval_arguments=approval_arguments
+        ):
             if event.metadata["session_seq"] not in sequences:
                 continue
-            projection = map_run_event(event, thread_id=sid, turn_id=event.run_id)
+            projection = map_run_event(
+                event,
+                thread_id=sid,
+                turn_id=event.run_id,
+                approval_arguments=approval_arguments[event.event_id] if isinstance(event, ApprovalRequestedEvent) else None,
+            )
             if include_items and projection.item is not None and projection.notification_method is not None:
                 notifications.append(
                     (event.metadata["session_seq"], projection.notification_method, projection.notification_params)

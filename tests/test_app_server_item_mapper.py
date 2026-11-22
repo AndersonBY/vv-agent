@@ -297,7 +297,6 @@ def test_approval_events_map_to_approval_items() -> None:
         request_id="approval_1",
         event_id="evt_5",
         created_at=5,
-        metadata={"arguments": {"cmd": "pytest"}, "tool_name": "bash"},
     )
     resolved = ApprovalResolvedEvent(
         run_id="run_1",
@@ -315,7 +314,7 @@ def test_approval_events_map_to_approval_items() -> None:
         },
     )
 
-    requested_projection = map_run_event(requested, thread_id="thread_1", turn_id="turn_1")
+    requested_projection = map_run_event(requested, thread_id="thread_1", turn_id="turn_1", approval_arguments={"cmd": "pytest"})
     resolved_projection = map_run_event(resolved, thread_id="thread_1", turn_id="turn_1")
 
     assert requested_projection.item is not None
