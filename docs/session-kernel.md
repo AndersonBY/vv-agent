@@ -153,6 +153,12 @@ is open. Mutations use savepoints, so a host that catches a validation or
 conflict error is left with no partial writes. Receipts stay provisional until
 the outer transaction commits. Use one connection per thread.
 
+Session creation and creation replay require PostgreSQL `READ COMMITTED`
+isolation (`READ UNCOMMITTED` has the same semantics in PostgreSQL). After
+locking the session identity, creation must see any tombstone that another
+transaction committed during a purge. Calls to `create` in `REPEATABLE READ`
+or `SERIALIZABLE` transactions fail with `Conflict` before writing session rows.
+
 The heartbeat needs its own connection. `SessionDriver` derives its conninfo
 from the original connection, including `ConnectionInfo.password` when set.
 Credentials never enter records. A heartbeat failure is kept as the cause of

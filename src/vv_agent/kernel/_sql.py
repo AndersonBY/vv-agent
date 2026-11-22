@@ -1522,6 +1522,9 @@ class SQLStore:
     def _lock(self, session_id: str) -> tuple[Any, ...]:
         return self._session_row(session_id, for_update=True)
 
+    def _require_create_isolation(self) -> None:
+        """Require isolation that can see a tombstone after locking its session identity."""
+
     @staticmethod
     def _require_live_row(row: tuple[Any, ...]) -> None:
         if len(row) < 8 or row[7] != "live":
@@ -3109,6 +3112,7 @@ class SQLSessionTx:
         if tenant_id != s.tenant_id:
             raise Conflict("session principal belongs to another tenant")
         with s._transaction():
+            s._require_create_isolation()
             ceiling = s._write_ceiling()
             if spec.parent_session_id is not None:
                 parent = s._rows(
@@ -3119,17 +3123,6 @@ class SQLSessionTx:
                     raise Conflict("parent session not found in tenant")
                 if parent[0][0] != "live":
                     raise SessionNotLive("parent session is fenced for deletion")
-            if s._rows(
-                "SELECT 1 FROM sk_tombstone WHERE tenant_id=%s AND session_id=%s",
-                (tenant_id, spec.session_id),
-            ):
-                raise SessionNotLive("a deleted session identity cannot be reused")
-            existing_session = s._rows(
-                "SELECT deletion_state FROM sk_session WHERE tenant_id=%s AND session_id=%s",
-                (tenant_id, spec.session_id),
-            )
-            if existing_session and existing_session[0][0] != "live":
-                raise SessionNotLive("a deleted session identity cannot be reused")
             now = s._now()
             inserted = s._rows(
                 "INSERT INTO sk_session(tenant_id,session_id,schema_version,parent_session_id,parent_operation_id,"
@@ -3139,6 +3132,12 @@ class SQLSessionTx:
                 (tenant_id, spec.session_id, spec.parent_session_id, spec.parent_operation_id, now),
             )
             row = s._lock(spec.session_id)
+            # Serialize admission against the deletion fence before inspecting the identity.
+            if row[7] != "live" or s._rows(
+                "SELECT 1 FROM sk_tombstone WHERE tenant_id=%s AND session_id=%s",
+                (tenant_id, spec.session_id),
+            ):
+                raise SessionNotLive("a deleted session identity cannot be reused")
             existing = (
                 s._one(
                     "SELECT body FROM sk_record WHERE tenant_id=%s AND session_id=%s AND seq=1",

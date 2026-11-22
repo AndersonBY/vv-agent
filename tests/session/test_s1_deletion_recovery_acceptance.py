@@ -20,6 +20,7 @@ from support.s1_fixture_values import (
     wrap_fixture_store,
 )
 
+from tests.sim.world import Choices
 from vv_agent.kernel._content import (
     ContentLabels,
     ContentRef,
@@ -36,7 +37,7 @@ from vv_agent.kernel._content import (
 )
 from vv_agent.kernel._records import InboxItem, SessionSpec
 from vv_agent.kernel._sql import SessionNotLive, SQLStore
-from vv_agent.kernel._store import Conflict
+from vv_agent.kernel._store import SESSION_PURGE_DELETE_ORDER, Conflict
 from vv_agent.session import kernel
 from vv_agent.session.children import ChildSession, ChildTool
 from vv_agent.session.content_runtime import (
@@ -450,6 +451,118 @@ def test_staged_late_usage_export_and_readback_stay_fenced_at_every_boundary(
             with pytest.raises(SessionNotLive, match="identity cannot be reused"):
                 create_fixture_session(wrapped, "session")
             assert store._rows("SELECT session_id FROM sk_session WHERE tenant_id=%s", (TENANT,)) == []
+    finally:
+        provider.close()
+
+
+@pytest.mark.postgres
+@pytest.mark.parametrize("seed", [9003, 9004])
+def test_create_rechecks_deletion_committed_before_insert(
+    seed: int,
+    store,
+    database,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The insert must recheck a tombstone committed after the admission reads."""
+    choices = Choices(seed)
+    operation = choices.choose("delete_before_create_insert", ("purge", "forget"))
+    provider = LocalKeyProvider(MASTER_KEY, state_path=tmp_path / "keys-create-purge-race.sqlite3")
+    signer = Signer()
+    try:
+        store.configure_input_admission(signer)
+        wrapped = wrap_fixture_store(store, provider)
+        create_fixture_session(wrapped, "session")
+        payload = store.read("session", limit=1).records[0].record.payload
+        replay_spec = SessionSpec("session", payload["principal"], payload["workspace"], attributes=payload["attributes"])
+        actor = Principal.from_dict(payload["principal"])
+        create_backend_pid = store._one("SELECT pg_backend_pid()")[0]
+
+        original_rows = store._rows
+        deleted = None
+
+        def delete_before_insert(query: str, params: tuple[Any, ...] = ()) -> list[tuple[Any, ...]]:
+            nonlocal deleted
+            if " ".join(query.split()).startswith("INSERT INTO sk_session(") and params[:2] == (TENANT, "session"):
+                assert deleted is None
+                # The create transaction stays open across the other connection's commit.
+                with open_store(database, allow_unsigned=False) as delete_store:
+                    assert delete_store._one("SELECT pg_backend_pid()")[0] != create_backend_pid
+                    delete_store._rows("SET lock_timeout = '5s'")
+                    delete_store.configure_input_admission(signer)
+                    delete_wrapped = wrap_fixture_store(delete_store, provider)
+                    deletion = SessionDeletionStore(delete_store, durable_content_store(delete_wrapped), signer=signer)
+                    delete = deletion.purge_session if operation == "purge" else deletion.forget_session
+                    delete(TENANT, "session", actor=actor)
+                    deleted = deletion.verify_tombstones(TENANT, "session")
+                    _assert_tombstone_signatures(signer, deleted)
+            return original_rows(query, params)
+
+        monkeypatch.setattr(store, "_rows", delete_before_insert)
+        with pytest.raises(SessionNotLive, match="identity cannot be reused"), store.atomic() as tx:
+            tx.create(replay_spec, consumers=("events",))
+
+        assert deleted is not None and len(deleted) == 1
+        assert store._tombstone("session") == deleted[0]
+        if operation == "purge":
+            for table in SESSION_PURGE_DELETE_ORDER:
+                assert store._one(
+                    f"SELECT COUNT(*) FROM {table} WHERE tenant_id=%s AND session_id='session'",
+                    (TENANT,),
+                ) == (0,)
+        else:
+            assert _session_state(store, "session") == ("forgotten", TombstoneState.COMPLETE.value)
+            assert all(count == 0 for count in _counts(store, "session").values())
+    finally:
+        provider.close()
+
+
+@pytest.mark.postgres
+@pytest.mark.parametrize("isolation", ["REPEATABLE_READ", "SERIALIZABLE"])
+def test_postgres_create_rejects_transaction_snapshot_before_writing(
+    isolation: str,
+    store,
+    database,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from psycopg import IsolationLevel
+
+    provider = LocalKeyProvider(MASTER_KEY, state_path=tmp_path / "keys-purge-isolation.sqlite3")
+    signer = Signer()
+    try:
+        store.configure_input_admission(signer)
+        wrapped = wrap_fixture_store(store, provider)
+        create_fixture_session(wrapped, "session")
+        payload = store.read("session", limit=1).records[0].record.payload
+        replay_spec = SessionSpec("session", payload["principal"], payload["workspace"], attributes=payload["attributes"])
+        actor = Principal.from_dict(payload["principal"])
+
+        original_rows = store._rows
+
+        def check_no_insert(query: str, params: tuple[Any, ...] = ()) -> list[tuple[Any, ...]]:
+            assert not " ".join(query.split()).startswith("INSERT INTO sk_session(")
+            return original_rows(query, params)
+
+        monkeypatch.setattr(store, "_rows", check_no_insert)
+        store.connection.isolation_level = IsolationLevel[isolation]
+        with store.atomic() as tx:
+            assert store._one("SELECT deletion_state FROM sk_session WHERE session_id='session'") == ("live",)
+            with open_store(database, allow_unsigned=False) as purge_store:
+                purge_store._rows("SET lock_timeout = '5s'")
+                purge_store.configure_input_admission(signer)
+                purge_wrapped = wrap_fixture_store(purge_store, provider)
+                deletion = SessionDeletionStore(purge_store, durable_content_store(purge_wrapped), signer=signer)
+                assert deletion.purge_session(TENANT, "session", actor=actor).session_ids == ("session",)
+            assert store._tombstone("session") is None
+            with pytest.raises(Conflict, match="PostgreSQL session creation requires READ COMMITTED isolation"):
+                tx.create(replay_spec, consumers=("events",))
+            assert store._one("SELECT 1") == (1,)
+
+        retained = store._tombstone("session")
+        assert retained is not None
+        _assert_tombstone_signatures(signer, (retained,))
+        assert not store.list_sessions()
     finally:
         provider.close()
 

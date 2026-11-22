@@ -16,7 +16,7 @@ from vv_agent.kernel._content_sql import CoreSQLContentStore
 from vv_agent.kernel._content_store import ContentCipher
 from vv_agent.kernel._reducer import Fold
 from vv_agent.kernel._sql import SQLSessionTx, SQLStore, _TenantSQLStore
-from vv_agent.kernel._store import Lease, SessionStore
+from vv_agent.kernel._store import Conflict, Lease, SessionStore
 
 if TYPE_CHECKING:
     from psycopg import Connection
@@ -909,6 +909,11 @@ class PostgresStore(SQLStore):
         if self.connection.info.transaction_status != TransactionStatus.INTRANS:
             raise RuntimeError("SessionTx requires an open transaction")
         return self._one("SELECT pg_current_xact_id()::text")[0]
+
+    def _require_create_isolation(self) -> None:
+        isolation = self._one("SELECT current_setting('transaction_isolation')")[0]
+        if isolation not in {"read committed", "read uncommitted"}:
+            raise Conflict("PostgreSQL session creation requires READ COMMITTED isolation")
 
     def _transaction_in_progress(self) -> bool:
         from psycopg.pq import TransactionStatus
