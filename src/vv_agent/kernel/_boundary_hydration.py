@@ -83,6 +83,7 @@ class SessionHydration:
     tenant_id: str
     session_id: str
     _validated_json_refs: set[ContentRef] | None = field(default=None, repr=False, compare=False)
+    _decoded_json: dict[ContentRef, tuple[bytes, Any]] | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.tenant_id, str) or not self.tenant_id:
@@ -232,16 +233,25 @@ class SessionHydration:
             raise IntegrityFailure(f"{slot} reader returned a non-bytes value")
         if len(body) != ref.size:
             raise IntegrityFailure(f"{slot} size does not match ContentRef")
+        decoded_json = self._decoded_json
+        cached = None
+        if decoded_json is not None:
+            cached = decoded_json.get(ref)
+            if cached is not None and cached[0] is body:
+                # Nested hydration replaces paths in its own copy.
+                return copy_json(cached[1])
         try:
             value = json.loads(body)
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
             raise TypedSchemaFailure(f"{slot} is not valid canonical JSON") from exc
         validated_refs = self._validated_json_refs
-        if validated_refs is None or ref not in validated_refs:
+        if cached is not None or validated_refs is None or ref not in validated_refs:
             if canonical_json_bytes(value, slot) != body:
                 raise TypedSchemaFailure(f"{slot} is not canonical JSON")
             if validated_refs is not None:
                 validated_refs.add(ref)
+        if decoded_json is not None:
+            decoded_json[ref] = (body, copy_json(value))
         return value
 
 
@@ -301,6 +311,7 @@ class _ScopedContentFrameReader:
         self.driver = driver
         self._values: dict[tuple[str, str, str, str, ContentRef], bytes] = {}
         self._fingerprints: dict[tuple[str, str, str, str, ContentRef], str] = {}
+        self._physical_fingerprints: dict[ContentRef, str] = {}
         self._record_seqs = frozenset(record_seqs)
         self._input_ids = frozenset(input_ids)
 
@@ -348,6 +359,10 @@ class _ScopedContentFrameReader:
         return self._fingerprint(tenant_id, session_id, owner, slot, ref)
 
     def _fingerprint(self, tenant_id: str, session_id: str, owner: str, slot: str, ref: ContentRef) -> str:
+        # Each caller checks the owner link. The physical row is shared inside this frame.
+        cached = self._physical_fingerprints.get(ref)
+        if cached is not None:
+            return cached
         store = getattr(self.reader, "_store", None)
         frame = getattr(store, "_frame", store)
         parsed = getattr(frame, "_parsed_content", {}).get(ref.content_id)
@@ -369,11 +384,14 @@ class _ScopedContentFrameReader:
             if value is None:
                 digest.update(b"N")
             elif isinstance(value, bytes):
-                digest.update(b"B" + len(value).to_bytes(8, "big") + value)
+                digest.update(b"B" + len(value).to_bytes(8, "big"))
+                digest.update(value)
             else:
                 encoded = str(value).encode("utf-8")
                 digest.update(b"V" + len(encoded).to_bytes(8, "big") + encoded)
-        return digest.hexdigest()
+        fingerprint = digest.hexdigest()
+        self._physical_fingerprints[ref] = fingerprint
+        return fingerprint
 
     def assert_link(
         self,
@@ -774,7 +792,7 @@ def _hydrate_session_records_batch(
         ),
         validate_each_read=False,
     ) as reader:
-        framed = replace(hydration, reader=reader, _validated_json_refs=set())
+        framed = replace(hydration, reader=reader, _validated_json_refs=set(), _decoded_json={})
         return tuple(
             hydrate_session_stored_record(
                 stored,

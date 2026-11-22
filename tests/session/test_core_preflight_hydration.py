@@ -40,6 +40,7 @@ class _CoreScope(LeaseOwnership):
 
 def _sessions(provider: LocalKeyProvider, store: SQLiteStore) -> SessionDriver:
     store.install_schema()
+    store.configure_input_admission(allow_unsigned=True)
     sessions = SessionDriver(store=store, content_key_provider=provider)
     sessions.create(SESSION_ID, "/workspace", {"seed": {"messages": [], "shared_state": {}}})
     sessions.push(SESSION_ID, InboxItem("input", "user", {"content": "go"}))

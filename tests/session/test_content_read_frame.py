@@ -28,6 +28,7 @@ from vv_agent.kernel._content import (
     WrappedDataKey,
 )
 from vv_agent.kernel._content import KeyUnavailable as BackendKeyUnavailable
+from vv_agent.kernel._content_publication import make_record_before_publication
 from vv_agent.kernel._content_reader import DurableContentReader, input_owner, record_owner
 from vv_agent.kernel._content_runtime import (
     _ValidatedContentFrame,
@@ -50,6 +51,8 @@ from vv_agent.session.sqlite import SQLiteStore
 from .conftest import Database, open_store
 from .helpers import append_fixture_records, create_fixture_session, push_fixture_input
 from .helpers import record as fixture_record
+from .test_capacity import DEFAULT_BUDGET
+from .test_recovery_matrix import runtime
 
 MASTER_KEY = b"f" * 32
 SESSION = "frame"
@@ -957,6 +960,57 @@ def test_record_batch_does_not_prefetch_unused_input_owner_links(content_setup, 
     assert len(hydrated) == len(records)
     assert any("record_seq IN" in statement for statement in statements)
     assert not any("input_id IN" in statement for statement in statements)
+
+
+def test_shared_nested_definition_content_decodes_once_but_validates_each_owner(content_setup, database, monkeypatch) -> None:
+    store, wrapped, reader, _provider, _cipher = content_setup
+    historical = {"role": "assistant", "content": "Shared historical message"}
+    runtime_value = runtime(database, [])
+    runtime_value.model_binding(runtime_value.llm, runtime_value.resolved)
+    definition = runtime_value.definition(runtime_value.compile("continue", "first"))
+    definition["task"]["initial_messages"] = [historical]
+    start = fixture_record("turn_started", sid=SESSION).payload | {
+        "definition": definition,
+        "definition_digest": digest(definition),
+        "budget": DEFAULT_BUDGET,
+    }
+    end = fixture_record("turn_ended", sid=SESSION).payload | {"budget": DEFAULT_BUDGET}
+    for turn_id in ("first", "second"):
+        append_fixture_records(
+            wrapped,
+            SESSION,
+            (
+                make_record_before_publication("turn_started", session_id=SESSION, turn_id=turn_id, payload=start),
+                make_record_before_publication("turn_ended", session_id=SESSION, turn_id=turn_id, payload=end),
+            ),
+            commit_id=f"history/{turn_id}",
+        )
+    records = tuple(row for row in store.read(SESSION).records if row.record.kind == "turn_started")
+    assert len(records) == 2
+
+    loads = json.loads
+    events: list[dict[str, Any]] = []
+
+    def track_loads(body, *args, **kwargs):
+        decoded = loads(body, *args, **kwargs)
+        if decoded == historical:
+            events.append(decoded)
+        return decoded
+
+    monkeypatch.setattr(_boundary_hydration.json, "loads", track_loads)
+    hydration = SessionHydration(reader, tenant_id=store.tenant_id, session_id=SESSION)
+    first, second = hydrate_session_records(records, hydration)
+    first.record._payload["definition"]["task"]["initial_messages"][0]["content"] = "changed"
+    assert second.record._payload["definition"]["task"]["initial_messages"] == [historical]
+    assert len(events) == 1
+
+    with store.atomic():
+        store._rows(
+            "DELETE FROM sk_content_link WHERE tenant_id=%s AND session_id=%s AND record_seq=%s AND slot=%s",
+            (store.tenant_id, SESSION, second.seq, "definition.task.initial_messages[0]"),
+        )
+    with pytest.raises(MissingContentLink, match=rf"record:{second.seq}/definition\.task\.initial_messages\[0\]"):
+        hydrate_session_records(records, hydration)
 
 
 def test_record_batch_uses_two_lifecycle_snapshots_and_disposes_frame(
