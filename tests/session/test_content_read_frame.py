@@ -1034,21 +1034,15 @@ def test_frame_passes_all_sorted_deduplicated_content_ids_to_one_exact_read() ->
     assert calls == [(SESSION, ("content-a", "content-b", "content-c"))]
 
 
-def test_postgres_large_exact_read_uses_bounded_server_cursor(monkeypatch: pytest.MonkeyPatch) -> None:
-    import psycopg
-
+def test_postgres_large_exact_read_uses_bounded_server_cursor() -> None:
     from vv_agent.kernel._postgres import _PostgresContentBackend
 
     rows = [(f"content-{index:03d}",) for index in range(257)]
     cursors: list[Any] = []
 
     class FakeServerCursor:
-        def __init__(self, connection, name: str, *, row_factory) -> None:
-            self.connection = connection
+        def __init__(self, name: str) -> None:
             self.name = name
-            self.row_factory = row_factory
-            self.itersize = 0
-            self.itersize_at_execute: int | None = None
             self.executed: tuple[str, tuple[Any, ...], bool] | None = None
             self.fetch_sizes: list[int] = []
             self.offset = 0
@@ -1056,7 +1050,6 @@ def test_postgres_large_exact_read_uses_bounded_server_cursor(monkeypatch: pytes
             cursors.append(self)
 
         def execute(self, query: str, params: tuple[Any, ...], *, binary: bool) -> None:
-            self.itersize_at_execute = self.itersize
             self.executed = (query, params, binary)
 
         def fetchmany(self, size: int) -> list[tuple[Any, ...]]:
@@ -1068,8 +1061,11 @@ def test_postgres_large_exact_read_uses_bounded_server_cursor(monkeypatch: pytes
         def close(self) -> None:
             self.closed = True
 
-    monkeypatch.setattr(psycopg, "ServerCursor", FakeServerCursor)
-    backend = _PostgresContentBackend(cast(Any, object()), None)
+    class FakeConnection:
+        def cursor(self, *, name: str, row_factory) -> FakeServerCursor:
+            return FakeServerCursor(name)
+
+    backend = _PostgresContentBackend(cast(Any, FakeConnection()), None)
     content_ids = tuple(f"content-{index:03d}" for index in range(257))
 
     assert backend.fetch_exact_content_rows("tenant", SESSION, content_ids) == rows
@@ -1077,7 +1073,6 @@ def test_postgres_large_exact_read_uses_bounded_server_cursor(monkeypatch: pytes
     assert len(cursors) == 1
     cursor = cursors[0]
     assert cursor.name.startswith("vv_content_frame_")
-    assert cursor.itersize_at_execute == 256
     assert cursor.fetch_sizes == [256, 256, 256]
     assert cursor.executed is not None
     query, params, binary = cursor.executed
@@ -1090,16 +1085,13 @@ def test_postgres_large_exact_read_uses_bounded_server_cursor(monkeypatch: pytes
     assert cursor.closed
 
 
-def test_postgres_large_exact_read_closes_server_cursor_on_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    import psycopg
-
+def test_postgres_large_exact_read_closes_server_cursor_on_error() -> None:
     from vv_agent.kernel._postgres import _PostgresContentBackend
 
     cursors: list[Any] = []
 
     class FailingServerCursor:
-        def __init__(self, connection, name: str, *, row_factory) -> None:
-            self.itersize = 0
+        def __init__(self) -> None:
             self.closed = False
             cursors.append(self)
 
@@ -1109,8 +1101,11 @@ def test_postgres_large_exact_read_closes_server_cursor_on_error(monkeypatch: py
         def close(self) -> None:
             self.closed = True
 
-    monkeypatch.setattr(psycopg, "ServerCursor", FailingServerCursor)
-    backend = _PostgresContentBackend(cast(Any, object()), None)
+    class FakeConnection:
+        def cursor(self, *, name: str, row_factory) -> FailingServerCursor:
+            return FailingServerCursor()
+
+    backend = _PostgresContentBackend(cast(Any, FakeConnection()), None)
 
     with pytest.raises(RuntimeError, match="execute failed"):
         backend.fetch_exact_content_rows("tenant", SESSION, tuple(f"content-{index:03d}" for index in range(257)))

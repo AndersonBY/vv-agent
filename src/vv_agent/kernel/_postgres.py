@@ -1369,17 +1369,14 @@ class _PostgresContentBackend:
         if len(content_ids) <= _READ_FRAME_OWNER_BATCH:
             return self.fetchall(query, parameters)
 
-        from psycopg import ServerCursor
         from psycopg.rows import tuple_row
 
         with self._serialized():
-            cursor = ServerCursor(
-                self.connection,
-                f"vv_content_frame_{secrets.token_hex(8)}",
+            cursor = self.connection.cursor(
+                name=f"vv_content_frame_{secrets.token_hex(8)}",
                 row_factory=tuple_row,
             )
             try:
-                cursor.itersize = _READ_FRAME_OWNER_BATCH
                 cursor.execute(self._query(query), parameters, binary=True)
                 rows: list[tuple[Any, ...]] = []
                 while batch := cursor.fetchmany(_READ_FRAME_OWNER_BATCH):
