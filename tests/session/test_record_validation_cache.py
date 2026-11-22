@@ -114,6 +114,30 @@ def test_record_bytes_and_digest_are_retained_without_payload_aliases(monkeypatc
     assert rec.payload["definition"] == retained_definition
 
 
+@pytest.mark.sqlite_file
+@pytest.mark.parametrize("append_tail", [False, True])
+def test_prefix_cache_reads_current_record_metadata(store, database, append_tail):
+    create_fixture_session(store, "s")
+    append_fixture_records(store, "s", (turn_record(),), commit_id="start")
+    _, before, _ = store.read_state("s")
+    original = before[1]
+    created_ms = original.created_ms + 1
+
+    with open_store(database) as other:
+        with other.atomic():
+            other._rows(
+                "UPDATE sk_record SET created_ms=%s WHERE tenant_id=%s AND session_id=%s AND seq=%s",
+                (created_ms, other.tenant_id, "s", original.seq),
+            )
+        if append_tail:
+            append_fixture_records(wrap_fixture_store(other), "s", (record("usage_observed"),), commit_id="tail")
+
+    _, rows, _ = store.read_state("s")
+    assert rows[1].created_ms == created_ms
+    assert rows[1].record is original.record
+    assert store.read("s", after_seq=1, limit=1).records == (rows[1],)
+
+
 @pytest.mark.persistent_store
 @pytest.mark.parametrize("reader", ["read", "read_state", "consumer_batch"])
 @pytest.mark.parametrize("tamper", ["schema", "embedded_digest", "storage_digest"])
