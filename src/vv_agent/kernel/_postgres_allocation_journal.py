@@ -31,7 +31,7 @@ _OWNER = "tenant_id,session_id,content_id,admission_session_id,admission_id,prov
 _COLUMNS = f"allocation_id,state,pin_until_ms,reservation_etag,delete_confirmed,{_OWNER}"
 _KEY_OWNER = "key_id,provider_instance_id,tenant_id,session_id,admission_root_id,admission_id"
 _KEY_COLUMNS = f"{_KEY_OWNER},state,pin_until_ms,evidence_id"
-_VERSION = 5
+_VERSION = 6
 _OWNER_MATCH = " AND ".join(f"{column} IS NOT DISTINCT FROM %s" for column in _OWNER.split(","))
 _CLAIM_MATCH = (
     f"allocation_id=%s AND state='reaping' AND pin_until_ms=%s AND reservation_etag IS NOT DISTINCT FROM %s AND {_OWNER_MATCH}"
@@ -167,10 +167,12 @@ class JournalRole:
     tenant_id: str | None = None
 
     def __post_init__(self) -> None:
+        if self.mode == "anonymous" and self.tenant_id is None:
+            return
         if self.mode in {"scope", "key-intent", "binder", "cleanup"} and self.tenant_id is not None:
             _require_text(self.tenant_id)
-        elif self.tenant_id is not None or self.mode not in {"anonymous", "binder"}:
-            raise ValueError("invalid allocation journal role binding")
+            return
+        raise ValueError("invalid allocation journal role binding")
 
     def marker(self, identity: JournalIdentity) -> str:
         return "vv-allocation-journal:" + json.dumps([identity.journal_id, self.mode, self.tenant_id], ensure_ascii=True)
@@ -265,28 +267,24 @@ def _install_role(connection: Connection[Any], login: str, role: JournalRole, id
             ("DELETE", tenant_scope + sql.SQL(" AND state='reaping' AND delete_confirmed"), None),
         )
     elif role.mode == "binder":
-        visible = authority + sql.SQL(" AND tenant_id IS NULL")
-        if role.tenant_id is None:
-            bound = authority + sql.SQL(f" AND NOT starts_with(key_id,'{_EXACT_KEY_ID_PREFIX}')")
-        else:
-            bound = tenant_scope
-            install(
-                _KEY_TABLE,
-                (
-                    "SELECT(provider_instance_id,key_id,tenant_id,session_id,admission_root_id,admission_id,state)",
-                    "UPDATE(state)",
-                ),
-                # FOR SHARE needs an UPDATE grant. The false WITH CHECK blocks every key update.
-                (("SELECT", tenant_scope, None), ("UPDATE", tenant_scope + sql.SQL(" AND state='allocating'"), sql.SQL("false"))),
-            )
+        install(
+            _KEY_TABLE,
+            (
+                "SELECT(provider_instance_id,key_id,tenant_id,session_id,admission_root_id,admission_id,state)",
+                "UPDATE(state)",
+            ),
+            # FOR SHARE needs an UPDATE grant. The false WITH CHECK blocks every key update.
+            (("SELECT", tenant_scope, None), ("UPDATE", tenant_scope + sql.SQL(" AND state='allocating'"), sql.SQL("false"))),
+        )
         grants = ("SELECT(allocation_id,state,pin_until_ms)", f"UPDATE(state,reservation_etag,{_OWNER})")
+        visible = authority + sql.SQL(" AND (tenant_id IS NULL OR tenant_id = {})").format(sql.Literal(role.tenant_id))
         # PostgreSQL checks SELECT visibility on the new row as well as the old one.
         transitions = (
-            ("SELECT", authority, None),
+            ("SELECT", visible, None),
             (
                 "UPDATE",
-                visible + sql.SQL(f" AND state='unbound' AND pin_until_ms>{CLOCK}"),
-                bound + sql.SQL(f" AND state='bound' AND pin_until_ms>{CLOCK}"),
+                authority + sql.SQL(f" AND tenant_id IS NULL AND state='unbound' AND pin_until_ms>{CLOCK}"),
+                tenant_scope + sql.SQL(f" AND state='bound' AND pin_until_ms>{CLOCK}"),
             ),
         )
     else:
@@ -312,7 +310,12 @@ class PostgresAllocationJournal:
     def provision(
         admin: Connection[Any], *, database_id: str, namespace: str, roles: Mapping[str, JournalRole]
     ) -> JournalIdentity:
-        """Install once in a dedicated database using fresh, pre-created logins."""
+        """Install once in a dedicated database using fresh, pre-created logins.
+
+        Include each tenant's separate cleanup login during provisioning if
+        that tenant requires erasure. The recorded security definition covers
+        the installed grants and policies.
+        """
         from psycopg.pq import TransactionStatus
 
         if admin.info.transaction_status != TransactionStatus.IDLE:
@@ -453,6 +456,8 @@ class PostgresAllocationJournal:
         """Bind after a verified marker ACK while the caller owns the primary fence."""
         _require_id(allocation_id)
         _require_text(reservation_etag)
+        if self._role != JournalRole("binder", owner.tenant_id):
+            return False
         with self._transaction() as connection:
             # Test pin expiry after a conflicting row lock has released.
             if not _query_rows(
@@ -461,22 +466,19 @@ class PostgresAllocationJournal:
                 (allocation_id,),
             ):
                 return False
-            if owner.key_id.startswith(_EXACT_KEY_ID_PREFIX) and (
-                self._role.tenant_id != owner.tenant_id
-                or not _query_rows(
-                    connection,
-                    f"SELECT key_id FROM {_KEY_TABLE} WHERE provider_instance_id=%s AND key_id=%s "
-                    "AND tenant_id=%s AND session_id=%s AND admission_root_id=%s AND admission_id=%s "
-                    "AND state='allocating' FOR SHARE",
-                    (
-                        owner.provider_instance_id,
-                        owner.key_id,
-                        owner.tenant_id,
-                        owner.session_id,
-                        owner.admission_session_id,
-                        owner.admission_id,
-                    ),
-                )
+            if owner.key_id.startswith(_EXACT_KEY_ID_PREFIX) and not _query_rows(
+                connection,
+                f"SELECT key_id FROM {_KEY_TABLE} WHERE provider_instance_id=%s AND key_id=%s "
+                "AND tenant_id=%s AND session_id=%s AND admission_root_id=%s AND admission_id=%s "
+                "AND state='allocating' FOR SHARE",
+                (
+                    owner.provider_instance_id,
+                    owner.key_id,
+                    owner.tenant_id,
+                    owner.session_id,
+                    owner.admission_session_id,
+                    owner.admission_id,
+                ),
             ):
                 return False
             return (

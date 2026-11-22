@@ -36,7 +36,6 @@ def provisioned(database):
         f"aj_{suffix}_{token_hex(8)}": role
         for suffix, role in (
             ("anonymous", JournalRole("anonymous")),
-            ("binder", JournalRole("binder")),
             ("binder_a", JournalRole("binder", "tenant-a")),
             ("binder_b", JournalRole("binder", "tenant-b")),
             ("key_a", JournalRole("key-intent", "tenant-a")),
@@ -48,6 +47,7 @@ def provisioned(database):
         )
     }
     outside_role = f"aj_outside_{token_hex(8)}"
+    owner_role = f"aj_owner_{token_hex(8)}"
     password = token_hex(32)
     with psycopg.connect(database, autocommit=True) as admin:
         try:
@@ -55,7 +55,26 @@ def provisioned(database):
                 admin.execute(
                     sql.SQL("CREATE ROLE {} LOGIN PASSWORD {} NOINHERIT").format(sql.Identifier(login), sql.Literal(password))
                 )
-            identity = PostgresAllocationJournal.provision(admin, database_id="main", namespace="bucket", roles=roles)
+            admin.execute(
+                sql.SQL("CREATE ROLE {} LOGIN PASSWORD {} NOSUPERUSER NOBYPASSRLS CREATEROLE NOINHERIT").format(
+                    sql.Identifier(owner_role), sql.Literal(password)
+                )
+            )
+            admin.execute(
+                sql.SQL("GRANT CREATE ON DATABASE {} TO {}").format(sql.Identifier(admin.info.dbname), sql.Identifier(owner_role))
+            )
+            for login in roles:
+                admin.execute(
+                    sql.SQL("GRANT {} TO {} WITH ADMIN OPTION").format(sql.Identifier(login), sql.Identifier(owner_role))
+                )
+            # CREATEROLE and ADMIN OPTION are needed to install the journal role comments.
+            owner_dsn = make_conninfo(database, user=owner_role, password=password)
+            with psycopg.connect(owner_dsn, autocommit=True) as owner:
+                assert owner.execute("SELECT rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user").fetchone() == (
+                    False,
+                    False,
+                )
+                identity = PostgresAllocationJournal.provision(owner, database_id="main", namespace="bucket", roles=roles)
             logins = {role: make_conninfo(database, user=login, password=password) for login, role in roles.items()}
             journals = {
                 role: PostgresAllocationJournal(dsn, identity, role, lock_timeout_ms=4500, statement_timeout_ms=5000)
@@ -64,7 +83,8 @@ def provisioned(database):
             yield admin, identity, journals, logins, make_conninfo(database, user=outside_role, password=password)
         finally:
             admin.execute("DROP SCHEMA IF EXISTS vv_allocation_journal CASCADE")
-            for login in (*roles, outside_role):
+            admin.execute(sql.SQL("DROP OWNED BY {}").format(sql.Identifier(owner_role)))
+            for login in (*roles, outside_role, owner_role):
                 admin.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(login)))
 
 
@@ -195,7 +215,7 @@ def test_bound_row_survives_primary_rollback_and_requires_exact_claim(provisione
     import psycopg
 
     admin, identity, journals, _, _ = provisioned
-    anonymous, binder = journals[JournalRole("anonymous")], journals[JournalRole("binder")]
+    anonymous, binder = journals[JournalRole("anonymous")], journals[JournalRole("binder", "tenant-a")]
     scope, foreign = journals[JournalRole("scope", "tenant-a")], journals[JournalRole("scope", "tenant-b")]
     cleanup, foreign_cleanup = journals[JournalRole("cleanup", "tenant-a")], journals[JournalRole("cleanup", "tenant-b")]
     allocation_id = bytes(32)
@@ -272,7 +292,7 @@ def test_database_grants_and_rls_limit_authenticated_logins(provisioned):
     import psycopg
 
     admin, identity, journals, logins, outside_dsn = provisioned
-    anonymous_role, binder_role = JournalRole("anonymous"), JournalRole("binder")
+    anonymous_role, binder_role = JournalRole("anonymous"), JournalRole("binder", "tenant-a")
     scope_role = JournalRole("scope", "tenant-a")
     cleanup_role = JournalRole("cleanup", "tenant-a")
     bound, pending = bytes(32), bytes([1]) * 32
@@ -324,9 +344,44 @@ def test_database_grants_and_rls_limit_authenticated_logins(provisioned):
         PostgresAllocationJournal(logins[scope_role], identity, JournalRole("scope", "tenant-b"))
 
 
+def test_tenant_binder_reads_only_anonymous_and_own_allocations(provisioned):
+    import psycopg
+
+    admin, _, journals, logins, _ = provisioned
+    binder_a = JournalRole("binder", "tenant-a")
+    binder_b = JournalRole("binder", "tenant-b")
+    anonymous = journals[JournalRole("anonymous")]
+    pending, own_bound, foreign_bound, foreign_claimed = (bytes([i]) * 32 for i in range(4))
+    for allocation_id in (pending, own_bound, foreign_bound, foreign_claimed):
+        assert anonymous.reserve(allocation_id, pin_until_ms=_now(admin) + 30_000)
+    with pytest.raises(ValueError, match="invalid allocation journal role"):
+        JournalRole("binder")
+
+    owner_b = replace(OWNER, tenant_id="tenant-b")
+    assert not journals[binder_a].bind(own_bound, owner_b, reservation_etag=ETAG)
+    assert journals[binder_a].bind(own_bound, OWNER, reservation_etag=ETAG)
+    assert journals[binder_b].bind(foreign_bound, owner_b, reservation_etag=ETAG)
+    assert journals[binder_b].bind(foreign_claimed, owner_b, reservation_etag=ETAG)
+    cleanup_b = journals[JournalRole("cleanup", "tenant-b")]
+    allocation = cleanup_b.get(foreign_claimed)
+    assert allocation is not None and cleanup_b.claim_bound(allocation) is not None
+
+    with psycopg.connect(logins[binder_a], autocommit=True) as connection:
+        assert connection.execute(f"SELECT allocation_id,state FROM {TABLE} ORDER BY allocation_id").fetchall() == [
+            (pending, "unbound"),
+            (own_bound, "bound"),
+        ]
+    with psycopg.connect(logins[binder_b], autocommit=True) as connection:
+        assert connection.execute(f"SELECT allocation_id,state FROM {TABLE} ORDER BY allocation_id").fetchall() == [
+            (pending, "unbound"),
+            (foreign_bound, "bound"),
+            (foreign_claimed, "reaping"),
+        ]
+
+
 def test_bind_rechecks_after_lock_and_anonymous_claim_cannot_rebind(provisioned):
     admin, _, journals, _, _ = provisioned
-    anonymous, binder = journals[JournalRole("anonymous")], journals[JournalRole("binder")]
+    anonymous, binder = journals[JournalRole("anonymous")], journals[JournalRole("binder", "tenant-a")]
     allocation_id = bytes(32)
     pin = _now(admin) + 1500
     assert anonymous.reserve(allocation_id, pin_until_ms=pin)
@@ -362,7 +417,7 @@ def test_runtime_rejects_policy_or_privilege_drift(provisioned, statement):
 
 def test_concurrent_binders_can_commit_only_one_exact_owner(provisioned):
     admin, _, journals, _, _ = provisioned
-    anonymous, binder = journals[JournalRole("anonymous")], journals[JournalRole("binder")]
+    anonymous, binder = journals[JournalRole("anonymous")], journals[JournalRole("binder", "tenant-a")]
     scope = journals[JournalRole("scope", "tenant-a")]
     allocation_id = bytes(32)
     assert anonymous.reserve(allocation_id, pin_until_ms=_now(admin) + 10_000)
@@ -382,7 +437,7 @@ def test_exact_key_readback_mutations_and_cleanup_require_authority(provisioned)
     keys, foreign = journals[key_role], journals[JournalRole("key-intent", "tenant-b")]
     anonymous, scope = journals[JournalRole("anonymous")], journals[JournalRole("scope", "tenant-a")]
     binder_role = JournalRole("binder", "tenant-a")
-    binder, legacy = journals[binder_role], journals[JournalRole("binder")]
+    binder, foreign_binder = journals[binder_role], journals[JournalRole("binder", "tenant-b")]
     intent = _ExactKeyIntent("s1-exact-key-" + "a" * 64, "provider", "tenant-a", "child", "parent", "admission")
     owner = replace(OWNER, key_id=intent.key_id)
     allocation_id = bytes(32)
@@ -399,7 +454,7 @@ def test_exact_key_readback_mutations_and_cleanup_require_authority(provisioned)
         foreign.reserve_key_intent(replace(intent, key_id="s1-exact-key-" + "b" * 64), pin_until_ms=pin)
     assert anonymous.reserve(allocation_id, pin_until_ms=pin)
     assert not binder.bind(allocation_id, owner, reservation_etag=ETAG)
-    assert not legacy.bind(allocation_id, owner, reservation_etag=ETAG)
+    assert not foreign_binder.bind(allocation_id, owner, reservation_etag=ETAG)
 
     assert keys.claim_key_allocation(reserved)
     allocating = reopened.get_key_intent(intent.provider_instance_id, intent.key_id)
@@ -536,7 +591,7 @@ def test_exact_bind_waits_for_key_cleanup_claim(provisioned):
 def test_obsolete_journal_revision_fails_closed(provisioned):
     admin, identity, journals, logins, _ = provisioned
     role = JournalRole("key-intent", "tenant-a")
-    admin.execute("UPDATE vv_allocation_journal.identity SET revision=4")
+    admin.execute("UPDATE vv_allocation_journal.identity SET revision=5")
     with pytest.raises(ContentUnavailable, match="identity or policy"):
         PostgresAllocationJournal(logins[role], identity, role)
     with pytest.raises(ContentUnavailable, match="identity or policy"):
