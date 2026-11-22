@@ -22,6 +22,21 @@ jobs:
       contents: write
       id-token: write
 
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: vv_agent
+          POSTGRES_PASSWORD: vv_agent_test
+          POSTGRES_DB: vv_agent_test
+        ports:
+          - 5432
+        options: >-
+          --health-cmd "pg_isready -U vv_agent -d vv_agent_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     env:
       UV_NO_SOURCES: "1"
 
@@ -69,12 +84,27 @@ jobs:
         run: uv sync --locked --dev --extra s3
 
       - name: Verify locked contract snapshot
-        run: python3 scripts/contract_snapshot.py check
+        run: |
+          artifact=$(python3 -c 'import json; print(json.load(open("contract.lock.json"))["artifact_url"])')
+          python3 scripts/contract_snapshot.py check --artifact "$artifact"
 
       - name: Require centrally verified contract adoption
-        run: python3 scripts/contract_snapshot.py adoption --implementation python --revision "$(git rev-parse HEAD)"
+        # P1 uses the immutable commit of the centrally verified Contract 39 matrix.
+        run: |
+          python3 scripts/contract_snapshot.py adoption --implementation python \
+            --matrix https://raw.githubusercontent.com/AndersonBY/vv-agent-contract/48fb570210b953cbf20b1ce379626f92a75e596d/support-matrix.json \
+            --revision "$(git rev-parse HEAD)"
+
+      - name: Install historical reader for compatibility tests
+        run: |
+          uv venv --python 3.12 "$RUNNER_TEMP/vv-agent-0.33.3"
+          uv pip install --python "$RUNNER_TEMP/vv-agent-0.33.3/bin/python" 'vv-agent[postgres]==0.33.3'
+          echo "VV_AGENT_0333_PYTHON=$RUNNER_TEMP/vv-agent-0.33.3/bin/python" >> "$GITHUB_ENV"
 
       - name: Run full tests
+        env:
+          VV_AGENT_TEST_POSTGRES_DSN: postgresql://vv_agent:vv_agent_test@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/vv_agent_test
+          VV_AGENT_RUN_LIVE_TESTS: "0"
         run: TMPDIR=/tmp uv run pytest -k 'not simulation_smoke'
 
       - name: Run simulation smoke

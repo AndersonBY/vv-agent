@@ -82,7 +82,7 @@ old-version session.
 
 ## Version notes
 
-### 0.36.0 — Unreleased
+### 0.36.0
 
 The core and concrete session stores move under `vv_agent.kernel`; the existing
 `vv_agent.session` exports and facades plus public SDK entry points remain.
@@ -95,8 +95,8 @@ Contract 39 narrows failed closed-session diagnostics to
 rejected values, validation order, and execution behavior do not change. Do not
 parse complete `jsonschema.ValidationError` text, paths, or schema dumps. P1 adds
 no backend DDL, `Principal`, or provider work; upgrade the dependency and rely
-on the stable invalid-schema text. Contract adoption is pending and the
-canonical lock remains 38.0.0. See the [release notes](releases/0.36.0.md).
+on the stable invalid-schema text. The canonical lock pins immutable Contract
+39.0.0, with verified central adoption. See the [release notes](releases/0.36.0.md).
 
 ### 0.35.0 — 2026-11-12
 

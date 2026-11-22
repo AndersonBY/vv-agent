@@ -1,13 +1,13 @@
 # Changelog
 
-## 0.36.0 — Unreleased
+## 0.36.0
 
 P1 introduces the standard-library kernel boundary and seeded simulation gates.
 Contract 39 narrows failed closed-session diagnostics to `invalid session schema`
 without changing record, inbox, SQL, or canonical-byte formats. Public SDK entry
-points remain. Publication and central adoption are not claimed; the canonical
-lock remains 38.0.0. See [release notes](docs/releases/0.36.0.md) and the
-[upgrade notes](docs/upgrading.md#0360--unreleased).
+points remain. The canonical lock pins immutable Contract 39.0.0, with verified
+central adoption. See [release notes](docs/releases/0.36.0.md) and the
+[upgrade notes](docs/upgrading.md#0360).
 
 ## 0.35.0 — 2026-11-12
 
