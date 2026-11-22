@@ -139,7 +139,7 @@ def projection_records_frame(
         yield sources
         return
     opener = getattr(getattr(hydration, "reader", None), "_read_frame", None)
-    if not callable(opener):
+    if hydration is None or not callable(opener):
         hydrated = {stored.seq: _hydrate_projection_stored_record(stored, hydration) for stored in selected}
         yield tuple(hydrated.get(stored.seq, stored) for stored in sources)
         return

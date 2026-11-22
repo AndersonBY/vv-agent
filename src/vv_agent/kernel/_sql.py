@@ -396,6 +396,7 @@ class SQLStore:
     _input_admission_signer: LedgerSigner | None = None
     _fold_cache: _Prefix | None = None
     _previous_prefix: _Prefix | None = None
+    _read_snapshot_active = False
     _tenant_id = DEFAULT_TENANT_ID
     _root_store: SQLStore | None = None
     _worker_supports = WorkerSupports()

@@ -1460,7 +1460,7 @@ class SessionDriver:
 
     @staticmethod
     def _lease_retry_policy(
-        registration: _RuntimeRegistration,
+        registration: _RuntimeRegistration | None,
         runtime: Runtime | None,
     ) -> tuple[int, float, float, Callable[[float, float], float]]:
         if runtime is not None:

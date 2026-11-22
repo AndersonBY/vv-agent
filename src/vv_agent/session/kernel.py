@@ -456,7 +456,7 @@ class _Driver(CoreDriver):
         sources: dict[str, StoredRecord] = {}
         for stored in plans.values():
             record = stored.record
-            if record.attempt is None or record.attempt <= 1:
+            if record.operation_id is None or record.attempt is None or record.attempt <= 1:
                 continue
             previous = plans.get((record.operation_id, record.attempt - 1))
             if previous is None:
