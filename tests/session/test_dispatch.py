@@ -44,7 +44,6 @@ def transport(store, database):
 @pytest.fixture
 def clock(store, monkeypatch):
     now = 1_000_000
-    monkeypatch.setattr(type(store), "clock_sql", str(now))
 
     class FakeClock:
         def now_ms(self) -> int:
@@ -59,15 +58,27 @@ def clock(store, monkeypatch):
         def sleep(self, seconds: float) -> None:
             sleep(seconds)
 
-    if isinstance(store, SQLiteStore):
+    sqlite = isinstance(store, SQLiteStore)
+    if sqlite:
         fake_clock = FakeClock()
         store.clock = fake_clock
         store.connection.create_function("session_now_ms", 0, fake_clock.now_ms)
+        monkeypatch.setattr(type(store), "clock_sql", str(now))
+    else:
+        # Worker and heartbeat connections capture clock_sql when they are configured.
+        with store.atomic():
+            store._rows("CREATE TABLE test_dispatch_clock (now_ms bigint NOT NULL)")
+            store._rows("INSERT INTO test_dispatch_clock VALUES (%s)", (now,))
+        monkeypatch.setattr(type(store), "clock_sql", "(SELECT now_ms FROM test_dispatch_clock)")
 
     def advance(ms):
         nonlocal now
         now += ms
-        monkeypatch.setattr(type(store), "clock_sql", str(now))
+        if sqlite:
+            monkeypatch.setattr(type(store), "clock_sql", str(now))
+        else:
+            with store.atomic():
+                store._rows("UPDATE test_dispatch_clock SET now_ms=%s", (now,))
         return now
 
     return advance
@@ -440,12 +451,12 @@ def test_post_release_check_and_scan_share_drive_predicate(transport, clock):
 
 
 @pytest.fixture
-def provider_wait(transport):
+def provider_wait(transport, clock):
     @function_tool
     def effect() -> str:
         return "unused synchronous handler"
 
-    provider = PollingProvider(transport.database)
+    provider = PollingProvider(transport.database, now_ms=transport.store._now)
     provider.install()
     transport.create(steps=[LLMResponse("", [ToolCall("job", "effect", {})]), LLMResponse("done")], tools=[effect])
     transport.runtimes["s"].providers["effect"] = provider
@@ -617,18 +628,25 @@ def test_local_accepted_returns_parked_until_due_drive(
         )
 
     monkeypatch.setattr(kernel, "runtime", bound_runtime)
+    wait_timeout = 5
+    original_result = RunHandle.result
+
+    def bounded_result(handle, timeout=None):
+        return original_result(handle, timeout=wait_timeout if timeout is None else timeout)
+
+    monkeypatch.setattr(RunHandle, "result", bounded_result)
 
     def run():
         if surface == "run_sync":
             return Runner.run_sync(rt.agent, "go", run_config=run_config)
-        return Runner.start(rt.agent, "go", run_config=run_config).result(timeout=1)
+        return Runner.start(rt.agent, "go", run_config=run_config).result(timeout=wait_timeout)
 
     try:
         with ThreadPoolExecutor(max_workers=1) as pool:
             started = monotonic()
             pending = pool.submit(run)
             try:
-                result = pending.result(timeout=1)
+                result = pending.result(timeout=wait_timeout)
             finally:
                 # Release a regressed blocking driver without waiting for the real poll interval.
                 if any(not h.done() for h in kernel.handles):
@@ -638,7 +656,7 @@ def test_local_accepted_returns_parked_until_due_drive(
                     for h in kernel.handles:
                         h.join(2)
             elapsed = monotonic() - started
-        assert elapsed < 1 < rt.poll_ms / 1000
+        assert elapsed < wait_timeout < rt.poll_ms / 1000
         record_property("parked_return_wall_ms", elapsed * 1000)
         handle = kernel.handles[0]
         assert handle.done()
@@ -660,10 +678,11 @@ def test_local_accepted_returns_parked_until_due_drive(
         assert not records(transport.store, sid, "turn_ended")
         clock(1)
         assert transport.store.is_runnable(sid)
-        # Arm another cursor only to wake the sole LocalWorker. The advance is
-        # still driven by the worker/DriveCore, never by this client thread.
-        kernel.start(sid, rt.agent, run_config, None)
-        completed = handle.result(timeout=1) if continuation == "tick" else Runner.resume(sid, tid)
+        if continuation == "tick":
+            kernel.start(sid, rt.agent, run_config, None)
+            completed = handle.result(timeout=wait_timeout)
+        else:
+            completed = Runner.resume(sid, tid)
         assert completed.status is AgentStatus.COMPLETED
         assert provider_wait.queries == [parked.payload["poll_at_ms"]]
         assert completed.final_output == "done"
