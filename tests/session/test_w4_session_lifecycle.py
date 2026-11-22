@@ -724,6 +724,28 @@ def test_drive_connection_does_not_reuse_heartbeat_connection_factory(monkeypatc
         driver.close()
 
 
+def test_driver_binds_support_to_connections_without_local_worker(monkeypatch) -> None:
+    driver = SessionDriver(handler_versions=("handler/v2",), capabilities=("deployment:first",))
+    try:
+        with monkeypatch.context() as patch:
+            patch.delattr(driver, "_worker")
+            driver._ensure_static_worker_support(level=2, capabilities=("deployment:second",))
+            with (
+                driver._open_drive_store() as drive,
+                cast(Any, drive).heartbeat_store_factory()() as heartbeat,
+            ):
+                foreground = cast(Any, driver.store)
+                support = foreground.worker_supports
+                assert support.max_level == 2
+                assert support.handler_versions == ("handler/v2",)
+                assert support.capabilities == ("deployment:first", "deployment:second")
+                assert foreground.max_feature_level == 2
+                assert cast(Any, drive).worker_supports == heartbeat.worker_supports == support
+                assert len({foreground.connection, cast(Any, drive).connection, heartbeat.connection}) == 3
+    finally:
+        driver.close()
+
+
 def test_postgres_uses_normal_drive_store_factory(monkeypatch) -> None:
     class DriveManager:
         def __enter__(self):

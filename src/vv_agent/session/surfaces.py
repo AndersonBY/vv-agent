@@ -68,7 +68,7 @@ from vv_agent.kernel._sql import (
 )
 from vv_agent.kernel._sqlite import SQLiteStore as CoreSQLiteStore
 from vv_agent.kernel._state import queued_input_starts_turn
-from vv_agent.kernel._store import DEFAULT_TENANT_ID, LeaseRetryExhausted, ObjectPublicationBusy
+from vv_agent.kernel._store import DEFAULT_TENANT_ID, LeaseRetryExhausted, ObjectPublicationBusy, WorkerSupports
 from vv_agent.memory import MemoryManager
 from vv_agent.model import ModelError, resolve_model_selection, resolve_run_model
 from vv_agent.result import RunResult
@@ -698,6 +698,9 @@ class SessionDriver:
         self.handler_versions = normalized_handlers
         self.default_handler_version = normalized_handlers[0]
         self.capabilities = normalized_capabilities
+        self._worker_supports = WorkerSupports(
+            max_level=worker_level, handler_versions=self.handler_versions, capabilities=self.capabilities
+        )
         self._owns_store = store is None
         self._temporary_store_directory: TemporaryDirectory[str] | None = None
         if store is None and path is _DEFAULT_SQLITE_PATH:
@@ -768,11 +771,7 @@ class SessionDriver:
             raise ValueError("durable SessionDriver stores require an explicit content_key_provider")
         bind_content_key_provider(self._root_store, self.content_key_provider)
         self._store = wrap_session_content_store(self._store, self.content_key_provider)
-        cast(Any, self._store).configure_worker(
-            level=worker_level,
-            handler_versions=self.handler_versions,
-            capabilities=self.capabilities,
-        )
+        self._configure_store_support(self._store)
         self._drive_store_factory = None if open_store is not None else cast(Any, self._store).drive_store_factory()
         self._heartbeat_store_factory = cast(Any, self._store).heartbeat_store_factory()
         self.path = self._root_store.path if isinstance(self._root_store, CoreSQLiteStore) else None
@@ -798,9 +797,9 @@ class SessionDriver:
                 observe=self._observe_registered_handles,
                 projection_consumers=("child_delivery",) if self._execution_capable and not pg_objects else (),
                 open_claim_store=self._open_claim_store if open_claim_store is not None else None,
-                level=worker_level,
-                handler_versions=self.handler_versions,
-                capabilities=self.capabilities,
+                level=self._worker_supports.max_level,
+                handler_versions=self._worker_supports.handler_versions,
+                capabilities=self._worker_supports.capabilities,
             )
         )
         self._closed = False
@@ -883,7 +882,8 @@ class SessionDriver:
             inner = getattr(store, "_store", None)
             if inner is not None and inner is not store:
                 cast(Any, inner).heartbeat_store_factory = heartbeat_factory
-            self._worker._configure_store(store)
+            if callable(getattr(store, "configure_worker", None)):
+                self._configure_store_support(store)
             yield store
 
     def _open_default_drive_store(self) -> AbstractContextManager[SessionStore]:
@@ -891,6 +891,15 @@ class SessionDriver:
         if factory is None:
             raise ValueError("SessionDriver requires open_store=... for this store type")
         return factory()
+
+    def _configure_store_support(self, store: SessionStore) -> None:
+        support = self._worker_supports
+        cast(Any, store).configure_worker(
+            level=support.max_level,
+            handler_versions=support.handler_versions,
+            capabilities=support.capabilities,
+            all_tenants=False,
+        )
 
     def _read_state(self, sid: str, store: SessionStore | None = None, *, expected_head=None):
         active = store or self.store
@@ -934,9 +943,8 @@ class SessionDriver:
         level: int,
         capabilities: tuple[str, ...],
     ) -> None:
-        """Bind a session's complete static support to this worker before claims."""
+        """Declare the trusted static support required to execute the session."""
 
-        current = self._worker.support
         if level >= 2 and self._owns_store and isinstance(self._root_store, CoreSQLiteStore):
             write_level = self._root_store.max_feature_level
             if write_level < level:
@@ -944,22 +952,22 @@ class SessionDriver:
                     "UPDATE sk_settings SET write_level=? WHERE singleton=1",
                     (level,),
                 )
-        # Registrations are local trusted declarations. A running worker may
-        # widen its support monotonically for a later session, but persisted
-        # requirements never enter this union. The coordinator rebinds the
-        # current support before every claim scan; future drive and keeper
-        # stores capture the same support snapshot.
+        # Only trusted declarations widen support, including for later sessions.
+        current = self._worker_supports
         support = replace(
             current,
-            level=max(current.level, level),
+            max_level=max(current.max_level, level),
             capabilities=tuple(sorted(set(current.capabilities) | set(capabilities))),
         )
-        self._worker.support = support
-        self._worker._configure_store(self.store)
+        self._worker_supports = support
+        self._configure_store_support(self.store)
         # Keeper heartbeat factories capture support when created. Rebuild the
         # caller-owned factory after every support upgrade so renewal uses the
         # same L2 level and capability set that admission just declared.
         self._heartbeat_store_factory = cast(Any, self.store).heartbeat_store_factory()
+        worker = getattr(self, "_worker", None)
+        if worker is not None:
+            worker.support = replace(worker.support, level=support.max_level, capabilities=support.capabilities)
 
     def _configure_static_worker(
         self,
@@ -992,9 +1000,9 @@ class SessionDriver:
             config,
             extra_capabilities=self.capabilities,
         )
-        supports = tuple(sorted(set(supports) | set(self._worker.support.capabilities)))
+        supports = tuple(sorted(set(supports) | set(self._worker_supports.capabilities)))
         worker_level = max(
-            self._worker.support.level,
+            self._worker_supports.max_level,
             _static_worker_requirement_level(
                 agent,
                 config,
@@ -1076,9 +1084,9 @@ class SessionDriver:
             runtime.config,
             extra_capabilities=self.capabilities,
         )
-        supports = tuple(sorted(set(supports) | set(self._worker.support.capabilities)))
+        supports = tuple(sorted(set(supports) | set(self._worker_supports.capabilities)))
         worker_level = max(
-            self._worker.support.level,
+            self._worker_supports.max_level,
             _static_worker_requirement_level(
                 runtime.agent,
                 runtime.config,
