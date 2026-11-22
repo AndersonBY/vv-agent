@@ -1169,7 +1169,8 @@ class _PostgresContentBackend:
         from psycopg.rows import tuple_row
 
         with self._serialized(), self.connection.cursor(row_factory=tuple_row) as cursor:
-            cursor.execute(self._query(query), params)
+            # Ciphertext rows contain BYTEA. Binary results avoid hex round trips.
+            cursor.execute(self._query(query), params, binary=True)
             return [tuple(row) for row in cursor.fetchall()]
 
     def run(self, query: str, params: tuple[Any, ...] = ()) -> int:
