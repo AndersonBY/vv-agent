@@ -582,6 +582,33 @@ class PostgresAllocationJournal:
                 )
             )
 
+    def exact_key_allocations_exist(self, expected: KeyIntent) -> bool:
+        """Return whether one exact key still owns any journal allocation."""
+        if expected.journal_id != self._identity.journal_id or self._role != JournalRole("cleanup", expected.intent.tenant_id):
+            raise ContentCleanupUnavailable("exact key allocation lookup requires the tenant cleanup role")
+        with self._transaction() as connection:
+            return bool(
+                _query_rows(
+                    connection,
+                    f"SELECT 1 FROM {_TABLE} WHERE provider_instance_id=%s AND key_id=%s LIMIT 1",
+                    (expected.intent.provider_instance_id, expected.intent.key_id),
+                )
+            )
+
+    def key_intent_pin_expired(self, expected: KeyIntent) -> bool:
+        """Read exact intent expiry from the journal database clock."""
+        if expected.journal_id != self._identity.journal_id or self._role != JournalRole("cleanup", expected.intent.tenant_id):
+            raise ContentCleanupUnavailable("exact key expiry lookup requires the tenant cleanup role")
+        owner_match = " AND ".join(f"{column}=%s" for column in _KEY_OWNER.split(","))
+        with self._transaction() as connection:
+            return bool(
+                _query_rows(
+                    connection,
+                    f"SELECT 1 FROM {_KEY_TABLE} WHERE {owner_match} AND pin_until_ms<={CLOCK} LIMIT 1",
+                    astuple(expected.intent),
+                )
+            )
+
     def claim_anonymous(self, allocation_id: bytes) -> Allocation | None:
         _require_id(allocation_id)
         with self._transaction() as connection:
