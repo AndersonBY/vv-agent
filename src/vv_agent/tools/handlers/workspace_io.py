@@ -4,11 +4,11 @@ import hashlib
 import os
 import posixpath
 import shutil
+import subprocess
 import sysconfig
 from pathlib import Path
 from typing import Any
 
-from vv_agent.runtime import local_environment as local_environment_runtime
 from vv_agent.runtime.local_environment import LocalEnvironmentError, expected_capabilities_for, local_environment_for
 from vv_agent.tools.base import ToolContext
 from vv_agent.tools.handlers.common import to_json
@@ -54,9 +54,6 @@ LIST_FILES_IGNORED_ROOTS = frozenset(
     }
 )
 _RG_EXECUTABLE_CACHE: str | None | bool = None
-
-# Retain the historical test seam without keeping a direct Popen in the handler.
-subprocess = local_environment_runtime.subprocess
 
 
 def _is_workspace_root(path: str) -> bool:
@@ -245,14 +242,13 @@ def _find_files_local_rg(
     command.append(".")
 
     try:
-        environment = local_environment_for(context)
-        process = environment.start_search(
-            command,
-            cwd=base_path,
-            text=False,
-            capture_stderr=True,
-            expected_capabilities=expected_capabilities_for(context),
-        )
+        expected = expected_capabilities_for(context)
+        if expected is None:
+            process = subprocess.Popen(command, cwd=base_path, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        else:
+            process = local_environment_for(context).start_search(
+                command, cwd=base_path, text=False, capture_stderr=True, expected_capabilities=expected
+            )
     except OSError:
         return None
 
@@ -311,7 +307,7 @@ def _find_files_local_rg(
 
     try:
         process.wait(timeout=1)
-    except TimeoutError:
+    except (subprocess.TimeoutExpired, TimeoutError):
         process.kill()
         process.wait(timeout=1)
 

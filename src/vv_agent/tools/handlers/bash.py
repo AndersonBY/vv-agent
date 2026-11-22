@@ -4,12 +4,7 @@ import os
 from typing import Any
 
 from vv_agent.runtime.background_sessions import background_session_manager
-from vv_agent.runtime.local_environment import (
-    LocalEnvironment,
-    LocalEnvironmentError,
-    expected_capabilities_for,
-    local_environment_for,
-)
+from vv_agent.runtime.local_environment import LocalEnvironmentError, expected_capabilities_for, local_environment_for
 from vv_agent.runtime.processes import start_captured_process
 from vv_agent.runtime.shell import prepare_shell_execution
 from vv_agent.tools.base import ToolContext
@@ -152,17 +147,14 @@ def run_bash_command(context: ToolContext, arguments: dict[str, Any]) -> ToolExe
     except ValueError as exc:
         return builtin_error(str(exc), "invalid_shell_config")
     try:
-        environment = local_environment_for(
-            context,
-            default=LocalEnvironment(process_starter=start_captured_process),
-        )
-        started = environment.start_process(
-            shell_command,
-            cwd=exec_dir,
-            stdin_text=prepared_stdin,
-            env=_build_process_env(bash_env),
-            expected_capabilities=expected_capabilities_for(context),
-        )
+        process_env = _build_process_env(bash_env)
+        expected = expected_capabilities_for(context)
+        if expected is None:
+            started = start_captured_process(shell_command, cwd=exec_dir, stdin_text=prepared_stdin, env=process_env)
+        else:
+            started = local_environment_for(context).start_process(
+                shell_command, cwd=exec_dir, stdin_text=prepared_stdin, env=process_env, expected_capabilities=expected
+            )
     except LocalEnvironmentError as exc:
         return builtin_error(str(exc), exc.code)
     except OSError as exc:

@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sysconfig
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath
@@ -12,7 +13,6 @@ from typing import Any
 
 import regex as regex_engine
 
-from vv_agent.runtime import local_environment as local_environment_runtime
 from vv_agent.runtime.local_environment import LocalEnvironmentError, expected_capabilities_for, local_environment_for
 from vv_agent.tools.base import ToolContext
 from vv_agent.tools.handlers.common import builtin_error
@@ -84,8 +84,6 @@ _MAX_STRUCTURED_ITEMS = 200
 _MAX_STRUCTURED_CHARS = 20_000
 _RG_EXECUTABLE_CACHE: str | None | bool = None
 
-# Retain the historical test seam without keeping a direct Popen in the handler.
-subprocess = local_environment_runtime.subprocess
 _COMMON_IGNORED_ROOTS = frozenset(
     {
         ".venv",
@@ -372,14 +370,21 @@ def _search_files_local_rg(
     command.extend(["--regexp", pattern, "."])
 
     try:
-        environment = local_environment_for(context)
-        process = environment.start_search(
-            command,
-            cwd=base_path,
-            text=True,
-            capture_stderr=False,
-            expected_capabilities=expected_capabilities_for(context),
-        )
+        expected = expected_capabilities_for(context)
+        if expected is None:
+            process = subprocess.Popen(
+                command,
+                cwd=base_path,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+        else:
+            process = local_environment_for(context).start_search(
+                command, cwd=base_path, text=True, capture_stderr=False, expected_capabilities=expected
+            )
     except OSError:
         return None
 
@@ -502,7 +507,7 @@ def _search_files_local_rg(
     finally:
         try:
             process.wait(timeout=1)
-        except TimeoutError:
+        except (subprocess.TimeoutExpired, TimeoutError):
             process.kill()
             process.wait(timeout=1)
 

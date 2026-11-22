@@ -9,12 +9,13 @@ from typing import Any
 import pytest
 
 from vv_agent.kernel._content import ContentLabels, ContentRef, Principal
-from vv_agent.runtime import InMemorySecretBroker, SecretBroker
 from vv_agent.runtime.secrets import (
+    InMemorySecretBroker,
     InvalidSecretRequest,
     SecretAlreadyUsed,
     SecretBinding,
     SecretBindingMismatch,
+    SecretBroker,
     SecretDenied,
     SecretExpired,
     SecretReference,
