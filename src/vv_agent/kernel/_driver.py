@@ -36,7 +36,7 @@ from vv_agent.kernel._lease_scope import Clock
 from vv_agent.kernel._record_codec import RecordError
 from vv_agent.kernel._records import InboxItem, Record, copy_json, digest, make_record, record_identity
 from vv_agent.kernel._reducer import Fold
-from vv_agent.kernel._store import Conflict, ContentSessionTx, Lease, LeasePoll, SessionStore, SessionTx, StoredRecord
+from vv_agent.kernel._store import Conflict, ContentSessionTx, Lease, LeaseLost, LeasePoll, SessionStore, SessionTx, StoredRecord
 from vv_agent.kernel._tool_values import ToolExecutionResult
 
 ConfiguredChildResultProjector = Callable[
@@ -91,6 +91,9 @@ _PREPARED_PLAN_CONTENT_SLOTS = frozenset({"request", "tool", "hook_result", "sha
 
 class DriverLeaseScope(Protocol):
     lease: Lease
+
+    @property
+    def safety_deadline(self) -> float: ...
 
     def confirmed_poll(self) -> LeasePoll: ...
 
@@ -529,13 +532,25 @@ class CoreDriver:
         timings: list[tuple[str, float, str, str | None]] = []
         atomic_start = self.clock.monotonic_ns()
         atomic_error = None
+        # Renewal may update append's lease, but cannot extend this transaction's budget.
+        persistence_deadline = self.scope.safety_deadline
+
+        def check_deadline() -> None:
+            if self.clock.monotonic() >= persistence_deadline:
+                raise LeaseLost("session persistence reached the lease safety deadline")
+
+        def commit_lease() -> Lease:
+            check_deadline()
+            return latch.enter_context(self.scope.committing())
 
         @contextmanager
         def phase(name: str):
             begin = self.clock.monotonic_ns()
             error = None
             try:
+                check_deadline()
                 yield
+                check_deadline()
             except BaseException as exc:
                 error = type(exc).__name__
                 raise
@@ -543,7 +558,11 @@ class CoreDriver:
                 timings.append((name, (self.clock.monotonic_ns() - begin) / 1_000_000, "error" if error else "ok", error))
 
         try:
+            check_deadline()
             with ExitStack() as latch, self.store.atomic() as tx:
+                bind_deadline = getattr(tx, "_bind_persistence_deadline", None)
+                if callable(bind_deadline):
+                    bind_deadline(check_deadline)
                 if prepare is not None:
                     with phase("prepare"):
                         prepared_records.extend(prepare(tx))
@@ -600,10 +619,8 @@ class CoreDriver:
                         declarations = publication.links
                 with phase("before_commit"):
                     self._hook("before_commit", commit_records[-1] if commit_records else None)
-                # SQL append evaluates the guard after encoding and immutable
-                # history preparation. The outer SQL atomic exit rechecks the
-                # lease after logical validation and content linking.
-                tx.bind_lease_guard(lambda: latch.enter_context(self.scope.committing()))
+                # Append samples the lease after encoding.
+                tx.bind_lease_guard(commit_lease)
                 with phase("append"):
                     receipt = tx.append(
                         self.sid,
@@ -623,6 +640,7 @@ class CoreDriver:
                     with phase("finalize"):
                         assert content_writer is not None
                         link_declared_record_content(content_writer, links)
+                check_deadline()
         except BaseException as exc:
             atomic_error = type(exc).__name__
             raise

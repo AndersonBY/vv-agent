@@ -1,19 +1,25 @@
 """Real SQL producers exercise the shared ledger and SDK callback boundary."""
 
+from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
 from vv_agent.budget import HostCost, RunBudgetLimits
+from vv_agent.kernel import _driver as core_driver
 from vv_agent.kernel._content_publication import publish_turn_started
 from vv_agent.kernel._driver import CoreDriver
 from vv_agent.kernel._records import SessionSpec, digest
 from vv_agent.session import kernel
 from vv_agent.session.content_runtime import SessionContentWriter
 from vv_agent.session.reducer import Fold
+from vv_agent.session.sql import SQLSessionTx
 from vv_agent.session.sqlite import SQLiteStore
-from vv_agent.session.store import LeaseLost, SequenceConflict
+from vv_agent.session.store import Lease, LeaseLost, SequenceConflict, SessionStore
 
 from .helpers import (
     create_fixture_session,
@@ -24,6 +30,7 @@ from .helpers import (
     wrap_fixture_store,
 )
 from .test_recovery_matrix import runtime
+from .test_sim_injection import ManualClock
 
 
 class Clock:
@@ -225,6 +232,162 @@ def test_sdk_and_core_run_identical_real_commit_algorithm(tmp_path, monkeypatch,
     assert {key: value for key, value in core.items() if key not in {"records", "driver_records"}} == {
         key: value for key, value in sdk.items() if key not in {"records", "driver_records"}
     }
+
+
+@pytest.mark.parametrize("cut", ["entry", "prepare", "combined", "fence", "within", "legacy_within", "legacy_tail"])
+def test_commit_uses_one_persistence_deadline_across_sql_work(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cut: str) -> None:
+    path = tmp_path / "deadline.sqlite"
+    clock = ManualClock()
+    with SQLiteStore.standalone(str(path), clock=clock) as raw_store:
+        raw_store.install_schema()
+        raw_store.configure_input_admission(allow_unsigned=True)
+        raw_store._rows("CREATE TABLE business_write (id integer PRIMARY KEY)")
+        store = wrap_fixture_store(raw_store)
+        create_fixture_session(store, "s", consumers=())
+        selected = runtime(path, [], ttl_ms=4000)
+        selected.clock = clock
+        selected.content_reader = fixture_content_reader(store, "s")
+        lease = store.acquire("s", owner="deadline", ttl_ms=4000)
+        assert lease is not None
+        scope = kernel._Scope(lease, selected, now_ms=store._now())
+        scope.poll(store)
+        deadline = scope.safety_deadline
+
+        class LegacyTx:
+            def __init__(self, tx):
+                self._tx = tx
+
+            def bind_lease_guard(self, guard: Callable[[], Lease]) -> None:
+                self._tx.bind_lease_guard(guard)
+
+            def content_writer(self, *, tenant_id: str, session_id: str) -> SessionContentWriter:
+                return self._tx.content_writer(tenant_id=tenant_id, session_id=session_id)
+
+            def __getattr__(self, name):
+                if name.startswith("_"):
+                    raise AttributeError(name)
+                return getattr(self._tx, name)
+
+        class LegacyStore:
+            @contextmanager
+            def atomic(self):
+                with store.atomic() as tx:
+                    yield LegacyTx(tx)
+
+            def __getattr__(self, name):
+                return getattr(store, name)
+
+        driver_store = cast(SessionStore, LegacyStore()) if cut.startswith("legacy_") else store
+        driver = kernel._Driver(driver_store, "s", selected, scope)
+        phases: list[str] = []
+
+        def hook(point, _record):
+            phases.append(point)
+            if point == "before_commit" and cut == "combined":
+                clock.advance(2000)
+
+        driver._hook = hook
+        baseline = store.read("s")
+        record = driver.record(
+            "usage_observed",
+            {
+                "meter_id": "host",
+                "observation": 1,
+                "mode": "cumulative",
+                "usage": {"elapsed_ms": 7},
+                "source": "host",
+            },
+        )
+        tables = ("sk_content", "sk_content_link", "sk_session_key")
+        sizes = {table: store._one(f"SELECT count(*) FROM {table}")[0] for table in tables}
+
+        def prepare(tx):
+            phases.append("prepare")
+            raw_store._rows("INSERT INTO business_write VALUES (1)")
+            if cut == "combined":
+                clock.advance(1000)
+                scope.poll(store)
+                assert scope.safety_deadline > deadline
+            for child in ("first", "second"):
+                writer = tx.content_writer(tenant_id=store.tenant_id, session_id=child)
+
+                def spec(content: SessionContentWriter) -> SessionSpec:
+                    actor, _ = content.service_principal("fixture/child")
+                    return SessionSpec(
+                        content.session_id,
+                        actor,
+                        content.put_json("/workspace").to_dict(),
+                        parent_session_id="s",
+                        parent_operation_id="child-tool",
+                        attributes={"seed": {"messages": [], "shared_state": {}}},
+                    )
+
+                writer.create_session(spec, consumers=())
+            if cut == "prepare":
+                clock.advance(3000)
+            return []
+
+        final_fence = SQLSessionTx._finalize_lease_fence
+        lock = raw_store._lock
+
+        def slow_fence(tx):
+            if tx._pending_lease_fence is not None and cut == "fence":
+                phases.append("fence")
+
+                def lock_after_delay(session_id):
+                    row = lock(session_id)
+                    clock.advance(3000)
+                    return row
+
+                with monkeypatch.context() as patch:
+                    patch.setattr(raw_store, "_lock", lock_after_delay)
+                    return final_fence(tx)
+            return final_fence(tx)
+
+        monkeypatch.setattr(SQLSessionTx, "_finalize_lease_fence", slow_fence)
+        if cut == "legacy_tail":
+            resolve_links = core_driver.resolve_record_content_links
+
+            def resolve_after_delay(*args):
+                links = resolve_links(*args)
+                assert not links
+                clock.advance(3000)
+                return links
+
+            monkeypatch.setattr(core_driver, "resolve_record_content_links", resolve_after_delay)
+
+        statements: list[str] = []
+        raw_store.connection.set_trace_callback(statements.append)
+        if cut == "entry":
+            clock.advance(3000)
+        if cut in {"within", "legacy_within"}:
+            driver.commit([record] if cut == "within" else [], prepare=prepare)
+            assert "COMMIT" in statements
+            assert raw_store._rows("SELECT id FROM business_write") == [(1,)]
+            assert set(store.list_sessions()) == {"s", "first", "second"}
+            assert phases == ["prepare", "before_commit", "after_commit"]
+            assert store.read("s").head_seq == baseline.head_seq + (cut == "within")
+            return
+
+        with pytest.raises(LeaseLost, match="session persistence reached the lease safety deadline"):
+            driver.commit([] if cut == "legacy_tail" else [record], prepare=prepare)
+
+        assert "COMMIT" not in statements
+        assert (
+            phases
+            == {
+                "entry": [],
+                "prepare": ["prepare"],
+                "combined": ["prepare", "before_commit"],
+                "fence": ["prepare", "before_commit", "fence"],
+                "legacy_tail": ["prepare", "before_commit"],
+            }[cut]
+        )
+        assert clock.monotonic() < scope.expires_deadline
+        assert raw_store._rows("SELECT id FROM business_write") == []
+        assert store.list_sessions() == ("s",)
+        assert store.read("s") == baseline
+        assert all(store._one(f"SELECT count(*) FROM {table}")[0] == size for table, size in sizes.items())
 
 
 @pytest.mark.parametrize("case", ["active", "cost_error", "cost_baseexception"])

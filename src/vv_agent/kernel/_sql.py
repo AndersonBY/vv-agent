@@ -2936,10 +2936,14 @@ class SQLSessionTx:
         self.transaction_id = store._transaction_id()
         self.batches: dict[tuple[str, str], ConsumerBatch] = {}
         self._lease_guard: Callable[[], Lease] | None = None
+        self._check_persistence_deadline: Callable[[], None] | None = None
         self._pending_lease_fence: tuple[str, Lease] | None = None
 
     def bind_lease_guard(self, guard: Callable[[], Lease]) -> None:
         self._lease_guard = guard
+
+    def _bind_persistence_deadline(self, check_deadline: Callable[[], None]) -> None:
+        self._check_persistence_deadline = check_deadline
 
     def _active(self) -> None:
         if self.store._transaction_id() != self.transaction_id:
@@ -2953,6 +2957,8 @@ class SQLSessionTx:
         session_id, lease = pending
         row = self.store._lock(session_id)
         self.store._check_lease(session_id, lease, row, self.store._now())
+        if self._check_persistence_deadline is not None:
+            self._check_persistence_deadline()
 
     def _commit(
         self,
