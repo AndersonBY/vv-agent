@@ -5,13 +5,18 @@ from types import SimpleNamespace
 
 import pytest
 
+from scripts.s1_fixture_values import create_fixture_session
+from tests.sim.assembly import SIM_HANDLER_VERSION
+from tests.sim.scenarios import Provider
+from tests.sim.world import SimWorld
 from vv_agent.kernel._postgres import PostgresStore as CorePostgresStore
 from vv_agent.kernel._postgres import RuntimeBinding
-from vv_agent.kernel._requirements import SessionRequirements
+from vv_agent.kernel._requirements import SessionRequirements, capability_supports
+from vv_agent.kernel._sql import UnsupportedFeatureLevel
 from vv_agent.kernel._store import WorkerSupports
-from vv_agent.session.postgres import PostgresStore
-from vv_agent.session.records import SessionSpec
+from vv_agent.session.records import InboxItem, SessionSpec
 
+from .conftest import open_store
 from .helpers import content_ref, item, principal, record
 
 
@@ -99,7 +104,8 @@ def configure(store, *, level: int, handler_version: str, capabilities: tuple[st
 def assert_skipped_but_claimable(store, session_id: str, *, visible: bool = True) -> None:
     assert store.acquire(session_id, owner="incompatible", ttl_ms=10_000) is None
     assert (session_id in {work.session_id for work in store.list_runnable()}) is visible
-    assert session_id not in {work.session_id for work in store.claim_runnable(owner="incompatible", ttl_ms=10_000)}
+    claimed = store.claim_runnable(owner="incompatible", ttl_ms=10_000)
+    assert session_id not in {entry.work.session_id for entry in claimed if entry.work.kind == "drive"}
     assert store._one(
         "SELECT deletion_state,lease_epoch,lease_owner,lease_until_ms FROM sk_session WHERE tenant_id=%s AND session_id=%s",
         (store.tenant_id, session_id),
@@ -135,6 +141,83 @@ def test_old_worker_skips_higher_level_and_upgraded_worker_claims(store) -> None
     lease = store.acquire("high", owner="upgraded", ttl_ms=10_000)
     assert lease is not None
     store.release(lease)
+
+
+def test_two_node_s1_rolling_upgrade_continues_admission_and_driving(database) -> None:
+    with SimWorld(database, seed=17) as world:
+        world.scenario = "accepted"
+        world.install_write_observer()
+        host = world.connection("host")
+        observer = world.connection("observer")
+        provider = Provider(world)
+
+        def assert_completed(session_id: str, input_id: str) -> None:
+            state, rows, _ = world.read_state(session_id)
+            terminals = [row.record for row in rows if row.record.kind == "turn_ended"]
+            assert [(result.turn_id, result.payload["status"]) for result in terminals] == [
+                (f"{session_id}/turn/{input_id}", "completed")
+            ]
+            assert state.active_turn_id is None
+
+        world.connection("node-a/v1").configure_reader(level=1)
+        world.connection("node-b/v1").configure_reader(level=1)
+        world.create()
+        assert world.drive(participant="node-a/v1", provider=provider)
+        assert world.read_state("s")[0].active_turn_id == "s/turn/initial"
+
+        runtime = world.runtime("higher-level", "node-a/v2")
+        capabilities = capability_supports(
+            tools=((runtime.registry.get_schema("effect"), runtime.registry.tool_metadata("effect")),),
+            models=(runtime.model_binding,),
+        )
+        requirements = SessionRequirements(2, SIM_HANDLER_VERSION, capabilities)
+        level_two_input = InboxItem("level-two", "user", {"content": "go"}, feature_level=2, requirements=requirements)
+
+        for node, survivor in (("node-a", "node-b/v1"), ("node-b", "node-a/v2")):
+            retired = f"{node}/v1"
+            world.connections.pop(retired).connection.close()
+            if retired_heartbeat := world.connections.pop(f"{retired}/heartbeat", None):
+                retired_heartbeat.connection.close()
+            world.create(f"while-upgrading-{node}")
+            assert world.drive(f"while-upgrading-{node}", participant=survivor)
+            assert_completed(f"while-upgrading-{node}", "initial")
+
+            upgraded = f"{node}/v2"
+            configure(world.connection(upgraded), level=2, handler_version=SIM_HANDLER_VERSION, capabilities=capabilities)
+            session_id = f"after-upgrading-{node}"
+            world.create(session_id)
+            assert world.drive(session_id, participant=upgraded)
+            assert_completed(session_id, "initial")
+            assert {row.record.feature_level for row in world.read_state(session_id)[1]} == {1}
+
+            with pytest.raises(UnsupportedFeatureLevel, match="write level 1"):
+                world.push(session_id, level_two_input)
+            assert observer.read_input(session_id, "level-two") is None
+            assert world.read_state("s")[0].active_turn_id == "s/turn/initial"
+
+        with pytest.raises(UnsupportedFeatureLevel, match="write level 1"):
+            create_fixture_session(host, "higher-level", consumers=(), feature_level=2, bootstrap=requirements)
+        assert "higher-level" not in observer.list_sessions()
+
+        with host.atomic():
+            host._rows("UPDATE sk_settings SET write_level=2 WHERE singleton=1")
+
+        provider.ready = True
+        world.push("s", provider.callback())
+        assert world.drive(participant="node-b/v2", provider=provider)
+        assert_completed("s", "initial")
+        assert sum(call[3] == "tool" for call in world.calls) == 1
+
+        create_fixture_session(host, "higher-level", consumers=(), feature_level=2, bootstrap=requirements)
+        world.push("higher-level", level_two_input)
+        assert world.drive("higher-level", participant="node-a/v2")
+        assert_completed("higher-level", "level-two")
+        records = {row.record.kind: row.record for row in world.read_state("higher-level")[1]}
+        assert records["session_created"].feature_level == 2
+        assert records["input_applied"].payload["input"]["feature_level"] == 2
+        assert records["turn_started"].payload["requirements"] == requirements.to_dict()
+        world.check(quiescent=True, every_prefix=True)
+        world.check_accounting()
 
 
 def test_handler_version_mismatch_skips_session(store) -> None:
@@ -231,10 +314,13 @@ def test_runnable_candidates_are_unlocked_and_claim_lock_is_worker_only(binding:
     store._worker_supports = WorkerSupports()
     store._reader_level = 2
     store._tenant_id = "default"
+    store.configure_input_admission(allow_unsigned=True)
     queries: list[str] = []
     store._rows = lambda query, params=(): queries.append(query) or []  # type: ignore[method-assign]
 
-    assert store._runnable_work(limit=1, after=None, apply_worker_filter=True) == ()
+    assert (
+        store._runnable_work(limit=1, after=None, apply_worker_filter=True, work_kinds=("drive",), projection_consumers=()) == ()
+    )
     assert store._runnable_lock_clause() == expected
     assert " FOR NO KEY UPDATE OF s SKIP LOCKED" not in queries[0]
     assert store.lock_clause == " FOR NO KEY UPDATE"
@@ -285,7 +371,7 @@ def test_postgres_worker_claim_skips_locked_session(store, database: str) -> Non
             "SELECT session_id FROM sk_session WHERE tenant_id=%s AND session_id='a-locked' FOR UPDATE",
             (store.tenant_id,),
         )
-        with PostgresStore.standalone(database) as scanner:
+        with open_store(database) as scanner:
             scanner._runtime_binding = RuntimeBinding("worker")
             scanner.configure_worker(level=1, handler_versions=("1",), capabilities=())
             claimed = scanner.claim_runnable(owner="scanner", ttl_ms=10_000, limit=1)
@@ -294,7 +380,7 @@ def test_postgres_worker_claim_skips_locked_session(store, database: str) -> Non
         ("drive", "b-available")
     ]
     assert claimed[0].lease is not None
-    with PostgresStore.standalone(database) as releaser:
+    with open_store(database) as releaser:
         releaser._runtime_binding = RuntimeBinding("worker")
         assert releaser.release(claimed[0].lease)
 
@@ -305,7 +391,7 @@ def test_parallel_postgres_workers_never_hold_the_same_lease(store, database: st
     barrier = Barrier(2)
 
     def claim(owner: str) -> str | None:
-        with PostgresStore.standalone(database) as worker:
+        with open_store(database) as worker:
             worker.configure_worker(level=1, handler_versions=("1",), capabilities=())
             barrier.wait(timeout=10)
             lease = worker.acquire("shared", owner=owner, ttl_ms=10_000)
