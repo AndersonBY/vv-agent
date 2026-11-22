@@ -11,11 +11,12 @@ from vv_agent import Agent, InteractionAnswer, InteractionReplyTarget
 from vv_agent.kernel._canonical_json import canonical_json_sha256
 from vv_agent.session.interactions import reply_content
 from vv_agent.session.kernel import drive
-from vv_agent.session.records import InboxItem
+from vv_agent.session.projection import hydrate_record_payload, hydration_for_session_store
+from vv_agent.tools.registry import RegistryToolExecutor
 from vv_agent.types import LLMResponse, ToolCall
 
 from .conftest import open_store
-from .helpers import content_ref, item
+from .helpers import item
 
 AUTHOR = runpy.run_path(str(Path(__file__).parents[2] / "scripts/app_server_interaction_fixtures.py"))
 InteractionServer, InteractionHost, target_of = (AUTHOR[k] for k in ("InteractionServer", "InteractionHost", "target_of"))
@@ -383,13 +384,16 @@ def test_oversize_new_form_never_opens_a_wait(store, form):
     server = InteractionServer(store, InteractionHost(form))
     try:
         server.start()
-        state, rows, _ = store.read_state(THREAD)
+        bound_store = server.server.kernel.store
+        state, rows, _ = bound_store.read_state(THREAD)
+        hydration = hydration_for_session_store(bound_store, THREAD)
         assert not state.waits and server.form() is None
         assert not any(r.record.kind == "op_parked" for r in rows)
         errors = [
-            r.record.payload["result"]
+            result
             for r in rows
-            if r.record.kind == "op_completed" and r.record.payload["result"].get("error_code") == "interaction_form_too_large"
+            if r.record.kind == "op_completed"
+            if (result := hydrate_record_payload(r, hydration)["result"]).get("error_code") == "interaction_form_too_large"
         ]
         assert errors and all(e["directive"] == "continue" and e["status_code"] == "ERROR" for e in errors)
         assert all(json.loads(e["content"])["error_code"] == "interaction_form_too_large" for e in errors)
@@ -421,90 +425,69 @@ def test_child_message_cannot_blindly_consume_a_user_wait(store):
         server.close()
 
 
-def test_historical_oversize_form_remains_parked_and_reports_explicit_error(store, tmp_path):
-    from dataclasses import replace
+def test_historical_oversize_form_remains_parked_and_reports_explicit_error(store, database, monkeypatch):
+    from vv_agent.kernel import _interactions
 
-    from vv_agent.session.records import SessionSpec
+    prompt = "h" * 16385
 
-    first = InteractionServer(store)
+    class PriorInteractionHost(InteractionHost):
+        def registry(self):
+            registry = super().registry()
+            executor = registry.get_executor("ask_user")
+            assert isinstance(executor, RegistryToolExecutor)
+            handle = executor.handler
+
+            def old_ask_user(context, arguments):
+                result = handle(context, arguments)
+                metadata = result.metadata | {"question": prompt}
+                return replace(result, metadata=metadata, content=json.dumps(metadata))
+
+            executor.handler = old_ask_user
+            return registry
+
+    first = InteractionServer(store, PriorInteractionHost())
     try:
-        first.start()
-        original = store.read_state(THREAD)[1]
-        created = original[0].record.payload
+        # Seed a genuinely retained S1 wait written before the public form size check.
+        with monkeypatch.context() as historical:
+            historical.setattr(_interactions, "check_form", lambda form: None)
+            first.start()
+            assert first.form()["prompt"] == prompt
         original_calls = first.host.calls
-        with open_store(tmp_path / "historical.sqlite") as historical:
-            historical.install_schema()
-            with historical.atomic() as tx:
-                tx.create(
-                    SessionSpec(THREAD, created["principal"], created["workspace"], attributes=created["attributes"]),
-                    consumers=("events", "app_server", "traces"),
-                )
-                inputs = [InboxItem(**row.record.payload["input"]) for row in original if row.record.kind == "input_applied"]
-                for item in inputs:
-                    tx.push(THREAD, item)
-            lease = historical.acquire(THREAD, owner="old-writer", ttl_ms=60000)
-            assert lease is not None
-            old_records = []
-            for row in original[1:]:
-                rec = row.record
-                if rec.kind == "op_parked" and rec.payload["handle"]["kind"] == "user":
-                    payload = rec.payload
-                    payload["handle"]["question"] = content_ref("h" * 16385)
-                    payload["interaction_result"] = content_ref("h" * 16385)
-                    rec = replace(rec, payload=payload)
-                old_records.append(rec)
-            with historical.atomic() as tx:
-                tx.append(
-                    THREAD,
-                    lease=lease,
-                    expected_seq=1,
-                    commit_id="historical-import",
-                    records=tuple(old_records),
-                    consume_input_ids=tuple(item.input_id for item in inputs),
-                )
-            historical.release(lease)
-            old = historical.read_state(THREAD)
-            rebuilt = InteractionServer(historical)
-            try:
-                for method in ("thread/status", "thread/read", "thread/resume"):
-                    params = {"threadId": THREAD}
-                    if method == "thread/resume":
-                        params["subscribe"] = False
-                    error(rebuilt.rpc(method, params), "interaction_form_too_large")
-                assert historical.read_state(THREAD)[1] == old[1]
-                assert historical.read_state(THREAD)[0].waits == old[0].waits
-                assert rebuilt.host.calls == 0 and first.host.calls == original_calls
-            finally:
-                rebuilt.close()
     finally:
         first.close()
+    old = store.read_state(THREAD)
+    assert old[0].phase == "parked" and old[0].waits
+    with open_store(database) as reopened:
+        rebuilt = InteractionServer(reopened)
+        try:
+            for method in ("thread/status", "thread/read", "thread/resume"):
+                params = {"threadId": THREAD}
+                if method == "thread/resume":
+                    params["subscribe"] = False
+                error(rebuilt.rpc(method, params), "interaction_form_too_large")
+            assert reopened.read_state(THREAD)[1] == old[1]
+            assert reopened.read_state(THREAD)[0].waits == old[0].waits
+            assert rebuilt.host.calls == 0 and first.host.calls == original_calls
+        finally:
+            rebuilt.close()
 
 
 @pytest.mark.parametrize("hold_child_lease", [False, True])
-def test_child_cancel_from_wire_driven_host_tool_rejects_its_late_answer(store, monkeypatch, hold_child_lease):
+def test_child_cancel_from_wire_driven_host_tool_rejects_its_late_answer(store, hold_child_lease):
     from threading import Event
     from time import monotonic
 
     from vv_agent import function_tool
 
     child_ids, servers = [], []
-    child_exiting, release_child = Event(), Event()
-    release = store.release
-
-    def held_release(lease):
-        if lease.session_id != THREAD and not child_exiting.is_set():
-            child_exiting.set()
-            assert release_child.wait(10)
-        return release(lease)
-
-    if hold_child_lease:
-        monkeypatch.setattr(store, "release", held_release)
+    child_lease = None
 
     @function_tool
     def stop_child() -> str:
         server = servers[0]
-        runtime = server.server.store.runtimes[THREAD]
-        runtime.child_tasks(store, THREAD).handle(child_ids[0]).cancel()
+        kernel = server.server.kernel
+        runtime = kernel._projection_runtime_view(THREAD)
+        runtime.child_tasks(kernel.store, THREAD).handle(child_ids[0]).cancel()
         return "cancel requested"
 
     child = Agent("child", "Ask.", model="child")
@@ -523,6 +506,7 @@ def test_child_cancel_from_wire_driven_host_tool_rejects_its_late_answer(store, 
         return LLMResponse("parent done")
 
     server = InteractionServer(store, InteractionHost(agent=parent, model=model))
+    bound_store = server.server.kernel.store
     servers.append(server)
     try:
         server.start()
@@ -535,26 +519,35 @@ def test_child_cancel_from_wire_driven_host_tool_rejects_its_late_answer(store, 
         root_form = next(wait["interaction"] for sid, _, wait in waits if sid == THREAD)
         assert server.form() == root_form
         if hold_child_lease:
-            assert child_exiting.wait(10)
+            child_lease = bound_store.acquire(child_ids[0], owner="other-worker", ttl_ms=30000)
+            assert child_lease is not None
         assert "result" in server.answer(root_form, text("yes"))
-        release_child.set()
+        if child_lease is not None:
+            assert not bound_store.read_state(child_ids[0])[0].turns[child_form["turnId"]].ended
+            assert any(pending.item.payload == {"action": "cancel"} for pending in bound_store.peek_inbox(child_ids[0]))
+            assert bound_store.release(child_lease)
+            child_lease = None
+            server.server.kernel._wake_session(child_ids[0])
         deadline = monotonic() + 10
         while not store.read_state(child_ids[0])[0].turns[child_form["turnId"]].ended and monotonic() < deadline:
             Event().wait(0.01)
         state, rows, _ = store.read_state(child_ids[0])
-        failures = [
-            r.record.payload["result"]["content"]
-            for r in store.read_state(THREAD)[1]
-            if r.record.kind == "op_completed" and r.record.payload["result"].get("error_code")
+        hydration = hydration_for_session_store(bound_store, THREAD)
+        completed = [
+            hydrate_record_payload(row, hydration)["result"]
+            for row in bound_store.read_state(THREAD)[1]
+            if row.record.kind == "op_completed"
         ]
-        assert not failures, "\n".join(failures)
+        cancelled_child = next(result for result in completed if result.get("tool_call_id") == "cancel-child")
+        assert cancelled_child["status_code"] == "SUCCESS" and cancelled_child["content"] == "cancel requested"
         assert state.turns[child_form["turnId"]].ended
         assert any(r.record.kind == "turn_ended" and r.record.payload["status"] == "cancelled" for r in rows)
         calls = server.host.calls
         error(server.answer(child_form, text(), action_id="after-child-cancel"), "stale_interaction")
         assert server.host.calls == calls
     finally:
-        release_child.set()
+        if child_lease is not None:
+            bound_store.release(child_lease)
         server.close()
 
 
