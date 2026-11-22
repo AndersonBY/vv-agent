@@ -2725,6 +2725,18 @@ class SessionDriver:
                     registration=armed,
                     ceiling=ceiling,
                 )
+                token = armed.config.cancellation_token
+                if token is not None and token.cancelled:
+                    turn_id = f"{sid}/turn/{item.input_id}"
+                    self._push_in_transaction(
+                        tx,
+                        sid,
+                        InboxItem(f"cancel/{turn_id}", "control", {"action": "cancel"}, turn_id),
+                        actor=None,
+                        actor_subject_id="run-handle",
+                        registration=armed,
+                        ceiling=ceiling,
+                    )
             except BaseException:
                 if self._runtimes.get(sid) is armed:
                     if previous_registration is None:

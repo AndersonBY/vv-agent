@@ -171,6 +171,7 @@ class TestCancellationInRuntime:
 
 def test_runner_emits_one_cancelled_terminal_event(tmp_path) -> None:
     from vv_agent import Agent, RunConfig, Runner
+    from vv_agent.budget import RunBudgetLimits
     from vv_agent.llm.scripted import ScriptedLLM
     from vv_agent.runtime.cancellation import CancellationToken
     from vv_agent.types import LLMResponse
@@ -190,18 +191,24 @@ def test_runner_emits_one_cancelled_terminal_event(tmp_path) -> None:
         model_id="test-model",
         endpoint_options=[EndpointOption(endpoint=endpoint, model_id="test-model")],
     )
-    result = Runner.run_sync(
+    with Runner.start(
         Agent(name="cancelled", instructions="Stop.", model="test-model"),
         "stop",
         run_config=RunConfig(
             workspace=tmp_path,
             cancellation_token=token,
+            budget_limits=RunBudgetLimits(max_total_tokens=0, max_wall_time_ms=0),
             model_provider=FixedModelProvider(llm, resolved),
         ),
-    )
+    ) as handle:
+        result = handle.result()
+        state, _, _ = handle.kernel.store.read_state(handle.session_id)
+        cancel = state.applied_inputs[f"cancel/{handle.run_id}"]
+        assert cancel.payload["disposition"] == "applied"
 
     terminal_types = [event.type for event in result.events if event.type in {"run_completed", "run_failed", "run_cancelled"}]
     assert terminal_types == ["run_cancelled"]
     assert result.error_code == "cancel_requested"
     assert result.raw_result.error is not None
     assert result.raw_result.error["message"] == "cancel_requested"
+    assert not result.token_usage.model_calls
