@@ -223,6 +223,7 @@ def test_sdk_constructor_defaults_to_real_aes_and_reexports_core_identities(tmp_
     provider = LocalKeyProvider(MASTER_KEY, state_path=tmp_path / "sdk-keys.sqlite3")
     with SQLiteStore.standalone(str(tmp_path / "sdk-content.sqlite")) as store:
         store.install_schema()
+        store.configure_input_admission(allow_unsigned=True)
         with store.atomic() as tx:
             writer = sdk_runtime.SessionContentWriter(tx=tx, tenant_id=TENANT, session_id=SESSION, key_provider=provider)
             writer.create_session(
@@ -325,6 +326,7 @@ def fold_factory():
 
 with SQLiteStore.standalone(sys.argv[3], fold_factory=fold_factory, clock=HostClock()) as raw:
     raw.install_schema()
+    raw.configure_input_admission(allow_unsigned=True)
     store = wrap_session_content_store(raw, binding)
     workspace = []
     with store.atomic() as tx:

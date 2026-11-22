@@ -47,6 +47,7 @@ def _producer(
     provider: LocalKeyProvider,
 ) -> tuple[SessionDriver, object, ControlledProvider, ScriptedModelProvider]:
     store.install_schema()
+    store.configure_input_admission(allow_unsigned=True)
     sessions = SessionDriver(store=store, content_key_provider=provider)
     sessions.create(SESSION_ID, "/workspace", {"seed": {"messages": [], "shared_state": {}}})
     push_fixture_input(store, SESSION_ID, InboxItem("input", "user", {"content": "go"}))
