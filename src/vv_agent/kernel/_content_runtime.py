@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import re
-import time
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, replace
@@ -323,17 +322,7 @@ def _verify_content_binding(store: object, binding: ContentRuntimeBinding | None
 
 def _provision_sqlite_object_content(store: SQLiteStore, *, key_provider: KeyProvider, objects: _SQLiteObjectContent) -> None:
     """Pin the object configuration on an installed, quiesced primary."""
-
-    with store._connection_lock:
-        if store._transaction_in_progress():
-            raise ContentUnavailable("external content provisioning requires an idle SQLite connection")
-        with store._transaction():
-            installation = store._object_installation()
-            if installation is None or installation[1] is not None:
-                raise ContentUnavailable("external content requires an installed SQLite store with no prior binding")
-            database_id, _ = installation
-            digest = objects.verify_installation(database_id, key_provider)
-            store._rows("UPDATE sk_settings SET external_content_binding=%s WHERE singleton=1", (digest,))
+    store._provision_object_content(lambda database_id: objects.verify_installation(database_id, key_provider))
 
 
 def bind_content_runtime(
@@ -637,10 +626,10 @@ class SessionContentWriter:
                 raise ContentRuntimeUnavailable("external content requires a SQLite write transaction")
             sqlite = tx.store
             sqlite._require_content_write_fence(tx)
-            deadline = time.monotonic() + 5
+            deadline = sqlite.clock.monotonic() + 5
 
             def check_deadline() -> None:
-                if time.monotonic() >= deadline:
+                if sqlite.clock.monotonic() >= deadline:
                     raise KeyUnavailable("external content persistence budget expired")
 
             tx._bind_external_deadline(check_deadline)

@@ -36,6 +36,7 @@ from vv_agent.session.deletion import SessionDeletionStore
 from vv_agent.session.s3_content import S3CiphertextStore
 from vv_agent.session.sqlite import SQLiteContentStore, SQLiteStore
 from vv_agent.session.surfaces import SessionDriver
+from vv_agent.session.timing import SystemClock
 
 from .test_s1_deletion_recovery_acceptance import Signer
 from .test_s3_reservation_adapter import _Client
@@ -284,6 +285,46 @@ def test_existing_object_key_outage_preserves_unapplied_input(
             assert not driver.push("objects", item).replayed
             assert driver.push("objects", item).replayed
             assert raw._rows("SELECT * FROM sk_session_key") == before["sk_session_key"]
+
+
+def test_external_create_rechecks_injected_deadline_after_key_allocation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    class Clock(SystemClock):
+        elapsed = 0.0
+
+        def monotonic(self) -> float:
+            return self.elapsed
+
+    clock = Clock()
+    with (
+        SQLiteStore.standalone(str(tmp_path / "primary.sqlite"), clock=clock) as raw,
+        closing(LocalKeyProvider(b"x" * 32, state_path=tmp_path / "keys.sqlite")) as provider,
+    ):
+        raw.configure_input_admission(allow_unsigned=True)
+        journal = _provision_journal(raw, tmp_path / "allocation.sqlite")
+        client = S3Fixture(journal)
+        objects = S3CiphertextStore(client, bucket="fixture", journal=journal)
+        external = _SQLiteObjectContent(journal, objects, provider._provision_exact_key_lifecycle())
+        _provision_sqlite_object_content(raw, key_provider=provider, objects=external)
+        bind_content_runtime(raw, key_provider=provider, cipher=AESGCMCipher(), _object_content=external)
+        allocate = provider._allocate_exact_key
+
+        def allocate_then_expire(intent):
+            wrapped = allocate(intent)
+            clock.elapsed = 5.0
+            return wrapped
+
+        monkeypatch.setattr(provider, "_allocate_exact_key", allocate_then_expire)
+        with (
+            closing(SessionDriver(store=raw)) as driver,
+            pytest.raises(KeyUnavailable, match="external content persistence budget expired"),
+        ):
+            driver.create("objects", "/external")
+
+        assert not client.calls
+        assert raw._rows("SELECT session_id FROM sk_session") == []
+        assert raw._rows("SELECT key_id FROM sk_session_key") == []
+        [intent] = journal.scoped_key_intents("default", ("objects",))
+        assert intent.state == "allocating"
 
 
 @pytest.mark.parametrize("operation", ["forget", "purge"])

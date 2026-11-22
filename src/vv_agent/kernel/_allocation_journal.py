@@ -258,6 +258,11 @@ class SQLiteAllocationJournal:
         with self._transaction():
             return self._identity
 
+    def _pin_until_ms(self, ttl_ms: int) -> int:
+        with self._transaction() as connection:
+            [(deadline,)] = connection.execute(f"SELECT {_NOW_MS} + ?", (ttl_ms,)).fetchall()
+            return deadline
+
     def get_anonymous(self, allocation_id: bytes) -> Allocation | None:
         row = self.get(allocation_id)
         return row if row is not None and row.owner is None else None

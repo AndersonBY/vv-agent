@@ -11,7 +11,7 @@ from hashlib import sha256
 from threading import RLock
 from typing import Any
 
-from vv_agent.kernel._content import KeyProvider
+from vv_agent.kernel._content import ContentUnavailable, KeyProvider
 from vv_agent.kernel._content_sql import CoreSQLContentStore
 from vv_agent.kernel._content_store import ContentCipher
 from vv_agent.kernel._lease_scope import Clock
@@ -424,6 +424,19 @@ class SQLiteStore(SQLStore):
             if row is None:
                 raise ValueError("SQLite S1 installation settings are missing")
             return row
+
+    def _provision_object_content(self, verify_installation: Callable[[str], str]) -> None:
+        """Pin the verified object configuration on an installed, quiesced primary."""
+        with self._connection_lock:
+            if self._transaction_in_progress():
+                raise ContentUnavailable("external content provisioning requires an idle SQLite connection")
+            with self._transaction():
+                installation = self._object_installation()
+                if installation is None or installation[1] is not None:
+                    raise ContentUnavailable("external content requires an installed SQLite store with no prior binding")
+                database_id, _ = installation
+                digest = verify_installation(database_id)
+                self._rows("UPDATE sk_settings SET external_content_binding=%s WHERE singleton=1", (digest,))
 
     def install_schema(self) -> None:
         with self._connection_lock:

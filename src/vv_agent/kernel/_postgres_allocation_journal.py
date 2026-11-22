@@ -21,7 +21,7 @@ from ._content import (
 from ._postgres import CLOCK, _query_rows
 
 if TYPE_CHECKING:
-    from psycopg import Connection, sql
+    from psycopg import Connection
 
 _SCHEMA = "vv_allocation_journal"
 _TABLE = f"{_SCHEMA}.allocation"

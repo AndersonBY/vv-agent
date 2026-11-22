@@ -236,11 +236,10 @@ def check_kernel_boundaries(root: Path) -> list[str]:
     constructors.
     No scope/control-flow inference, reflection, re-export tracing, unlisted
     API effect inference or arbitrary execution proof. This is a maintenance
-    gate, not a sandbox. Only the two concrete storage adapters may open
-    connections/create synchronous RLocks; PostgreSQL driver imports must be
-    function-local or type-only. Raw connection, cursor and SQL execution
-    names are limited to the exact storage implementations. Other core
-    modules retain the pure boundary.
+    gate, not a sandbox. Only concrete storage adapters may open connections
+    and use their declared filesystem or lock calls. PostgreSQL driver imports
+    must be function-local or type-only. Raw connection, cursor and SQL
+    execution names are limited to the exact storage implementations.
     """
     root = root.resolve()
     core = "vv_agent.kernel"
@@ -292,7 +291,12 @@ def check_kernel_boundaries(root: Path) -> list[str]:
         "psycopg.sql.Literal",
         "psycopg.sql.SQL",
     }
+    postgres_adapters = {
+        "src/vv_agent/kernel/_postgres.py",
+        "src/vv_agent/kernel/_postgres_allocation_journal.py",
+    }
     storage_calls = {
+        "src/vv_agent/kernel/_allocation_journal.py": {"os.close", "os.geteuid", "os.open", "sqlite3.connect"},
         "src/vv_agent/kernel/_sqlite.py": {"sqlite3.connect", "threading.RLock"},
         "src/vv_agent/kernel/_postgres.py": {
             "threading.RLock",
@@ -300,12 +304,9 @@ def check_kernel_boundaries(root: Path) -> list[str]:
             "psycopg.conninfo.make_conninfo",
             "psycopg.conninfo.conninfo_to_dict",
         },
+        "src/vv_agent/kernel/_postgres_allocation_journal.py": {"psycopg.connect"},
     }
-    storage_owners = {
-        "src/vv_agent/kernel/_sql.py",
-        "src/vv_agent/kernel/_sqlite.py",
-        "src/vv_agent/kernel/_postgres.py",
-    }
+    storage_owners = {*storage_calls, "src/vv_agent/kernel/_sql.py"}
     storage_api_names = {
         "connection",
         "_conn",
@@ -355,7 +356,7 @@ def check_kernel_boundaries(root: Path) -> list[str]:
             if target == core or target.startswith(core + "."):
                 return
             if (
-                path == "src/vv_agent/kernel/_postgres.py"
+                path in postgres_adapters
                 and target in postgres_imports
                 and (
                     in_function(node)

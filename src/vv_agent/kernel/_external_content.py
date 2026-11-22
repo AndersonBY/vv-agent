@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import secrets
-import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from hashlib import sha256
@@ -25,6 +24,7 @@ from ._content import (
 )
 
 _AES_GCM_TAG_BYTES = 16
+_ALLOCATION_PIN_MS = 5_000
 
 
 class _ObjectStore(Protocol):
@@ -184,9 +184,8 @@ class _SQLiteObjectContent:
             raise ContentBindingMismatch("external content provider returned a different exact key")
         return wrapped
 
-    @staticmethod
-    def pin() -> int:
-        return time.time_ns() // 1_000_000 + 5_000
+    def pin(self) -> int:
+        return self.journal._pin_until_ms(_ALLOCATION_PIN_MS)
 
     def put(
         self,
@@ -204,7 +203,9 @@ class _SQLiteObjectContent:
         check_fence()
         key = self._key(tenant_id, session_id, key_id).intent
         owner = self._owner(key, content_id)
-        return self.objects.put(owner, ciphertext, pin_until_ms=self.pin(), check_fence=check_fence)
+        pin_until_ms = self.pin()
+        check_fence()
+        return self.objects.put(owner, ciphertext, pin_until_ms=pin_until_ms, check_fence=check_fence)
 
     def get(self, tenant_id: str, session_id: str, content_id: str, key_id: str, locator: bytes, *, size: int) -> bytes:
         key = self._key(tenant_id, session_id, key_id).intent

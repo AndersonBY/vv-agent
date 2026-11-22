@@ -128,9 +128,11 @@ reviewers still own those judgments.
 ### Kernel storage boundary
 
 Raw connection, cursor and SQL execution APIs belong only in
-`src/vv_agent/kernel/_sql.py`, `src/vv_agent/kernel/_sqlite.py`, and
-`src/vv_agent/kernel/_postgres.py`. Other kernel code uses `SessionStore` and
-`SessionTx` methods such as `append`, `ack`, and lease operations.
+`src/vv_agent/kernel/_sql.py`, `src/vv_agent/kernel/_sqlite.py`,
+`src/vv_agent/kernel/_postgres.py`, and the independent allocation journal adapters
+`src/vv_agent/kernel/_allocation_journal.py` and
+`src/vv_agent/kernel/_postgres_allocation_journal.py`. Other kernel code uses
+`SessionStore` and `SessionTx` methods such as `append`, `ack`, and lease operations.
 `scripts/check_repository_contracts.py` enforces this source boundary.
 
 The check catches direct calls and simple captured aliases to storage APIs.

@@ -50,7 +50,9 @@ def test_postgres_sql_composition_constructors_are_allowed(tmp_path):
     assert check_kernel_boundaries(tmp_path) == []
 
 
-@pytest.mark.parametrize("filename", ["_sql.py", "_sqlite.py", "_postgres.py"])
+@pytest.mark.parametrize(
+    "filename", ["_sql.py", "_sqlite.py", "_postgres.py", "_allocation_journal.py", "_postgres_allocation_journal.py"]
+)
 def test_only_the_exact_storage_implementations_may_use_low_level_storage_apis(tmp_path, filename):
     source(
         tmp_path,
@@ -93,7 +95,9 @@ def test_captured_cursor_acquisition_alias_is_forbidden_outside_storage(tmp_path
     assert check_kernel_boundaries(tmp_path) == ["src/vv_agent/kernel/policy.py:3: forbidden kernel storage API: driver.cursor"]
 
 
-@pytest.mark.parametrize("filename", ["nested/_sqlite.py", "storage/_sql.py", "driver/_postgres.py"])
+@pytest.mark.parametrize(
+    "filename", ["nested/_sqlite.py", "storage/_sql.py", "driver/_postgres.py", "storage/_allocation_journal.py"]
+)
 def test_storage_allowlist_does_not_apply_to_nested_or_similarly_named_modules(tmp_path, filename):
     source(tmp_path, "def drive(driver):\n    driver.execute('UPDATE sk_session')\n", filename)
     assert check_kernel_boundaries(tmp_path) == [

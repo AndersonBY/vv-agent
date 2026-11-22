@@ -233,6 +233,17 @@ def test_repository_gate_cli_enforces_kernel_rules(tmp_path):
             "def connect(dsn):\n    import psycopg\n    from threading import RLock\n"
             "    from psycopg.conninfo import make_conninfo\n    return psycopg.connect(make_conninfo(dsn)), RLock()\n",
         ),
+        (
+            "_allocation_journal.py",
+            "import os\nimport sqlite3\ndef connect(path):\n"
+            "    os.close(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))\n"
+            "    return sqlite3.connect(path), os.geteuid()\n",
+        ),
+        (
+            "_postgres_allocation_journal.py",
+            "from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    from psycopg import Connection\n"
+            "def connect(dsn):\n    import psycopg\n    return psycopg.connect(dsn)\n",
+        ),
     ],
 )
 def test_exact_storage_owners_allow_only_their_connection_and_latch_calls(tmp_path, filename, text):
@@ -240,7 +251,7 @@ def test_exact_storage_owners_allow_only_their_connection_and_latch_calls(tmp_pa
     assert check_kernel_boundaries(tmp_path) == []
 
 
-@pytest.mark.parametrize("filename", ["_sqlite.py", "_postgres.py"])
+@pytest.mark.parametrize("filename", ["_sqlite.py", "_postgres.py", "_allocation_journal.py", "_postgres_allocation_journal.py"])
 @pytest.mark.parametrize(
     "text",
     [
@@ -259,9 +270,15 @@ def test_storage_exception_does_not_admit_threads_clocks_network_eager_io_or_sdk
 
 
 def test_postgres_driver_permission_does_not_extend_to_sqlite_or_nested_names(tmp_path):
-    for name in ("_sqlite.py", "nested/_postgres.py"):
+    for name in ("_sqlite.py", "nested/_postgres.py", "_allocation_journal.py", "nested/_postgres_allocation_journal.py"):
         source(tmp_path, "def connect():\n    import psycopg\n    return psycopg.connect('')\n", name)
-    assert len(check_kernel_boundaries(tmp_path)) == 4
+    assert len(check_kernel_boundaries(tmp_path)) == 8
+
+
+@pytest.mark.parametrize("filename", ["_sqlite.py", "_postgres_allocation_journal.py", "nested/_allocation_journal.py"])
+def test_exclusive_sidecar_file_provisioning_is_limited_to_the_sqlite_journal(tmp_path, filename):
+    source(tmp_path, "import os\ndef connect(path):\n    os.close(os.open(path, os.O_CREAT | os.O_EXCL))\n", filename)
+    assert len(check_kernel_boundaries(tmp_path)) == 2
 
 
 @pytest.mark.parametrize(
