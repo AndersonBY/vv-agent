@@ -1,0 +1,280 @@
+"""SQLite sidecar for reservations and exact external content ownership."""
+
+from __future__ import annotations
+
+import json
+import os
+import secrets
+import sqlite3
+import stat
+from collections.abc import Iterator
+from contextlib import closing, contextmanager
+from dataclasses import astuple, dataclass
+from pathlib import Path
+from typing import Literal
+
+from ._content import ContentCleanupUnavailable, ContentUnavailable
+
+_VERSION = 1
+_OWNER_COLUMNS = """
+    tenant_id, session_id, content_id, admission_session_id, admission_id, provider_instance_id, key_id
+"""
+_ALLOCATION_COLUMNS = f"allocation_id,state,pin_until_ms,reservation_etag,{_OWNER_COLUMNS}"
+_NOW_MS = "(CAST(strftime('%s','now') AS INTEGER)*1000 + CAST(substr(strftime('%f','now'),4) AS INTEGER))"
+_SCHEMA = (
+    """CREATE TABLE journal_identity (
+        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+        journal_id TEXT NOT NULL,
+        database_id TEXT NOT NULL,
+        namespace TEXT NOT NULL
+    ) STRICT""",
+    """CREATE TABLE allocation (
+        allocation_id BLOB PRIMARY KEY NOT NULL CHECK (length(allocation_id) = 32),
+        state TEXT NOT NULL CHECK (state IN ('unbound','bound','reaping')),
+        pin_until_ms INTEGER NOT NULL CHECK (pin_until_ms > 0),
+        tenant_id TEXT CHECK (length(tenant_id) > 0),
+        session_id TEXT CHECK (length(session_id) > 0),
+        content_id TEXT CHECK (length(content_id) > 0),
+        admission_session_id TEXT CHECK (length(admission_session_id) > 0),
+        admission_id TEXT CHECK (length(admission_id) > 0),
+        provider_instance_id TEXT CHECK (length(provider_instance_id) > 0),
+        key_id TEXT CHECK (length(key_id) > 0),
+        reservation_etag TEXT CHECK (length(reservation_etag) > 0),
+        CHECK (
+            (state IN ('unbound','reaping') AND tenant_id IS NULL AND session_id IS NULL
+             AND content_id IS NULL AND admission_session_id IS NULL AND admission_id IS NULL
+             AND provider_instance_id IS NULL AND key_id IS NULL AND reservation_etag IS NULL)
+            OR
+            (state IN ('bound','reaping') AND tenant_id IS NOT NULL AND session_id IS NOT NULL
+             AND content_id IS NOT NULL AND admission_session_id IS NOT NULL AND admission_id IS NOT NULL
+             AND provider_instance_id IS NOT NULL AND key_id IS NOT NULL AND reservation_etag IS NOT NULL)
+        )
+    ) STRICT""",
+    "CREATE INDEX allocation_expiry ON allocation(pin_until_ms, allocation_id) WHERE tenant_id IS NULL",
+    "CREATE INDEX allocation_owner ON allocation(tenant_id, session_id)",
+    "CREATE INDEX allocation_admission ON allocation(tenant_id, admission_session_id)",
+)
+_EXPECTED_SCHEMA = frozenset(_SCHEMA)
+
+
+@dataclass(frozen=True, slots=True)
+class JournalIdentity:
+    journal_id: str
+    database_id: str
+    namespace: str
+
+    def __post_init__(self) -> None:
+        _require_text(*astuple(self))
+
+
+@dataclass(frozen=True, slots=True)
+class AllocationOwner:
+    tenant_id: str
+    session_id: str
+    content_id: str
+    admission_session_id: str
+    admission_id: str
+    provider_instance_id: str
+    key_id: str
+
+    def __post_init__(self) -> None:
+        _require_text(*astuple(self))
+
+
+@dataclass(frozen=True, slots=True)
+class Allocation:
+    journal_id: str
+    allocation_id: bytes
+    state: Literal["unbound", "bound", "reaping"]
+    pin_until_ms: int
+    owner: AllocationOwner | None = None
+    reservation_etag: str | None = None
+
+
+def _require_text(*values: str) -> None:
+    if any(not isinstance(value, str) or not value for value in values):
+        raise ValueError("journal identifiers and ETags must be non-empty text")
+
+
+def _require_id(allocation_id: bytes) -> None:
+    if not isinstance(allocation_id, bytes) or len(allocation_id) != 32:
+        raise ValueError("allocation ID must be 32 bytes")
+
+
+def _check_owner_only(path: Path, *, directory: bool = False) -> None:
+    info = path.lstat()
+    matches_type = stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode)
+    if not matches_type or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+        raise ContentUnavailable("allocation journal requires owner-only storage")
+
+
+class SQLiteAllocationJournal:
+    """Trusted internal journal. The caller supplies the primary fence and currentness proof."""
+
+    def __init__(self, path: Path, identity: JournalIdentity, *, busy_timeout_ms: int = 250) -> None:
+        if type(busy_timeout_ms) is not int or busy_timeout_ms < 0:
+            raise ValueError("journal busy timeout must be a nonnegative number of milliseconds")
+        self._path = path.absolute()
+        self._identity = identity
+        self._busy_timeout_ms = busy_timeout_ms
+        with self._transaction() as connection:
+            if connection.execute("PRAGMA quick_check").fetchall() != [("ok",)]:
+                raise ContentUnavailable("allocation journal integrity check failed")
+
+    @classmethod
+    def provision(cls, path: Path, *, database_id: str, namespace: str) -> JournalIdentity:
+        identity = JournalIdentity(secrets.token_hex(32), database_id, namespace)
+        path = path.absolute()
+        _check_owner_only(path.parent, directory=True)
+        os.close(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+        with closing(sqlite3.connect(path.as_uri() + "?mode=rw", uri=True)) as connection:
+            if connection.execute("PRAGMA journal_mode=WAL").fetchone() != ("wal",):
+                raise ContentUnavailable("allocation journal requires WAL")
+            connection.execute("PRAGMA synchronous=FULL")
+            with connection:
+                connection.execute("BEGIN IMMEDIATE")
+                for statement in _SCHEMA:
+                    connection.execute(statement)
+                connection.execute("INSERT INTO journal_identity VALUES (1,?,?,?)", astuple(identity))
+                connection.execute(f"PRAGMA user_version={_VERSION}")
+        return identity
+
+    @contextmanager
+    def _transaction(self, *, write: bool = False) -> Iterator[sqlite3.Connection]:
+        try:
+            _check_owner_only(self._path.parent, directory=True)
+            _check_owner_only(self._path)
+            with closing(
+                sqlite3.connect(self._path.as_uri() + "?mode=rw", uri=True, timeout=self._busy_timeout_ms / 1000)
+            ) as connection:
+                if connection.execute("PRAGMA journal_mode").fetchone() != ("wal",):
+                    raise ContentUnavailable("allocation journal requires WAL")
+                connection.execute("PRAGMA synchronous=FULL")
+                with connection:
+                    connection.execute("BEGIN IMMEDIATE" if write else "BEGIN")
+                    version = connection.execute("PRAGMA user_version").fetchone()
+                    schema = connection.execute("SELECT sql FROM sqlite_schema WHERE sql IS NOT NULL").fetchall()
+                    if version != (_VERSION,) or {row[0] for row in schema} != _EXPECTED_SCHEMA:
+                        raise ContentUnavailable("allocation journal schema does not match")
+                    rows = connection.execute("SELECT journal_id,database_id,namespace FROM journal_identity").fetchall()
+                    if rows != [astuple(self._identity)]:
+                        raise ContentUnavailable("allocation journal identity does not match")
+                    yield connection
+        except (OSError, sqlite3.Error) as exc:
+            raise ContentUnavailable("allocation journal is unavailable") from exc
+
+    def _allocation(self, row: tuple) -> Allocation:
+        allocation_id, state, pin_until_ms, etag, *owner = row
+        return Allocation(
+            self._identity.journal_id,
+            allocation_id,
+            state,
+            pin_until_ms,
+            AllocationOwner(*owner) if owner[0] is not None else None,
+            etag,
+        )
+
+    def _get(self, connection: sqlite3.Connection, allocation_id: bytes) -> Allocation | None:
+        row = connection.execute(
+            f"SELECT {_ALLOCATION_COLUMNS} FROM allocation WHERE allocation_id=?",
+            (allocation_id,),
+        ).fetchone()
+        return self._allocation(row) if row is not None else None
+
+    def get(self, allocation_id: bytes) -> Allocation | None:
+        _require_id(allocation_id)
+        with self._transaction() as connection:
+            return self._get(connection, allocation_id)
+
+    def reserve(self, allocation_id: bytes, *, pin_until_ms: int) -> bool:
+        """Commit a newly generated random ID before dispatching its first PUT."""
+        _require_id(allocation_id)
+        if type(pin_until_ms) is not int or not 0 < pin_until_ms < 2**63:
+            raise ValueError("allocation pin must be a positive SQLite millisecond timestamp")
+        with self._transaction(write=True) as connection:
+            return (
+                connection.execute(
+                    f"INSERT INTO allocation(allocation_id,state,pin_until_ms) SELECT ?,'unbound',? "
+                    f"WHERE ?>{_NOW_MS} ON CONFLICT(allocation_id) DO NOTHING",
+                    (allocation_id, pin_until_ms, pin_until_ms),
+                ).rowcount
+                == 1
+            )
+
+    def bind(self, allocation_id: bytes, owner: AllocationOwner, *, reservation_etag: str) -> bool:
+        """Bind only a live anonymous reservation while holding the primary publication fence."""
+        _require_id(allocation_id)
+        _require_text(reservation_etag)
+        with self._transaction(write=True) as connection:
+            return (
+                connection.execute(
+                    f"UPDATE allocation SET state='bound', ({_OWNER_COLUMNS},reservation_etag)=(?,?,?,?,?,?,?,?) "
+                    f"WHERE allocation_id=? AND state='unbound' AND pin_until_ms>{_NOW_MS}",
+                    (*astuple(owner), reservation_etag, allocation_id),
+                ).rowcount
+                == 1
+            )
+
+    def anonymous_candidates(self, *, limit: int, after: tuple[int, bytes] = (0, b"")) -> tuple[Allocation, ...]:
+        """Page through expired reservations and pending claims by (pin, allocation ID)."""
+        if type(limit) is not int or limit <= 0:
+            raise ValueError("anonymous candidate limit must be positive")
+        with self._transaction() as connection:
+            rows = connection.execute(
+                f"SELECT {_ALLOCATION_COLUMNS} FROM allocation "
+                f"WHERE tenant_id IS NULL AND pin_until_ms<={_NOW_MS} AND (pin_until_ms,allocation_id)>(?,?) "
+                "ORDER BY pin_until_ms,allocation_id LIMIT ?",
+                (*after, limit),
+            )
+            return tuple(self._allocation(row) for row in rows)
+
+    def scoped_allocations(self, tenant_id: str, session_ids: tuple[str, ...]) -> tuple[Allocation, ...]:
+        """Read exact bindings by target or trusted admission session under the caller's fence."""
+        _require_text(tenant_id, *session_ids)
+        with self._transaction() as connection:
+            rows = connection.execute(
+                f"SELECT {_ALLOCATION_COLUMNS} FROM allocation "
+                "WHERE tenant_id=?1 AND (session_id IN (SELECT value FROM json_each(?2)) OR "
+                "admission_session_id IN (SELECT value FROM json_each(?2))) ORDER BY allocation_id",
+                (tenant_id, json.dumps(session_ids)),
+            )
+            return tuple(self._allocation(row) for row in rows)
+
+    def claim_anonymous(self, allocation_id: bytes) -> Allocation | None:
+        _require_id(allocation_id)
+        with self._transaction(write=True) as connection:
+            connection.execute(
+                f"UPDATE allocation SET state='reaping' WHERE allocation_id=? AND state='unbound' AND pin_until_ms<={_NOW_MS}",
+                (allocation_id,),
+            )
+            claimed = self._get(connection, allocation_id)
+            if claimed is not None and claimed.state == "reaping" and claimed.owner is None:
+                return claimed
+            return None
+
+    def claim_bound(self, expected: Allocation) -> Allocation | None:
+        """Claim only the exact binding the caller found safe to reap under the primary fence."""
+        _require_id(expected.allocation_id)
+        if expected.journal_id != self._identity.journal_id or expected.state == "unbound" or expected.owner is None:
+            return None
+        with self._transaction(write=True) as connection:
+            if self._get(connection, expected.allocation_id) != expected:
+                return None
+            row = connection.execute(
+                f"UPDATE allocation SET state='reaping' WHERE allocation_id=? RETURNING {_ALLOCATION_COLUMNS}",
+                (expected.allocation_id,),
+            ).fetchone()
+            return self._allocation(row) if row is not None else None
+
+    def finish_reap(self, claim: Allocation, *, remote_terminal: bool) -> bool:
+        """Remove an exact claim once the caller verifies deletion and terminal request state."""
+        _require_id(claim.allocation_id)
+        if remote_terminal is not True:
+            raise ContentCleanupUnavailable("allocation erasure has no terminal remote evidence")
+        if claim.state != "reaping" or claim.journal_id != self._identity.journal_id:
+            return False
+        with self._transaction(write=True) as connection:
+            if self._get(connection, claim.allocation_id) != claim:
+                return False
+            connection.execute("DELETE FROM allocation WHERE allocation_id=?", (claim.allocation_id,))
+            return True
