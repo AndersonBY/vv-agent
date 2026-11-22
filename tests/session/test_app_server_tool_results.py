@@ -471,12 +471,11 @@ def test_immutable_attempt_contexts_remain_readable_after_recreate(store, databa
             )
 
         def authenticate(self, item, plan):
-            return item.encode() == self.callback().encode()
+            return replace(item.item, actor=None).to_dict() == self.callback().to_dict()
 
         def push(self):
             self.pushed = True
-            with store.atomic() as tx:
-                tx.push(THREAD, self.callback())
+            push_fixture_input(store, THREAD, self.callback())
 
     provider, backend = HistoryProvider(), VersionWorkspace()
 
