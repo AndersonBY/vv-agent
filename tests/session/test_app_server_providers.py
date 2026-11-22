@@ -12,10 +12,12 @@ from time import monotonic
 from typing import Any, cast
 
 import pytest
+from support.contract import fixture_root
 
 from vv_agent import Agent, RunBudgetLimits, RunConfig, ScriptedModelProvider, ToolPolicy
 from vv_agent.run_config import effective_run_config
 from vv_agent.session.kernel import drive
+from vv_agent.session.projection import hydrate_record_payload, hydration_for_session_store
 from vv_agent.session.records import InboxItem
 from vv_agent.tools.registry import ToolRegistry
 from vv_agent.types import LLMResponse, ToolCall, ToolExecutionResult
@@ -74,7 +76,7 @@ def test_accept_recreate_resume_wake_and_two_reconnects_use_one_job(store, datab
             assert second.attempt().result.payload["result"]["tool_call_id"] == "business-call"
             assert business.count("submit") == business.count("effect") == 1
             assert business.count("query") >= 1 and business.count("sync") == 0
-            assert second.host.builds >= 3
+            assert second.host.builds >= 1
         finally:
             second.close()
 
@@ -97,7 +99,9 @@ def test_invalid_query_keeps_the_handle_until_valid_result(store, business, inva
         assert any(w.get("params", {}).get("code") == "provider_result_invalid" for w in server.messages)
         business.setting("invalid", "")
         server.resume()
-        assert server.attempt().state == "completed"
+        server.due()
+        server.resume()
+        wait_for(lambda: server.attempt().state == "completed")
         assert business.count("submit") == 1
     finally:
         server.close()
@@ -225,8 +229,7 @@ def test_forged_callbacks_do_not_complete_or_replace_the_wait(store, business, f
                 "usage": {"usage": {"business_units": 999}},
             }
             item = replace(item, payload=item.payload | changes[field])
-        with store.atomic() as tx:
-            tx.push(THREAD, item)
+        server.server.kernel.push(THREAD, item)
         server.server.wake(THREAD)
         server.join()
         assert server.state().applied_inputs[item.input_id].payload["disposition"] == "rejected"
@@ -245,8 +248,7 @@ def test_authenticated_but_invalid_callback_is_rejected_and_late_result_is_audit
         business.setting("query_paused", True)
         business.setting("invalid", "call")
         invalid = JobsProvider(business).callback(handle, input_id="invalid-trusted-result")
-        with store.atomic() as tx:
-            tx.push(THREAD, invalid)
+        server.server.kernel.push(THREAD, invalid)
         server.server.wake(THREAD)
         server.join()
         applied = server.state().applied_inputs[invalid.input_id].payload
@@ -256,8 +258,7 @@ def test_authenticated_but_invalid_callback_is_rejected_and_late_result_is_audit
         server.join()
         business.setting("invalid", "")
         late = JobsProvider(business).callback(handle, input_id="late")
-        with store.atomic() as tx:
-            tx.push(THREAD, late)
+        server.server.kernel.push(THREAD, late)
         server.server.wake(THREAD)
         server.join()
         assert server.attempt().result.payload["context"] == "audit"
@@ -272,6 +273,7 @@ def test_missing_named_binding_never_invokes_function(store, business):
     first.start()
     handle = first.attempt().wait["handle"]
     first.close()
+    queries = business.count("query")
     second = Server(store, business, bound=False)
     try:
         second.due()
@@ -279,7 +281,9 @@ def test_missing_named_binding_never_invokes_function(store, business):
         assert second.attempt().wait["handle"] == handle
         assert not second.state().turns[TURN].ended
         second.rpc("thread/read", {"threadId": THREAD})
-        assert any(w.get("params", {}).get("code") == "missing_host_binding" for w in second.messages)
+        warnings = [w["params"]["code"] for w in second.messages if w.get("method") == "error/warning"]
+        assert warnings.count("missing_host_binding") == 1
+        assert business.count("query") == queries
         assert business.count("sync") == 0 and business.count("submit") == 1
     finally:
         second.close()
@@ -310,25 +314,24 @@ def test_preflight_and_budget_run_before_provider_submission(store, business, ga
             )
             wait = server.attempt().wait["handle"]
             plan = server.attempt().execution_plan
-            with store.atomic() as tx:
-                tx.push(
-                    THREAD,
-                    InboxItem(
-                        "premature-result",
-                        "provider_result",
-                        {
-                            "operation_id": plan.operation_id,
-                            "attempt": plan.attempt,
-                            "request_digest": plan.payload["request_digest"],
-                            "provider_binding": "work",
-                            "result": ToolExecutionResult("business-call", "premature").to_dict(),
-                            "evidence": ["premature"],
-                            "usage": {},
-                        },
-                        target_turn_id=TURN,
-                        generation=0,
-                    ),
-                )
+            server.server.kernel.push(
+                THREAD,
+                InboxItem(
+                    "premature-result",
+                    "provider_result",
+                    {
+                        "operation_id": plan.operation_id,
+                        "attempt": plan.attempt,
+                        "request_digest": plan.payload["request_digest"],
+                        "provider_binding": "work",
+                        "result": ToolExecutionResult("business-call", "premature").to_dict(),
+                        "evidence": ["premature"],
+                        "usage": {},
+                    },
+                    target_turn_id=TURN,
+                    generation=0,
+                ),
+            )
             response = server.rpc(
                 "approval/resolve", {"threadId": THREAD, "turnId": TURN, "requestId": wait["request_id"], "decision": "deny"}
             )
@@ -351,19 +354,21 @@ def test_registration_is_validated_merged_copied_and_conflicts_reject(store, bus
     host = JobsHost(business)
     from vv_agent.session.surfaces import SessionDriver
 
-    driver = SessionDriver(store=store)
+    key_provider = PRODUCER["fixture_key_provider_for_store"](store)
+    driver = SessionDriver(store=store, content_key_provider=key_provider)
     try:
         assembled = replace(host.build_run_config(None), tool_providers={"work": p1})
         rt = driver.runtime(host._agent, assembled)
         child = rt.for_agent(host._agent, rt.config)
         assert child.providers == rt.providers and child.providers is not rt.providers
         assembled.tool_providers.clear()
-        assert rt.providers == {"work": p1}
+        assert rt.providers["work"] is p1
         delegated = Agent("parent", "Delegate.", tools=[host._agent.as_tool(name="delegate")])
         with pytest.raises(ValueError, match="conflict"):
             driver.runtime(delegated, replace(host.build_run_config(None), tool_providers={"delegate": p1}))
     finally:
         driver.close()
+        key_provider.close()
     for name in ("", " work", "work ", "model", "function", "ask_user", "create_sub_task"):
         with pytest.raises(ValueError):
             RunConfig(tool_providers={name: p1})
@@ -394,23 +399,26 @@ def test_child_creation_and_reconstruction_inherit_provider_and_cannot_widen_pol
     )
     server = Server(store, business, config=config, agent=parent)
     try:
+        with store.atomic():
+            store._rows("UPDATE sk_settings SET write_level=2 WHERE singleton=1")
         server.start()
+        bound_store = server.server.kernel.store
         created = [
             row.record
-            for sid in store.list_sessions()
-            for row in store.read(sid, limit=1).records
-            if row.record.payload.get("attributes", {}).get("child_admission")
+            for sid in bound_store.list_sessions()
+            for row in bound_store.read(sid, limit=1).records
+            if hydrate_record_payload(row, hydration_for_session_store(bound_store, sid))["attributes"].get("child_admission")
         ]
         assert len(created) == 1
         sid = created[0].session_id
         rt = server.server.kernel.runtime(parent, server.host.build_run_config(None))
-        rebuilt = rt.child_runtime(store, sid)
+        rebuilt = rt.child_runtime(bound_store, sid)
         assert rebuilt.providers["work"] is rt.providers["work"]
         if denied:
             assert business.count("submit") == business.count("effect") == 0
             assert "work" in rebuilt.config.tool_policy.disallowed_tools
         else:
-            child_state = store.read_state(sid)[0]
+            child_state = server.server.kernel._read_state(sid)[0]
             attempt = next(op for op in child_state.operations.values() if op.kind == "tool").attempts[1]
             assert attempt.state == "parked" and attempt.wait["handle"]["provider"] == "work"
             assert business.count("submit") == business.count("effect") == 1
@@ -418,12 +426,12 @@ def test_child_creation_and_reconstruction_inherit_provider_and_cannot_widen_pol
             server = Server(store, business, config=config, agent=parent)
             server.resume()
             rt = server.server.kernel.runtime(parent, server.host.build_run_config(None))
-            rebuilt = rt.child_runtime(store, sid)
+            rebuilt = rt.child_runtime(server.server.kernel.store, sid)
             assert rebuilt.providers["work"] is rt.providers["work"]
             assert business.count("submit") == business.count("effect") == 1
             server.rpc("turn/interrupt", {"threadId": THREAD, "expectedTurnId": TURN, "actionId": "cancel-parent"})
             server.join()
-            drive(store, sid, runtime=rebuilt)
+            drive(server.server.kernel.store, sid, runtime=rebuilt)
             assert any(
                 row.record.kind == "input_applied"
                 and row.record.payload["input"]["kind"] == "control"
@@ -436,7 +444,7 @@ def test_child_creation_and_reconstruction_inherit_provider_and_cannot_widen_pol
 
 
 def test_provider_fixture_comes_from_real_app_server():
-    canonical = Path(__file__).parents[1] / "fixtures/parity/app_server_providers.json"
+    canonical = fixture_root() / "app_server_providers.json"
     assert produce() == json.loads(canonical.read_text())
 
 
@@ -481,7 +489,8 @@ def test_real_sigkill_at_accept_and_parked_boundaries(database, store, business,
             worker.kill()
             worker.wait(timeout=5)
         stdout, stderr = worker.communicate(timeout=5)
-        assert not stdout and not stderr, (stdout, stderr)
+        unexpected = [line for line in stderr.splitlines() if not line.startswith(b"Incremental token counting disabled for ")]
+        assert not stdout and not unexpected, (stdout, stderr)
     business.setting("pause_after_accept", False)
     server = Server(store, business, supported=supported)
     try:

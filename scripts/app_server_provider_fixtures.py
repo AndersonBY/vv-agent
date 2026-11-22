@@ -177,7 +177,9 @@ class JobsProvider:
             return False
         key = plan.payload["idempotency_key"]
         expected = self.callback(self.handle(plan, key), input_id=item.input_id)
-        return canonical_json_bytes(expected.to_dict()) == canonical_json_bytes(item.to_dict())
+        return (item.target_turn_id, item.generation) == (expected.target_turn_id, expected.generation) and canonical_json_bytes(
+            expected.payload
+        ) == canonical_json_bytes(item.payload)
 
 
 def business_tool(business, *, supported=True, needs_approval=False):
@@ -231,6 +233,8 @@ class JobsHost(DefaultAppServerHost):
 
 class Server:
     def __init__(self, store, business, **host_options):
+        if store._ledger_integrity_mode() == "unconfigured":
+            store.configure_input_admission(allow_unsigned=True)
         self.host = JobsHost(business, **host_options)
         self.transport = ChannelTransport(connection_id="owner", outbound_capacity=10000)
         self.content_key_provider = fixture_key_provider_for_store(store)
@@ -267,7 +271,8 @@ class Server:
                 return wire
 
     def start(self, *, wait=True):
-        assert "result" in self.rpc("thread/start", {"inputId": THREAD})
+        started = self.rpc("thread/start", {"inputId": THREAD})
+        assert "result" in started, started
         result = self.rpc(
             "turn/start",
             {"threadId": THREAD, "inputId": "work", "expectedTurnId": None, "input": [{"type": "text", "text": "go"}]},
@@ -292,16 +297,17 @@ class Server:
         self.server.run_adapter.join()
 
     def state(self):
-        return self.server.kernel.store.read_state(THREAD)[0]
+        return self.server.kernel._read_state(THREAD)[0]
 
     def attempt(self):
         op = next(op for op in self.state().operations.values() if op.kind == "tool")
         return op.attempts[max(op.attempts)]
 
     def terminal(self):
+        store = self.server.kernel.store
         return next(
-            r.record.payload
-            for r in reversed(self.server.kernel.store.read_state(THREAD)[1])
+            hydrate_record_payload(r, hydration_for_session_store(store, THREAD))
+            for r in reversed(store.read_state(THREAD)[1])
             if r.record.kind == "turn_ended" and r.record.turn_id == TURN
         )
 

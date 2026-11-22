@@ -26,6 +26,7 @@ from vv_agent.kernel._sql import UnsupportedFeatureLevel
 from vv_agent.model import ModelError
 from vv_agent.types import AgentStatus, Message
 
+from .bindings import MissingHostBinding
 from .content_runtime import SessionContentWriter
 from .context_view import context_view
 from .projection import (
@@ -240,8 +241,6 @@ class _KernelThreadStore:
         )
 
     def _runtime_view(self, thread_id: str, *, store=None):
-        from .bindings import MissingHostBinding
-
         try:
             return self.kernel._projection_runtime_view(thread_id, store=store)
         except MissingHostBinding:
@@ -1025,15 +1024,16 @@ class _KernelRunAdapter(RunAdapter):
 
     def _publish_operational_error(self, sid: str, store) -> bool:
         failure = self.kernel._failure_after_progress(store, sid, self.kernel._errors.get(sid))
-        if failure is None or not isinstance(failure.error, ProviderResultInvalid) or failure.warning_sent:
+        if failure is None or not isinstance(failure.error, (ProviderResultInvalid, MissingHostBinding)) or failure.warning_sent:
             return False
         if not self._state_manager.subscribers(sid):
             return False
         active = self._state_manager.active_turn(sid)
+        code = failure.error.code
         self._notify_subscribers(
             sid,
             "error/warning",
-            {"message": "provider_result_invalid", "code": "provider_result_invalid"},
+            {"message": code, "code": code},
         )
         failure.warning_sent = True
         if (
@@ -1142,7 +1142,9 @@ class _KernelRunAdapter(RunAdapter):
                 turn_id=event.run_id,
                 approval_arguments=approval_arguments[event.event_id] if isinstance(event, ApprovalRequestedEvent) else None,
             )
-            if include_items and projection.item is not None and projection.notification_method is not None:
+            if projection.notification_method == "error/warning" or (
+                include_items and projection.item is not None and projection.notification_method is not None
+            ):
                 notifications.append(
                     (event.metadata["session_seq"], projection.notification_method, projection.notification_params)
                 )
