@@ -43,7 +43,7 @@ from .records import InboxItem, SessionSpec, digest
 from .reducer import ExecutionState
 from .result import project_result
 from .runtime import static_model_selection_requirements, static_session_requirements, static_worker_supports
-from .store import Conflict
+from .store import Conflict, StoredRecord
 from .surfaces import PrincipalInput, SessionDriver, _KnownSessionOwner, _principal_payload, _read_snapshot
 from .timing import Clock, SystemClock
 
@@ -187,6 +187,11 @@ class _JoinDriveState(StrEnum):
     DUE = "due"
     FUTURE = "future"
     NONE = "none"
+
+
+class _ApprovalDelivery(StrEnum):
+    BLOCKED = "blocked"
+    SENT = "sent"
 
 
 @dataclass(frozen=True, slots=True)
@@ -974,52 +979,62 @@ class _KernelRunAdapter(RunAdapter):
                 continue
             try:
                 operational = self._publish_operational_error(sid, store)
+                previous_seq = position.seq
+                rows = store.read(sid, after_seq=previous_seq, limit=256).records
                 if now < position.due:
-                    if not store.read(sid, after_seq=position.seq, limit=1).records:
+                    if not rows:
                         continue
                     # A committed record is progress even when its producer did
                     # not call wake(). Reset only this session's throttling.
                     position.due = 0.0
                     position.delay = 0.05
-                previous_seq = position.seq
                 progressed = operational
-                approval_seq = self._next_approval_seq(sid, store, after_seq=previous_seq)
                 if position.replay_approvals:
-                    blocked = self._send_pending_approvals(
+                    delivery = self._send_pending_approvals(
                         sid,
                         store,
                         after_seq=previous_seq,
-                        through_seq=approval_seq,
+                        through_seq=previous_seq,
                         replay_approvals=True,
                     )
-                    if blocked is not None:
+                    if delivery == _ApprovalDelivery.BLOCKED:
                         self._reconcile_local_turn(sid, store)
                         continue
                     position.replay_approvals = False
-                if approval_seq is not None:
+                # Discover approvals and advance the cursor from the same committed page.
+                approval_positions = (
+                    index
+                    for index, row in enumerate(rows)
+                    if row.record.kind == "op_parked" and row.record._payload["handle"]["kind"] == "approval"
+                )
+                approval_index = next(approval_positions, None)
+                sent_approval_seq = None
+                if approval_index is not None:
+                    approval_seq = rows[approval_index].seq
                     progressed = (
-                        self._publish_turns(sid, store=store, through_seq=approval_seq - 1, include_items=True) or progressed
+                        self._publish_turns(
+                            sid, store=store, rows=rows[:approval_index], include_items=True, publish_child_wait=False
+                        )
+                        or progressed
                     )
-                    blocked = self._send_pending_approvals(
+                    delivery = self._send_pending_approvals(
                         sid,
                         store,
                         after_seq=previous_seq,
                         through_seq=approval_seq,
                     )
-                    if blocked is not None:
+                    if delivery == _ApprovalDelivery.BLOCKED:
                         self._reconcile_local_turn(sid, store)
                         continue
-                    progressed = (
-                        self._publish_turns(
-                            sid,
-                            store=store,
-                            include_items=True,
-                            skip_approval_requested_seq=approval_seq,
-                        )
-                        or progressed
+                    if delivery == _ApprovalDelivery.SENT:
+                        sent_approval_seq = approval_seq
+                    rows = rows[approval_index : next(approval_positions, None)]
+                progressed = (
+                    self._publish_turns(
+                        sid, store=store, rows=rows, include_items=True, skip_approval_requested_seq=sent_approval_seq
                     )
-                else:
-                    progressed = self._publish_turns(sid, store=store, include_items=True) or operational
+                    or progressed
+                )
                 self._reconcile_local_turn(sid, store)
             except Exception as exc:
                 position.delay = min(1.0, max(0.05, position.delay * 2))
@@ -1062,19 +1077,20 @@ class _KernelRunAdapter(RunAdapter):
         sid,
         *,
         store,
-        through_seq=None,
+        rows: tuple[StoredRecord, ...] | None = None,
         include_items=False,
         skip_approval_requested_seq: int | None = None,
+        publish_child_wait: bool = True,
     ):
         """Publish one committed record page exactly once for this node position."""
 
         position = self._notification_positions.get(sid)
         if position is None:
             return False
-        previous = position.seq
-        rows = store.read(sid, after_seq=previous, through_seq=through_seq, limit=256).records
+        if rows is None:
+            rows = store.read(sid, after_seq=position.seq, limit=256).records
         if not rows:
-            return through_seq is None and self._publish_child_wait(sid, store, position)
+            return publish_child_wait and self._publish_child_wait(sid, store, position)
         notifications: list[tuple[int, str, dict[str, Any]]] = []
         state, all_records, _ = store.read_state(sid)
         runtime = self._store._runtime_view(sid, store=store)
@@ -1082,14 +1098,14 @@ class _KernelRunAdapter(RunAdapter):
         for stored in rows:
             record = stored.record
             if record.kind == "turn_started":
-                self._ensure_turn_connection(sid, record.turn_id)
+                self._ensure_turn_connection(sid, cast(str, record.turn_id))
                 notifications.append((stored.seq, "turn/started", {"threadId": sid, "turnId": record.turn_id}))
             elif record.kind == "op_parked" and (
                 (handle := record._payload["handle"])["kind"] == "child" and not handle["background"]
             ):
                 child_wait_pending = True
             elif record.kind == "op_parked" and record._payload["handle"]["kind"] in {"approval", "user"}:
-                result = project_result(store, sid, record.turn_id, runtime=runtime, snapshot=(state, all_records, 0))
+                result = project_result(store, sid, cast(str, record.turn_id), runtime=runtime, snapshot=(state, all_records, 0))
                 notifications.append(
                     (
                         stored.seq,
@@ -1116,7 +1132,7 @@ class _KernelRunAdapter(RunAdapter):
                     )
                 )
             elif record.kind == "turn_ended":
-                result = project_result(store, sid, record.turn_id, runtime=runtime, snapshot=(state, all_records, 0))
+                result = project_result(store, sid, cast(str, record.turn_id), runtime=runtime, snapshot=(state, all_records, 0))
                 notifications.append(
                     (
                         stored.seq,
@@ -1177,7 +1193,7 @@ class _KernelRunAdapter(RunAdapter):
         self._settle_turn_connections(sid, state, store)
         if state.active_turn_id is not None or self._has_pending_start_input(sid, store, state):
             self.kernel._worker.wake(sid)
-        if through_seq is None:
+        if publish_child_wait:
             self._publish_child_wait(sid, store, position)
         return True
 
@@ -1361,19 +1377,6 @@ class _KernelRunAdapter(RunAdapter):
             for entry in store.peek_inbox(thread_id)
         )
 
-    def _next_approval_seq(self, sid: str, store, *, after_seq: int) -> int | None:
-        cursor = after_seq
-        while True:
-            rows = store.read(sid, after_seq=cursor, limit=256).records
-            if not rows:
-                return None
-            sequences = {row.seq for row in rows}
-            for event in project_records(store.projection_context(sid, rows), hydration=self._hydration(sid, store)):
-                seq = event.metadata["session_seq"]
-                if isinstance(event, ApprovalRequestedEvent) and seq in sequences and seq > after_seq:
-                    return seq
-            cursor = rows[-1].seq
-
     def _approval_arguments(self, sid: str, store, state, records, event, wait) -> dict[str, Any]:
         operation = state.operations.get(wait.get("operation_id")) if wait is not None else None
         attempt = operation.attempts.get(wait.get("attempt")) if operation is not None and wait is not None else None
@@ -1402,7 +1405,7 @@ class _KernelRunAdapter(RunAdapter):
         after_seq: int,
         through_seq: int | None = None,
         replay_approvals: bool = False,
-    ) -> int | None:
+    ) -> _ApprovalDelivery | None:
         registration = self.kernel._runtimes.get(sid)
         if registration is not None and registration.config.approval_provider is not None:
             return None
@@ -1422,6 +1425,7 @@ class _KernelRunAdapter(RunAdapter):
             if wait_sid == sid and wait.get("kind") == "approval"
         }
         now_ms = _database_now_ms(store)
+        delivery = None
         for request_id, event in events.items():
             event_seq = event.metadata["session_seq"]
             if (event_seq <= after_seq and not replay_approvals) or (through_seq is not None and event_seq > through_seq):
@@ -1444,7 +1448,7 @@ class _KernelRunAdapter(RunAdapter):
             if self._router.get_pending_server_request(RequestId(request_id)) is not None:
                 continue
             if store.lease_status(sid)[2] > 0:
-                return event_seq
+                return _ApprovalDelivery.BLOCKED
             arguments = self._approval_arguments(sid, store, state, records, event, wait)
             request_params = ApprovalRequestParams(
                 request_id=request_id,
@@ -1467,8 +1471,9 @@ class _KernelRunAdapter(RunAdapter):
             except ValueError as exc:
                 if not str(exc).startswith("Duplicate server request id:"):
                     raise
+            delivery = _ApprovalDelivery.SENT
             self.kernel._worker.wake(sid)
-        return None
+        return delivery
 
     def close(self):
         if self._local_owner is not None:
