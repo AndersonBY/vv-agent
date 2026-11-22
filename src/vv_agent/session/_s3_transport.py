@@ -10,14 +10,15 @@ import time
 from collections.abc import Callable, Iterator
 from contextlib import suppress
 from dataclasses import asdict, dataclass
+from io import BytesIO
 from threading import Lock
 from typing import Any, Literal, Protocol
 
 _META_LIMIT = 64 * 1024
-_BODY_LIMIT = 64 * 1024 * 1024
+_IPC_CHUNK = 64 * 1024
 _NS = 1_000_000_000
 _STARTUP_NS = 5 * _NS
-_HEADER = struct.Struct("!IIQ")
+_HEADER = struct.Struct("!IQQ")
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,13 +44,14 @@ class _S3Reply:
 
 
 class _S3TransportError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, may_have_dispatched: bool = False) -> None:
+        super().__init__(message)
+        self.may_have_dispatched = may_have_dispatched
 
 
 class _S3TransportTimeout(_S3TransportError):
     def __init__(self, *, may_have_dispatched: bool) -> None:
-        super().__init__("external ciphertext transport deadline expired")
-        self.may_have_dispatched = may_have_dispatched
+        super().__init__("external ciphertext transport deadline expired", may_have_dispatched=may_have_dispatched)
 
 
 class _S3Transport(Protocol):
@@ -155,40 +157,47 @@ def _remaining(deadline_ns: int | None) -> float | None:
 
 
 def _send(channel: socket.socket, data: bytes, deadline_ns: int | None) -> None:
-    channel.settimeout(_remaining(deadline_ns))
-    channel.sendall(data)
+    view = memoryview(data)
+    for offset in range(0, len(data), _IPC_CHUNK):
+        channel.settimeout(_remaining(deadline_ns))
+        channel.sendall(view[offset : offset + _IPC_CHUNK])
 
 
 def _read(channel: socket.socket, size: int, deadline_ns: int | None) -> bytes:
-    buffer = bytearray(size)
-    view = memoryview(buffer)
-    while view:
+    buffer = BytesIO()
+    remaining = size
+    while remaining:
         channel.settimeout(_remaining(deadline_ns))
-        received = channel.recv_into(view)
-        if not received:
+        chunk = channel.recv(min(remaining, _IPC_CHUNK))
+        if not chunk:
             raise EOFError
-        view = view[received:]
-    return bytes(buffer)
+        buffer.write(chunk)
+        remaining -= len(chunk)
+    return buffer.getvalue()
 
 
 def _send_frame(channel: socket.socket, fields: dict[str, Any], deadline_ns: int) -> None:
     body = fields.pop("body") or b""
     metadata = json.dumps(fields, separators=(",", ":")).encode()
-    _check_sizes(len(metadata), len(body))
+    _check_metadata_size(len(metadata))
     _send(channel, _HEADER.pack(len(metadata), len(body), deadline_ns), deadline_ns)
     _send(channel, metadata, deadline_ns)
     if body:
         _send(channel, body, deadline_ns)
 
 
-def _check_sizes(metadata_size: int, body_size: int) -> None:
-    if not 0 < metadata_size <= _META_LIMIT or not 0 <= body_size <= _BODY_LIMIT:
-        raise _S3TransportError("external ciphertext transport frame exceeds its size limit")
+def _check_metadata_size(size: int) -> None:
+    if not 0 < size <= _META_LIMIT:
+        raise _S3TransportError("external ciphertext transport metadata exceeds its size limit")
 
 
-def _read_frame(channel: socket.socket, deadline_ns: int | None) -> tuple[dict[str, Any], int]:
+def _read_frame(
+    channel: socket.socket, deadline_ns: int | None, *, expected_body_size: int | None = None
+) -> tuple[dict[str, Any], int]:
     metadata_size, body_size, announced_deadline = _HEADER.unpack(_read(channel, _HEADER.size, deadline_ns))
-    _check_sizes(metadata_size, body_size)
+    _check_metadata_size(metadata_size)
+    if expected_body_size is not None and body_size not in {0, expected_body_size}:
+        raise _S3TransportError("external ciphertext response length does not match its reference")
     deadline_ns = announced_deadline if deadline_ns is None else min(deadline_ns, announced_deadline)
     fields = json.loads(_read(channel, metadata_size, deadline_ns))
     fields["body"] = _read(channel, body_size, deadline_ns) if body_size else None
@@ -302,10 +311,6 @@ class _S3ProcessTransport:
             self._reap(timeout=1)
 
     def execute(self, request: _S3Request, *, deadline_ns: int, authorize: Callable[[], int] | None = None) -> _S3Reply:
-        if request.ciphertext_size is not None and request.ciphertext_size > _BODY_LIMIT:
-            raise _S3TransportError("external ciphertext read exceeds its size limit")
-        if request.body is not None and len(request.body) > _BODY_LIMIT:
-            raise _S3TransportError("external ciphertext upload exceeds its size limit")
         if not self._lock.acquire(blocking=False):
             raise _S3TransportError("S3 transport slot is busy")
         may_have_dispatched = False
@@ -342,7 +347,7 @@ class _S3ProcessTransport:
                 # The worker cannot dispatch before receiving the complete grant.
                 may_have_dispatched = True
                 _send(channel, b"G" + struct.pack("!Q", deadline_ns), deadline_ns)
-                fields, _ = _read_frame(channel, deadline_ns)
+                fields, _ = _read_frame(channel, deadline_ns, expected_body_size=request.ciphertext_size or 0)
                 _remaining(deadline_ns)
                 return _S3Reply(**fields)
             except TimeoutError:
@@ -352,7 +357,7 @@ class _S3ProcessTransport:
                 self._invalidate()
                 if time.monotonic_ns() >= deadline_ns:
                     raise _S3TransportTimeout(may_have_dispatched=may_have_dispatched) from None
-                raise _S3TransportError("S3 transport failed after dispatch") from None
+                raise _S3TransportError("S3 transport failed after dispatch", may_have_dispatched=True) from None
             except BaseException:
                 self._invalidate()
                 raise

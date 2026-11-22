@@ -23,6 +23,7 @@ from .test_s3_reservation_adapter import _OWNER, _pin
 from .test_sqlite_object_session_driver import _provision_journal
 
 _PAYLOAD = b"0123456789abcdefghijklmnopqrstuv"
+_LARGE_SIZE = 65 * 1024 * 1024
 
 
 def _client(endpoint_url: str) -> Any:
@@ -63,6 +64,14 @@ class _Server:
                 owner.calls.append("GET")
                 if self.path.endswith("?versioning"):
                     self._reply(200, b"<VersioningConfiguration/>")
+                    return
+                if owner.mode == "large":
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(_LARGE_SIZE))
+                    self.end_headers()
+                    chunk = b"x" * (1024 * 1024)
+                    for _ in range(_LARGE_SIZE // len(chunk)):
+                        self.wfile.write(chunk)
                     return
                 self.send_response(200)
                 self.send_header("Content-Length", str(len(_PAYLOAD)))
@@ -205,6 +214,15 @@ def test_one_send_per_request_after_success() -> None:
         deleted = transport.execute(_S3Request("delete_object", "fixture", "ciphertext"), deadline_ns=deadline_ns)
         assert deleted.status == 204 and not deleted.delete_marker
     assert server.calls == ["GET", "PUT", "GET", "DELETE"]
+
+
+def test_transport_gets_exact_large_ciphertext_without_a_fixed_content_cap() -> None:
+    with _Server("large") as server, _transport(server) as transport:
+        request = _S3Request("get_object", "fixture", "ciphertext", ciphertext_size=_LARGE_SIZE)
+        reply = transport.execute(request, deadline_ns=_deadline(4))
+        assert reply.body is not None and len(reply.body) == _LARGE_SIZE
+        assert reply.body.count(b"x") == _LARGE_SIZE
+    assert server.calls == ["GET"]
 
 
 def test_real_transport_timeout_rolls_back_sql_create_and_keeps_bound_orphan(tmp_path) -> None:

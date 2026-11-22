@@ -99,8 +99,10 @@ class S3CiphertextStore:
             raise CiphertextTemporarilyUnavailable(
                 "external ciphertext write deadline expired", may_have_dispatched=exc.may_have_dispatched
             ) from None
-        except _S3TransportError:
-            raise CiphertextTemporarilyUnavailable("external ciphertext transport is unavailable") from None
+        except _S3TransportError as exc:
+            raise CiphertextTemporarilyUnavailable(
+                "external ciphertext transport is unavailable", may_have_dispatched=exc.may_have_dispatched
+            ) from None
 
     def _key(self, allocation_id: bytes) -> str:
         return self._prefix + allocation_id.hex()
@@ -187,7 +189,7 @@ class S3CiphertextStore:
             or etag == '"*"'
             or not _STRONG_ETAG.fullmatch(etag)
         ):
-            raise CiphertextTemporarilyUnavailable("external ciphertext marker did not confirm success")
+            raise CiphertextTemporarilyUnavailable("external ciphertext marker did not confirm success", may_have_dispatched=True)
         check_fence()
         assert pin_deadline_ns is not None
         self._require_live_pin(pin_deadline_ns)
@@ -206,7 +208,7 @@ class S3CiphertextStore:
             authorize=authorize,
         )
         if reply.status != 200 or reply.version_id is not None:
-            raise CiphertextTemporarilyUnavailable("external ciphertext upload did not confirm success")
+            raise CiphertextTemporarilyUnavailable("external ciphertext upload did not confirm success", may_have_dispatched=True)
         self._confirm_live_pin(expected, check_fence, pin_deadline_ns)
         transport_deadline_ns = min(transport_deadline_ns, self._transport_deadline(deadline_ns, clock_ns))
         self._require_before_transport_deadline(transport_deadline_ns)
