@@ -22,8 +22,24 @@ jobs:
       contents: write
       id-token: write
 
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: vv_agent
+          POSTGRES_PASSWORD: vv_agent_test
+          POSTGRES_DB: vv_agent_test
+        ports:
+          - 5432
+        options: >-
+          --health-cmd "pg_isready -U vv_agent -d vv_agent_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     env:
       UV_NO_SOURCES: "1"
+      VV_AGENT_RUN_LIVE_TESTS: "0"
 
     steps:
       - name: Checkout code
@@ -69,7 +85,9 @@ jobs:
         run: uv sync --locked --dev --extra s3
 
       - name: Verify locked contract snapshot
-        run: python3 scripts/contract_snapshot.py check
+        run: |
+          artifact=$(python3 -c 'import json; print(json.load(open("contract.lock.json"))["artifact_url"])')
+          python3 scripts/contract_snapshot.py check --artifact "$artifact"
 
       - name: Require centrally verified contract adoption
         run: python3 scripts/contract_snapshot.py adoption --implementation python --revision "$(git rev-parse HEAD)"
@@ -81,6 +99,8 @@ jobs:
           printf 'VV_AGENT_0360_PYTHON=%s\n' "$RUNNER_TEMP/vv-agent-0.36.0/bin/python" >> "$GITHUB_ENV"
 
       - name: Run full tests
+        env:
+          VV_AGENT_TEST_POSTGRES_DSN: postgresql://vv_agent:vv_agent_test@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/vv_agent_test
         run: TMPDIR=/tmp uv run pytest -k 'not simulation_smoke'
 
       - name: Run simulation smoke
