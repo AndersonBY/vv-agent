@@ -312,6 +312,25 @@ def test_changed_own_record_bytes_do_not_hit_cache(store, warm):
         store.read("s")
 
 
+def test_cold_read_validates_record_chain_before_record_schema(store):
+    create_fixture_session(store, "s")
+    append_fixture_records(store, "s", (turn_record(),), commit_id="start")
+    turn = store.read("s").records[-1]
+    value = turn.record.to_dict()
+    value["payload"]["unexpected"] = True
+    rewrite_record(store, turn, value)
+    clear_fixture_state_cache(store)
+
+    with store.atomic():
+        store._rows("UPDATE sk_record SET chain_digest=%s WHERE seq=2", ("0" * 64,))
+    with pytest.raises(LedgerIntegrityError, match="stored record chain digest mismatch at seq 2"):
+        store.read("s")
+
+    rewrite_record(store, turn, value)
+    with pytest.raises(RecordError):
+        store.read("s")
+
+
 # Every existing schema is checked with scalar, collection, missing/extra-field and
 # nested mutations; the original jsonschema validator remains the reference.
 def mutations(value):
