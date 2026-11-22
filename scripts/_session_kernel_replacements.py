@@ -413,10 +413,14 @@ class Author:
             observed = counts | result_facts(result)
             observed["trace_unchanged"] = counts["validator_calls"] == counts["repair_calls"] == 0
             observed["second_repair_attempted"] = counts["repair_calls"] > 1
-            _, records, _ = self.f.kernel.store.read_state(result.raw_result.session_id)
+            store = self.f.kernel.store
+            session_id = result.raw_result.session_id
+            _, records, _ = store.read_state(session_id)
+            hydration = hydration_for_session_store(store, session_id)
             observed["provider_error_is_observed"] = any(
-                r.record.kind == "op_completed" and r.record.payload["result"].get("error_code") == "repair_provider_error"
-                for r in records
+                row.record.kind == "op_completed"
+                and hydrate_record_payload(row, hydration)["result"].get("error_code") == "repair_provider_error"
+                for row in records
             )
             case["expected"] = {k: observed[k] for k in case["expected"]}
             case["model_calls"] = [c.to_dict() for c in result.token_usage.model_calls]
