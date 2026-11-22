@@ -673,7 +673,7 @@ def step(self: CoreDriver, *, one_turn: bool) -> Generator[object, Any, bool]:
         if turn.suspended or turn.wait is not None:
             return False
         if (yield outcomes.OutcomeRead.HOST_CANCELLED):
-            yield from close(self, "cancelled", "cancelled")
+            yield from close(self, "cancelled", "cancel_requested")
             return True
         if (yield Read.CANCELLED):
             yield Read.RESET_TOKEN

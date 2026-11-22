@@ -202,3 +202,6 @@ def test_runner_emits_one_cancelled_terminal_event(tmp_path) -> None:
 
     terminal_types = [event.type for event in result.events if event.type in {"run_completed", "run_failed", "run_cancelled"}]
     assert terminal_types == ["run_cancelled"]
+    assert result.error_code == "cancel_requested"
+    assert result.raw_result.error is not None
+    assert result.raw_result.error["message"] == "cancel_requested"
