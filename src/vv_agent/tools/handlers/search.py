@@ -13,7 +13,13 @@ from typing import Any
 
 import regex as regex_engine
 
-from vv_agent.runtime.local_environment import LocalEnvironmentError, expected_capabilities_for, local_environment_for
+from vv_agent.runtime.local_environment import (
+    ExecutionEnvironmentPort,
+    LocalEnvironmentError,
+    expected_capabilities_for,
+    local_environment_for,
+)
+from vv_agent.session.environments import EnvironmentCapabilities
 from vv_agent.tools.base import ToolContext
 from vv_agent.tools.handlers.common import builtin_error
 from vv_agent.tools.handlers.sensitive_paths import is_sensitive_path
@@ -307,6 +313,8 @@ def _format_output_path(context: ToolContext, candidate_path: Path) -> str:
 def _search_files_local_rg(
     context: ToolContext,
     *,
+    environment: ExecutionEnvironmentPort | None,
+    expected_capabilities: EnvironmentCapabilities | None,
     path: str,
     glob_pattern: str,
     pattern: str,
@@ -370,8 +378,7 @@ def _search_files_local_rg(
     command.extend(["--regexp", pattern, "."])
 
     try:
-        expected = expected_capabilities_for(context)
-        if expected is None:
+        if environment is None:
             process = subprocess.Popen(
                 command,
                 cwd=base_path,
@@ -382,8 +389,8 @@ def _search_files_local_rg(
                 errors="replace",
             )
         else:
-            process = local_environment_for(context).start_search(
-                command, cwd=base_path, text=True, capture_stderr=False, expected_capabilities=expected
+            process = environment.start_search(
+                command, cwd=base_path, text=True, capture_stderr=False, expected_capabilities=expected_capabilities
             )
     except OSError:
         return None
@@ -686,6 +693,8 @@ def _search_files(context: ToolContext, arguments: dict[str, Any]) -> ToolExecut
         sensitive_files_omitted = len(set(sensitive_candidates))
 
     rg_result: tuple[int, int, list[str], dict[str, int], list[dict[str, Any]]] | None = None
+    expected = expected_capabilities_for(context)
+    environment = local_environment_for(context, expected_capabilities=expected)
     local_root = getattr(backend, "root", None)
     can_exclude_sensitive_in_rg = include_sensitive or all(
         _sensitive_path_is_covered_by_rg_excludes(candidate) for candidate in sensitive_candidates
@@ -693,6 +702,8 @@ def _search_files(context: ToolContext, arguments: dict[str, Any]) -> ToolExecut
     if isinstance(local_root, Path) and not explicit_file_target and can_exclude_sensitive_in_rg:
         rg_result = _search_files_local_rg(
             context,
+            environment=environment,
+            expected_capabilities=expected,
             path=path,
             glob_pattern=glob_pattern,
             pattern=pattern if literal else regex_pattern,
@@ -717,6 +728,8 @@ def _search_files(context: ToolContext, arguments: dict[str, Any]) -> ToolExecut
             content_rows = [row for row in content_rows if row["path"] not in sensitive_paths]
             total_matches = sum(file_counts.values())
     else:
+        if environment is not None:
+            raise LocalEnvironmentError("Search could not run through the requested local environment")
         raw_paths = [path] if explicit_file_target else backend.list_files(path, glob_pattern)
         check_matching_budget()
         for raw_rel_path in raw_paths:

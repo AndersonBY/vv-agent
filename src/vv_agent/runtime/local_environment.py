@@ -273,9 +273,6 @@ class LocalEnvironment:
         return self.start_search(command, cwd=cwd, text=text, capture_stderr=capture_stderr)
 
 
-_DEFAULT_LOCAL_ENVIRONMENT = LocalEnvironment()
-
-
 def _metadata_sources(context: Any) -> list[Mapping[str, Any]]:
     sources: list[Mapping[str, Any]] = []
     for source in (
@@ -289,11 +286,12 @@ def _metadata_sources(context: Any) -> list[Mapping[str, Any]]:
 
 
 def local_environment_for(
-    context: Any = None,
+    context: Any,
     *,
-    default: ExecutionEnvironmentPort | None = None,
-) -> ExecutionEnvironmentPort:
-    """Resolve a host-provided environment, falling back to the local adapter."""
+    expected_capabilities: EnvironmentCapabilities | None,
+    process_starter: StartProcess = start_captured_process,
+) -> ExecutionEnvironmentPort | None:
+    """Resolve the requested adapter, or leave ordinary execution unbound."""
     for source in _metadata_sources(context):
         candidate = source.get(LOCAL_ENVIRONMENT_METADATA_KEY)
         if candidate is None:
@@ -301,7 +299,9 @@ def local_environment_for(
         if not isinstance(candidate, ExecutionEnvironmentPort):
             raise TypeError("local_environment must implement ExecutionEnvironmentPort")
         return candidate
-    return default or _DEFAULT_LOCAL_ENVIRONMENT
+    if expected_capabilities is None:
+        return None
+    return LocalEnvironment(process_starter=process_starter)
 
 
 def expected_capabilities_for(context: Any) -> EnvironmentCapabilities | None:

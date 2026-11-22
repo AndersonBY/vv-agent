@@ -149,10 +149,11 @@ def run_bash_command(context: ToolContext, arguments: dict[str, Any]) -> ToolExe
     try:
         process_env = _build_process_env(bash_env)
         expected = expected_capabilities_for(context)
-        if expected is None:
+        environment = local_environment_for(context, expected_capabilities=expected, process_starter=start_captured_process)
+        if environment is None:
             started = start_captured_process(shell_command, cwd=exec_dir, stdin_text=prepared_stdin, env=process_env)
         else:
-            started = local_environment_for(context).start_process(
+            started = environment.start_process(
                 shell_command, cwd=exec_dir, stdin_text=prepared_stdin, env=process_env, expected_capabilities=expected
             )
     except LocalEnvironmentError as exc:

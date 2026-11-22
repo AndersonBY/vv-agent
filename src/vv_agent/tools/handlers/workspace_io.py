@@ -9,7 +9,13 @@ import sysconfig
 from pathlib import Path
 from typing import Any
 
-from vv_agent.runtime.local_environment import LocalEnvironmentError, expected_capabilities_for, local_environment_for
+from vv_agent.runtime.local_environment import (
+    ExecutionEnvironmentPort,
+    LocalEnvironmentError,
+    expected_capabilities_for,
+    local_environment_for,
+)
+from vv_agent.session.environments import EnvironmentCapabilities
 from vv_agent.tools.base import ToolContext
 from vv_agent.tools.handlers.common import to_json
 from vv_agent.tools.handlers.sensitive_paths import is_sensitive_path
@@ -210,6 +216,8 @@ def _resolve_rg_executable() -> str | None:
 def _find_files_local_rg(
     *,
     context: ToolContext,
+    environment: ExecutionEnvironmentPort | None,
+    expected_capabilities: EnvironmentCapabilities | None,
     base_path: Path,
     base_is_workspace_root: bool,
     glob_pattern: str,
@@ -242,12 +250,11 @@ def _find_files_local_rg(
     command.append(".")
 
     try:
-        expected = expected_capabilities_for(context)
-        if expected is None:
+        if environment is None:
             process = subprocess.Popen(command, cwd=base_path, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         else:
-            process = local_environment_for(context).start_search(
-                command, cwd=base_path, text=False, capture_stderr=True, expected_capabilities=expected
+            process = environment.start_search(
+                command, cwd=base_path, text=False, capture_stderr=True, expected_capabilities=expected_capabilities
             )
     except OSError:
         return None
@@ -334,6 +341,8 @@ def _find_files_local_rg(
 def _find_files_local_fast(
     context: ToolContext,
     *,
+    environment: ExecutionEnvironmentPort | None,
+    expected_capabilities: EnvironmentCapabilities | None,
     path: str,
     glob_pattern: str,
     include_hidden: bool,
@@ -369,6 +378,8 @@ def _find_files_local_fast(
     glob_regex = RegexBudget(compile_glob(glob_pattern))
     rg_result = _find_files_local_rg(
         context=context,
+        environment=environment,
+        expected_capabilities=expected_capabilities,
         base_path=base_path,
         base_is_workspace_root=root_listing,
         glob_pattern=glob_pattern,
@@ -382,6 +393,8 @@ def _find_files_local_fast(
     if rg_result is not None:
         files, total_count, truncated, scan_limited = rg_result
         return files, total_count, truncated, scan_limited, ignored_roots_summary
+    if environment is not None:
+        raise LocalEnvironmentError("File discovery could not run through the requested local environment")
 
     matched_files: list[str] = []
     matched_count = 0
@@ -496,11 +509,15 @@ def _find_files(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutio
     ignored_roots_summary: list[dict[str, Any]] = []
     scan_limited = False
     effective_sort = sort
+    expected = expected_capabilities_for(context)
+    environment = local_environment_for(context, expected_capabilities=expected)
     local_root = getattr(backend, "root", None)
     if isinstance(local_root, Path):
         try:
             files, total_count, truncated, scan_limited, ignored_roots_summary = _find_files_local_fast(
                 context,
+                environment=environment,
+                expected_capabilities=expected,
                 path=path,
                 glob_pattern=glob_pattern,
                 include_hidden=include_hidden,
@@ -524,6 +541,8 @@ def _find_files(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutio
         except OSError as exc:
             return _workspace_error(str(exc), error_code="workspace_backend_error", path=path)
     else:
+        if environment is not None:
+            raise LocalEnvironmentError("File discovery requires a local workspace for the requested environment")
         try:
             all_files = backend.list_files(path, glob_pattern)
         except TimeoutError:
