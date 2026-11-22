@@ -17,6 +17,7 @@ from vv_agent.session.store import LeaseLost
 from vv_agent.session.timing import SystemClock
 from vv_agent.types import LLMResponse
 
+from .conftest import open_store
 from .helpers import fixture_child_spec, fixture_content_reader, read_fixture_state, runtime_turn_record, wrap_fixture_store
 from .test_children import parent_runtime
 from .test_recovery_matrix import runtime as base_runtime
@@ -111,7 +112,7 @@ def lease_row(store):
 
 
 def run_parent(database, entered, finish, calls, *, phase="prepare", scheduled=False, ttl_ms=TTL):
-    with PostgresStore.standalone(database) as raw_worker:
+    with open_store(database) as raw_worker:
         worker = wrap_fixture_store(raw_worker)
         rt = parent_runtime(worker, database)
         rt.ttl_ms, rt.heartbeat_seconds = ttl_ms, INTERVAL
@@ -235,7 +236,7 @@ def test_slow_append_encoding_uses_last_lease(store, database, monkeypatch):
     monkeypatch.setattr(Record, "encode", slow_encode)
 
     def work():
-        with PostgresStore.standalone(database) as raw_worker:
+        with open_store(database) as raw_worker:
             worker = wrap_fixture_store(raw_worker)
             rt = runtime(worker, database, [LLMResponse("done")], ttl_ms=TTL, heartbeat_seconds=INTERVAL)
             rt.heartbeat_store = worker.heartbeat_store
@@ -313,7 +314,7 @@ def test_heartbeat_database_timeout_is_bounded_lease_loss(store, database, monke
 
     monkeypatch.setattr(CorePostgresStore, "renew", paused)
     heartbeat = kernel._LeaseHeartbeat(lease, store.heartbeat_store, TTL, INTERVAL, now_ms=store._now())
-    with PostgresStore.standalone(database) as locker, locker.atomic() as tx:
+    with open_store(database) as locker, locker.atomic() as tx:
         if fault == "row_lock":
             tx.lock_session("s")
         begin = monotonic()
@@ -638,7 +639,7 @@ def test_two_transient_heartbeat_timeouts_keep_epoch_and_commit(store, database,
         return LLMResponse("done")
 
     monkeypatch.setattr(CorePostgresStore, "renew", intermittent)
-    factory = (lambda: PostgresStore.standalone(database)) if host_factory else store.heartbeat_store
+    factory = (lambda: open_store(database)) if host_factory else store.heartbeat_store
     monkeypatch.setattr(store, "heartbeat_store", factory)
     rt = runtime(store, database, [response], ttl_ms=3000, heartbeat_seconds=INTERVAL)
     rt.heartbeat_store = factory
@@ -721,7 +722,7 @@ def test_close_interrupts_transient_retry_wait_without_another_renew(store, data
         raise LockNotAvailable("injected row lock timeout")
 
     monkeypatch.setattr(PostgresStore, "renew", failing)
-    heartbeat = kernel._LeaseHeartbeat(lease, lambda: PostgresStore.standalone(database), 4000, 1.0, now_ms=store._now())
+    heartbeat = kernel._LeaseHeartbeat(lease, lambda: open_store(database), 4000, 1.0, now_ms=store._now())
     heartbeat.start()
     assert failed.wait(5)
     begin = monotonic()
@@ -754,9 +755,9 @@ def test_host_heartbeat_retries_two_real_lock_timeouts_then_renews(store, databa
         return result
 
     monkeypatch.setattr(PostgresStore, "renew", observed)
-    heartbeat = kernel._LeaseHeartbeat(lease, lambda: PostgresStore.standalone(database), 3000, INTERVAL, now_ms=store._now())
+    heartbeat = kernel._LeaseHeartbeat(lease, lambda: open_store(database), 3000, INTERVAL, now_ms=store._now())
     try:
-        with PostgresStore.standalone(database) as locker, locker.atomic() as tx:
+        with open_store(database) as locker, locker.atomic() as tx:
             tx.lock_session("s")
             heartbeat.start()
             wait_until(lambda: len(failures) >= 2)
@@ -779,7 +780,7 @@ def test_append_lock_wait_over_250ms_succeeds_within_lease(store, database):
     entered = threading.Event()
 
     def append():
-        with PostgresStore.standalone(database) as worker, worker.atomic() as tx:
+        with open_store(database) as worker, worker.atomic() as tx:
             tx._lease_guard = lambda: lease
             entered.set()
             tx.append("s", lease=lease, expected_seq=1, commit_id="waiting", records=(turn,))

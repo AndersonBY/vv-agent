@@ -2197,11 +2197,16 @@ class SQLStore:
             if lease is not None:
                 self._check_lease(session_id, lease, row, now)
                 self._require_worker_accepts_row(row)
-            due = self._one(
-                "SELECT next_drive_ms FROM sk_session WHERE tenant_id=%s AND session_id=%s",
+            next_drive_ms, drive_retry_at_ms = self._one(
+                "SELECT next_drive_ms,drive_retry_at_ms FROM sk_session WHERE tenant_id=%s AND session_id=%s",
                 (self.tenant_id, session_id),
-            )[0]
-            return None if due is None else max(0, due - now)
+            )
+            future_due = [due for due in (next_drive_ms, drive_retry_at_ms) if due is not None and due > now]
+            if future_due:
+                return min(future_due) - now
+            if next_drive_ms is not None and next_drive_ms <= now:
+                return 0
+            return None
 
     def defer_idle_drive(self, lease: Lease, *, poll_ms: int) -> bool:
         """Defer a stale idle schedule without changing execution facts or future due work."""
@@ -2287,19 +2292,17 @@ class SQLStore:
             )
 
     def is_runnable(self, session_id: str) -> bool:
-        # Check after release in a fresh transaction so a pusher racing the holder is visible.
-        candidate_predicate, worker_params = self._worker_candidate_predicate()
-        with self._transaction():
-            return bool(
-                self._rows(
-                    f"WITH clock AS MATERIALIZED (SELECT {self.clock_sql} AS ms) "
-                    "SELECT 1 FROM sk_session s CROSS JOIN clock t "
-                    f"WHERE s.tenant_id=%s AND s.session_id=%s AND s.schema_version='S1' "
-                    f"AND s.deletion_state='live' AND {candidate_predicate} "
-                    f"AND {_DRIVE_RUNNABLE_SQL}",
-                    (self.tenant_id, session_id, *worker_params),
-                )
+        _identity(session_id)
+        return bool(
+            self._runnable_work(
+                limit=1,
+                after=None,
+                apply_worker_filter=True,
+                work_kinds=("drive",),
+                projection_consumers=(),
+                session_id=session_id,
             )
+        )
 
     def _runnable_work(
         self,
@@ -2309,6 +2312,7 @@ class SQLStore:
         apply_worker_filter: bool,
         work_kinds: WorkKinds | None,
         projection_consumers: ProjectionConsumers | None,
+        session_id: str | None = None,
     ) -> tuple[WorkItem, ...]:
         _positive(limit, "limit")
         if work_kinds is not None:
@@ -2343,6 +2347,8 @@ class SQLStore:
         tenant_id = self._claim_tenant_id()
         if after is not None and tenant_id is not None and after.tenant_id != tenant_id:
             raise ValueError("work cursor belongs to another tenant")
+        if session_id is not None:
+            _identity(session_id)
         cursor = (
             (
                 after.tenant_id,
@@ -2362,11 +2368,13 @@ class SQLStore:
         reader_predicate = "AND s.level<=%s"
         reader_params = (self.reader_level,)
         drive_scope = "" if tenant_id is None else "s.tenant_id=%s AND "
+        drive_session_filter = "" if session_id is None else "AND s.session_id=%s "
         project_scope = "" if tenant_id is None else "c.tenant_id=%s AND "
         scope_params: tuple[Any, ...] = () if tenant_id is None else (tenant_id,)
         select_tenant = "s.tenant_id" if tenant_id is None else "%s"
         project_tenant = "c.tenant_id" if tenant_id is None else "%s"
         drive_select_params: tuple[Any, ...] = () if tenant_id is None else (tenant_id,)
+        drive_session_params: tuple[Any, ...] = () if session_id is None else (session_id,)
         project_select_params: tuple[Any, ...] = () if tenant_id is None else (tenant_id,)
         rows = self._rows(
             f"""
@@ -2374,6 +2382,7 @@ class SQLStore:
                 SELECT {select_tenant} AS tenant_id,s.session_id,'drive' AS work_kind,'' AS consumer
                 FROM sk_session s CROSS JOIN clock t
                 WHERE {drive_scope}(s.tenant_id,s.session_id,'drive','')>(%s,%s,%s,%s)
+                  {drive_session_filter}
                   AND s.schema_version='S1' AND s.deletion_state='live'
                   {worker_predicate}
                   {drive_filter}
@@ -2398,6 +2407,7 @@ class SQLStore:
                 *drive_select_params,
                 *scope_params,
                 *cursor,
+                *drive_session_params,
                 *worker_params,
                 limit,
                 *project_select_params,
