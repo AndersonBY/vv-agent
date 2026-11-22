@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 
+from vv_agent.kernel import _allocation_journal
 from vv_agent.kernel._allocation_journal import AllocationOwner, SQLiteAllocationJournal
 from vv_agent.kernel._content import ContentBindingMismatch, ContentCleanupUnavailable, ContentIntegrityError, ContentUnavailable
 from vv_agent.session.s3_content import CiphertextTemporarilyUnavailable, S3CiphertextStore
@@ -107,14 +108,14 @@ def test_s3_marker_then_bound_upload_and_exact_read(adapter) -> None:
     assert marker["Key"] == ciphertext["Key"]
     assert marker["Key"].endswith("/alloc/" + locator[1:].hex())
     assert len(marker["Body"]) < len(ciphertext["Body"])
-    assert store.get(_OWNER, locator, size=len(_CIPHERTEXT)) == _CIPHERTEXT
+    assert store.get(_OWNER, locator, ciphertext_size=len(_CIPHERTEXT)) == _CIPHERTEXT
     with pytest.raises(ContentBindingMismatch):
-        store.get(replace(_OWNER, admission_id="other"), locator, size=len(_CIPHERTEXT))
+        store.get(replace(_OWNER, admission_id="other"), locator, ciphertext_size=len(_CIPHERTEXT))
     with pytest.raises(ContentBindingMismatch):
-        store.get(_OWNER, b"\x02" + locator[1:], size=len(_CIPHERTEXT))
+        store.get(_OWNER, b"\x02" + locator[1:], ciphertext_size=len(_CIPHERTEXT))
     client.reply_body = _CIPHERTEXT + b"x"
     with pytest.raises(ContentIntegrityError):
-        store.get(_OWNER, locator, size=len(_CIPHERTEXT))
+        store.get(_OWNER, locator, ciphertext_size=len(_CIPHERTEXT))
 
 
 @pytest.mark.parametrize("mode", ["marker", "ciphertext", "fence-after-put"])
@@ -142,6 +143,55 @@ def test_invalid_marker_etag_cannot_bind(adapter) -> None:
     assert row is not None and row.state == "unbound"
 
 
+@pytest.mark.parametrize("operation", ["reserve", "bind"])
+@pytest.mark.parametrize("commit_matches", [True, False])
+def test_lost_journal_ack_requires_exact_durable_readback(
+    adapter, monkeypatch: pytest.MonkeyPatch, operation: str, commit_matches: bool
+) -> None:
+    journal, client, store = adapter
+    original = getattr(journal, operation)
+
+    def lost_ack(allocation_id: bytes, *args: Any, **kwargs: Any) -> None:
+        if not commit_matches:
+            if operation == "reserve":
+                kwargs["pin_until_ms"] += 1
+            else:
+                kwargs["reservation_etag"] = '"wrong-etag"'
+        assert original(allocation_id, *args, **kwargs)
+        raise ContentUnavailable("journal reply lost")
+
+    monkeypatch.setattr(journal, operation, lost_ack)
+    if commit_matches:
+        locator = store.put(_OWNER, _CIPHERTEXT, pin_until_ms=_pin(), check_fence=client.fence)
+        assert store.get(_OWNER, locator, ciphertext_size=len(_CIPHERTEXT)) == _CIPHERTEXT
+        assert len(client.calls) == 2
+    else:
+        with pytest.raises(CiphertextTemporarilyUnavailable):
+            store.put(_OWNER, _CIPHERTEXT, pin_until_ms=_pin(), check_fence=client.fence)
+        assert len(client.calls) == (0 if operation == "reserve" else 1)
+
+
+def test_anonymous_delete_ack_keeps_claim_for_late_marker(adapter, monkeypatch: pytest.MonkeyPatch) -> None:
+    journal, client, store = adapter
+    deadline = _pin()
+    client.fail = "marker"
+    with pytest.raises(CiphertextTemporarilyUnavailable):
+        store.put(_OWNER, _CIPHERTEXT, pin_until_ms=deadline, check_fence=client.fence)
+    request = client.calls[0]
+    allocation_id = bytes.fromhex(request["Key"].rsplit("/", maxsplit=1)[1])
+    monkeypatch.setattr(_allocation_journal, "_NOW_MS", str(deadline))
+    claim = journal.claim_anonymous(allocation_id)
+    assert claim is not None and claim.owner is None
+    store.delete_claimed(claim, check_fence=client.fence)
+    assert request["Key"] not in client.objects
+    # A late completion after the DELETE must still be discoverable.
+    client.objects[request["Key"]] = request["Body"]
+    assert journal.anonymous_candidates(limit=1) == (claim,)
+    store.delete_claimed(claim, check_fence=client.fence)
+    assert request["Key"] not in client.objects
+    assert journal.get(allocation_id) == claim
+
+
 def test_delete_requires_exact_durable_claim_and_preserves_unknown_ack(adapter) -> None:
     journal, client, store = adapter
     locator = store.put(_OWNER, _CIPHERTEXT, pin_until_ms=_pin(), check_fence=client.fence)
@@ -153,7 +203,7 @@ def test_delete_requires_exact_durable_claim_and_preserves_unknown_ack(adapter) 
     claim = journal.claim_bound(bound)
     assert claim is not None
     with pytest.raises(ContentUnavailable):
-        store.get(_OWNER, locator, size=len(_CIPHERTEXT))
+        store.get(_OWNER, locator, ciphertext_size=len(_CIPHERTEXT))
     with pytest.raises(ContentCleanupUnavailable):
         store.delete_claimed(replace(claim, reservation_etag='"wrong"'), check_fence=client.fence)
     client.versioned = True

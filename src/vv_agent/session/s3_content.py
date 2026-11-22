@@ -100,10 +100,15 @@ class S3CiphertextStore:
         marker = secrets.token_bytes(_MARKER_BYTES)
         key = self._key(allocation_id)
         try:
-            if not self._journal.reserve(allocation_id, pin_until_ms=pin_until_ms):
-                raise CiphertextTemporarilyUnavailable("external ciphertext reservation is unavailable")
+            reserved = self._journal.reserve(allocation_id, pin_until_ms=pin_until_ms)
         except ContentUnavailable:
-            raise CiphertextTemporarilyUnavailable("external ciphertext journal reservation is unavailable") from None
+            check_fence()
+            _require_live_pin(pin_until_ms)
+            reserved = self._lookup(allocation_id) == Allocation(
+                self._journal._identity.journal_id, allocation_id, "unbound", pin_until_ms
+            )
+        if not reserved:
+            raise CiphertextTemporarilyUnavailable("external ciphertext reservation is unavailable")
 
         check_fence()
         _require_live_pin(pin_until_ms)
@@ -125,10 +130,15 @@ class S3CiphertextStore:
 
         check_fence()
         try:
-            if not self._journal.bind(allocation_id, owner, reservation_etag=etag):
-                raise CiphertextTemporarilyUnavailable("external ciphertext binding is unavailable")
+            bound = self._journal.bind(allocation_id, owner, reservation_etag=etag)
         except ContentUnavailable:
-            raise CiphertextTemporarilyUnavailable("external ciphertext journal binding is unavailable") from None
+            check_fence()
+            _require_live_pin(pin_until_ms)
+            bound = self._lookup(allocation_id) == Allocation(
+                self._journal._identity.journal_id, allocation_id, "bound", pin_until_ms, owner, etag
+            )
+        if not bound:
+            raise CiphertextTemporarilyUnavailable("external ciphertext binding is unavailable")
 
         check_fence()
         _require_live_pin(pin_until_ms)
@@ -145,7 +155,7 @@ class S3CiphertextStore:
         _require_live_pin(pin_until_ms)
         return _LOCATOR_VERSION + allocation_id
 
-    def get(self, owner: AllocationOwner, locator: bytes, *, size: int) -> bytes:
+    def get(self, owner: AllocationOwner, locator: bytes, *, ciphertext_size: int) -> bytes:
         if not isinstance(locator, bytes) or len(locator) != 33 or not locator.startswith(_LOCATOR_VERSION):
             raise ContentBindingMismatch("external ciphertext locator is invalid")
         allocation_id = locator[1:]
@@ -154,7 +164,7 @@ class S3CiphertextStore:
             raise ContentUnavailable("external ciphertext allocation is unavailable")
         if current.owner != owner:
             raise ContentBindingMismatch("external ciphertext locator does not match its exact owner")
-        if type(size) is not int or size <= _MARKER_BYTES:
+        if type(ciphertext_size) is not int or ciphertext_size <= _MARKER_BYTES:
             raise ContentIntegrityError("external ciphertext size is invalid")
         try:
             reply = self._client.get_object(Bucket=self._bucket, Key=self._key(allocation_id))
@@ -162,10 +172,10 @@ class S3CiphertextStore:
             try:
                 if _status(reply) != 200 or reply.get("VersionId") is not None:
                     raise ContentIntegrityError("external ciphertext reply is invalid")
-                if reply.get("ContentLength") != size:
+                if reply.get("ContentLength") != ciphertext_size:
                     raise ContentIntegrityError("external ciphertext size does not match its reference")
-                ciphertext = stream.read(size + 1)
-                if not isinstance(ciphertext, bytes) or len(ciphertext) != size:
+                ciphertext = stream.read(ciphertext_size + 1)
+                if not isinstance(ciphertext, bytes) or len(ciphertext) != ciphertext_size:
                     raise ContentIntegrityError("external ciphertext body length does not match its reference")
                 return ciphertext
             finally:
@@ -179,7 +189,10 @@ class S3CiphertextStore:
             raise CiphertextTemporarilyUnavailable("external ciphertext read did not confirm success") from None
 
     def delete_claimed(self, claim: Allocation, *, check_fence: Callable[[], None]) -> None:
-        """Delete an exact committed claim. The caller owns terminal journal completion."""
+        """Delete an exact committed claim without completing the journal entry.
+
+        A DELETE acknowledgement alone cannot exclude a late anonymous marker PUT.
+        """
         check_fence()
         try:
             current = self._journal.get(claim.allocation_id)
