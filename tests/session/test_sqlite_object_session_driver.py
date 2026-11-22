@@ -7,7 +7,15 @@ from typing import Any
 import pytest
 
 from vv_agent.kernel._allocation_journal import SQLiteAllocationJournal
-from vv_agent.kernel._content import ContentCleanupUnavailable, ContentIntegrityError, ContentRef, Principal
+from vv_agent.kernel._content import (
+    ContentCleanupUnavailable,
+    ContentIntegrityError,
+    ContentRef,
+    ContentUnavailable,
+    KeyUnavailable,
+    Principal,
+    WrappedDataKey,
+)
 from vv_agent.kernel._external_content import _SQLiteObjectContent
 from vv_agent.kernel._records import InboxItem
 from vv_agent.session.content_runtime import (
@@ -21,6 +29,7 @@ from vv_agent.session.s3_content import S3CiphertextStore
 from vv_agent.session.sqlite import SQLiteContentStore, SQLiteStore
 from vv_agent.session.surfaces import SessionDriver
 
+from .test_s1_deletion_recovery_acceptance import Signer
 from .test_s3_reservation_adapter import _Client
 
 
@@ -117,3 +126,151 @@ def test_sqlite_session_driver_object_round_trip(tmp_path: Path) -> None:
             client.objects[key] = bytes(len(client.objects[key]))
             with pytest.raises(ContentIntegrityError):
                 durable_content_store(driver.store).get("default", "objects", workspace)
+
+
+@pytest.mark.parametrize("operation", ["forget", "purge"])
+@pytest.mark.parametrize("cut", ["provider", "delete", "object_ack", "sql_commit", "journal"])
+def test_external_root_erasure_resumes_after_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str, cut: str
+) -> None:
+    primary, key_path, sidecar = (tmp_path / name for name in ("primary.sqlite", "keys.sqlite", "allocation.sqlite"))
+    identity = SQLiteAllocationJournal.provision(sidecar, database_id="primary", namespace="fixture")
+    journal = SQLiteAllocationJournal(sidecar, identity)
+    client = S3Fixture(journal)
+    signer = Signer()
+    delete_keys: list[str] = []
+    original_delete = client.delete_object
+
+    def observe_delete(*, Bucket: str, Key: str) -> dict[str, Any]:
+        delete_keys.append(Key)
+        return original_delete(Bucket=Bucket, Key=Key)
+
+    monkeypatch.setattr(client, "delete_object", observe_delete)
+
+    class Interrupted(RuntimeError):
+        pass
+
+    with SQLiteStore.standalone(str(primary)) as raw, closing(LocalKeyProvider(b"x" * 32, state_path=key_path)) as provider:
+        raw.configure_input_admission(signer=signer)
+        provider_id = provider._provision_exact_key_lifecycle()
+        binding = _SQLiteObjectContent(
+            journal, S3CiphertextStore(client, bucket="fixture", journal=journal), provider_id, terminal_bound_delete=True
+        )
+        bind_content_runtime(raw, key_provider=provider, cipher=AESGCMCipher(), _object_content=binding)
+        with closing(SessionDriver(store=raw)) as driver:
+            driver.create("objects", "/external")
+            actor = Principal.from_dict(driver.store.read("objects", limit=1).records[0].record.payload["principal"])
+        ((key_id, wrapped_key),) = raw._rows("SELECT key_id,wrapped_key FROM sk_session_key")
+        wrapped = WrappedDataKey("default", "objects", key_id, wrapped_key)
+        service = SessionDeletionStore(raw, SQLiteContentStore(raw, provider))
+        erase = service.forget_session if operation == "forget" else service.purge_session
+        with monkeypatch.context() as patch:
+            if cut == "provider":
+
+                def after_revocation(*_args: Any) -> None:
+                    with SQLiteStore.standalone(str(primary)) as observer:
+                        tombstone = observer._tombstone("objects")
+                        assert tombstone is not None and tombstone.state.value == "pending"
+                    with pytest.raises(KeyUnavailable):
+                        provider.unwrap("default", "objects", wrapped)
+                    raise Interrupted("lost key retirement receipt")
+
+                patch.setattr(journal, "record_key_retirement", after_revocation)
+            elif cut == "delete":
+                client.fail = "delete"
+            elif cut == "object_ack":
+                original_confirm = journal.confirm_bound_delete
+
+                def after_confirm(*args: Any) -> None:
+                    assert original_confirm(*args).delete_confirmed
+                    raise Interrupted("lost bound object confirmation acknowledgement")
+
+                patch.setattr(journal, "confirm_bound_delete", after_confirm)
+            elif cut == "sql_commit":
+
+                def after_content_removal(*_args: Any, **_kwargs: Any) -> None:
+                    assert raw._rows("SELECT object_locator FROM sk_content") == []
+                    raise Interrupted("lost cleanup acknowledgement")
+
+                patch.setattr(journal, "finish_reap", after_content_removal)
+            else:
+                original_finish = journal.finish_key_intent
+
+                def after_key_intent_finish(*args: Any) -> None:
+                    assert original_finish(*args)
+                    raise Interrupted("lost last journal acknowledgement")
+
+                patch.setattr(journal, "finish_key_intent", after_key_intent_finish)
+
+            with pytest.raises(ContentCleanupUnavailable if cut == "delete" else Interrupted):
+                erase("default", "objects", actor=actor)
+        client.fail = ""
+        pending = raw._tombstone("objects")
+        assert pending is not None and pending.state.value == "pending"
+        complete = raw.complete_forget if operation == "forget" else raw.complete_purge
+        with pytest.raises(ContentCleanupUnavailable):
+            complete("objects")
+
+    with SQLiteStore.standalone(str(primary)) as raw, closing(LocalKeyProvider(b"x" * 32, state_path=key_path)) as provider:
+        raw.configure_input_admission(signer=signer)
+        complete = raw.complete_forget if operation == "forget" else raw.complete_purge
+        with pytest.raises(ContentCleanupUnavailable):
+            complete("objects")
+        with pytest.raises(KeyUnavailable):
+            provider.unwrap("default", "objects", wrapped)
+
+        reopened = SQLiteAllocationJournal(sidecar, identity)
+        for candidate in (
+            SQLiteAllocationJournal(
+                tmp_path / "wrong.sqlite",
+                SQLiteAllocationJournal.provision(tmp_path / "wrong.sqlite", database_id="primary", namespace="fixture"),
+            ),
+            reopened,
+        ):
+            wrong_client = S3Fixture(candidate)
+            wrong_client.endpoint_url = "http://another-fixture.invalid" if candidate is reopened else client.endpoint_url
+            wrong = _SQLiteObjectContent(
+                candidate,
+                S3CiphertextStore(wrong_client, bucket="fixture", journal=candidate),
+                provider_id,
+                terminal_bound_delete=True,
+            )
+            bind_content_runtime(raw, key_provider=provider, cipher=AESGCMCipher(), _object_content=wrong)
+            service = SessionDeletionStore(raw, SQLiteContentStore(raw, provider))
+            erase = service.forget_session if operation == "forget" else service.purge_session
+            with pytest.raises(ContentCleanupUnavailable, match="matching journal"):
+                erase("default", "objects", actor=actor)
+        binding = _SQLiteObjectContent(
+            reopened, S3CiphertextStore(client, bucket="fixture", journal=reopened), provider_id, terminal_bound_delete=True
+        )
+        bind_content_runtime(raw, key_provider=provider, cipher=AESGCMCipher(), _object_content=binding)
+        service = SessionDeletionStore(raw, SQLiteContentStore(raw, provider))
+        erase = service.forget_session if operation == "forget" else service.purge_session
+        missing = sidecar.with_suffix(".missing")
+        sidecar.rename(missing)
+        sent = len(delete_keys)
+        try:
+            with pytest.raises(ContentUnavailable):
+                erase("default", "objects", actor=actor)
+        finally:
+            missing.rename(sidecar)
+        assert len(delete_keys) == sent
+        if cut == "journal":
+            with monkeypatch.context() as patch:
+                patch.setattr(provider, "_verify_exact_retirement", lambda _intent: None)
+                with pytest.raises(ContentCleanupUnavailable, match="retirement evidence"):
+                    erase("default", "objects", actor=actor)
+        receipt = erase("default", "objects", actor=actor)
+        assert receipt.authenticity.value == "signed"
+        assert erase("default", "objects", actor=actor) == receipt
+        complete_tombstone = raw._tombstone("objects")
+        assert complete_tombstone is not None and complete_tombstone.state.value == "complete"
+        assert raw._rows("SELECT key_id FROM sk_session_key") == []
+        assert raw._rows("SELECT content_id FROM sk_content") == []
+        assert reopened.scoped_key_intents("default", ("objects",)) == ()
+        assert reopened.scoped_allocations("default", ("objects",)) == ()
+        assert client.objects == {}
+        if cut in {"sql_commit", "journal"}:
+            assert len(delete_keys) == sent
+        if cut == "object_ack":
+            assert len(delete_keys) == len(set(delete_keys))

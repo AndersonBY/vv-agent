@@ -36,6 +36,7 @@ class _Client:
         self.fence_held = True
         self.reply_body: bytes | None = None
         self.meta = self
+        self.endpoint_url = "http://fixture.invalid"
         self.config = self
         self.events = self
         self.retries = {"total_max_attempts": 1}

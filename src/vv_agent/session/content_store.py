@@ -275,6 +275,18 @@ class LocalKeyProvider:
             )
         return KeyDestroyOutcome(True, KeyDestroyStatus.DESTROYED, evidence_id)
 
+    def _verify_exact_retirement(self, intent: _ExactKeyIntent) -> str | None:
+        """Read existing terminal evidence without creating a provider record."""
+        with self._lock:
+            connection = self._state_connection()
+            binding = self._exact_key_binding(connection, intent)
+            row = connection.execute(
+                "SELECT binding,evidence_id FROM local_exact_keys WHERE key_id=?", (intent.key_id,)
+            ).fetchone()
+        if row is None or not hmac.compare_digest(row[0], binding):
+            return None
+        return row[1]
+
     def generate_data_key(self, tenant_id: str, session_id: str) -> WrappedDataKey:
         tenant_id = _text(tenant_id, "tenant_id")
         session_id = _text(session_id, "session_id")

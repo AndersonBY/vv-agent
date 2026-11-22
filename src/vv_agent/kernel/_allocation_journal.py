@@ -22,11 +22,11 @@ from ._content import (
     _ExactKeyIntent,
 )
 
-_VERSION = 3
+_VERSION = 4
 _OWNER_COLUMNS = """
     tenant_id, session_id, content_id, admission_session_id, admission_id, provider_instance_id, key_id
 """
-_ALLOCATION_COLUMNS = f"allocation_id,state,pin_until_ms,reservation_etag,{_OWNER_COLUMNS}"
+_ALLOCATION_COLUMNS = f"allocation_id,state,pin_until_ms,reservation_etag,delete_confirmed,{_OWNER_COLUMNS}"
 _KEY_OWNER_COLUMNS = "key_id,provider_instance_id,tenant_id,session_id,admission_root_id,admission_id"
 _KEY_INTENT_COLUMNS = f"{_KEY_OWNER_COLUMNS},state,pin_until_ms,evidence_id"
 _NOW_MS = "(CAST(strftime('%s','now') AS INTEGER)*1000 + CAST(substr(strftime('%f','now'),4) AS INTEGER))"
@@ -60,6 +60,9 @@ _SCHEMA = (
         provider_instance_id TEXT CHECK (length(provider_instance_id) > 0),
         key_id TEXT CHECK (length(key_id) > 0),
         reservation_etag TEXT CHECK (length(reservation_etag) > 0),
+        delete_confirmed INTEGER NOT NULL DEFAULT 0 CHECK (
+            delete_confirmed IN (0,1) AND (delete_confirmed=0 OR (state='reaping' AND tenant_id IS NOT NULL))
+        ),
         CHECK (
             (state IN ('unbound','reaping') AND tenant_id IS NULL AND session_id IS NULL
              AND content_id IS NULL AND admission_session_id IS NULL AND admission_id IS NULL
@@ -132,6 +135,7 @@ class Allocation:
     pin_until_ms: int
     owner: AllocationOwner | None = None
     reservation_etag: str | None = None
+    delete_confirmed: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -221,7 +225,7 @@ class SQLiteAllocationJournal:
             raise ContentUnavailable("allocation journal is unavailable") from exc
 
     def _allocation(self, row: tuple) -> Allocation:
-        allocation_id, state, pin_until_ms, etag, *owner = row
+        allocation_id, state, pin_until_ms, etag, delete_confirmed, *owner = row
         return Allocation(
             self._identity.journal_id,
             allocation_id,
@@ -229,6 +233,7 @@ class SQLiteAllocationJournal:
             pin_until_ms,
             AllocationOwner(*owner) if owner[0] is not None else None,
             etag,
+            bool(delete_confirmed),
         )
 
     def _get(self, connection: sqlite3.Connection, allocation_id: bytes) -> Allocation | None:
@@ -330,6 +335,21 @@ class SQLiteAllocationJournal:
                 (expected.allocation_id,),
             ).fetchone()
             return self._allocation(row) if row is not None else None
+
+    def confirm_bound_delete(self, claim: Allocation) -> Allocation:
+        """Record terminal deletion for an exact bound claim while retaining ownership."""
+        _require_id(claim.allocation_id)
+        if claim.state != "reaping" or claim.owner is None or claim.journal_id != self._identity.journal_id:
+            raise ContentCleanupUnavailable("terminal bound deletion requires the exact scoped claim")
+        with self._transaction(write=True) as connection:
+            if self._get(connection, claim.allocation_id) != claim:
+                raise ContentCleanupUnavailable("terminal bound deletion claim changed")
+            row = connection.execute(
+                f"UPDATE allocation SET delete_confirmed=1 WHERE allocation_id=? RETURNING {_ALLOCATION_COLUMNS}",
+                (claim.allocation_id,),
+            ).fetchone()
+            assert row is not None
+            return self._allocation(row)
 
     def finish_reap(self, claim: Allocation, *, remote_terminal: bool) -> bool:
         """Remove an exact claim once the caller verifies deletion and terminal request state."""

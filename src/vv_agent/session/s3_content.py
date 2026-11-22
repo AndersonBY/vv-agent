@@ -66,6 +66,10 @@ class S3CiphertextStore:
         self._journal = journal
         self._require_unversioned()
 
+    @property
+    def _storage_identity(self) -> tuple[str, str, str]:
+        return self._client.meta.endpoint_url, self._bucket, self._prefix
+
     def _require_unversioned(self) -> None:
         try:
             reply = self._client.get_bucket_versioning(Bucket=self._bucket)

@@ -116,6 +116,9 @@ def test_anonymous_claim_after_pin_expiry_excludes_bind_and_retains_unknown_mark
         sweeper.finish_reap(claim, remote_terminal=False)
     reopened = SQLiteAllocationJournal(path, identity)
     assert reopened.claim_anonymous(_id(1)) == claim
+    with pytest.raises(ContentCleanupUnavailable):
+        reopened.confirm_bound_delete(claim)
+    assert reopened.get(_id(1)) == claim
     assert not reopened.bind(_id(1), _OWNER, reservation_etag=_ETAG)
     assert reopened.finish_reap(claim, remote_terminal=True)
 

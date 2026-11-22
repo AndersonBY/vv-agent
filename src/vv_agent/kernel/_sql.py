@@ -2717,6 +2717,7 @@ class SQLStore:
         bound_signer: Any | None,
         verifier: Any | None,
         allow_unsigned: bool,
+        _external_root: bool = False,
     ) -> tuple[str, ...]:
         """Fence a forget scope and durably bind its pending tombstone."""
         self._require_configured_ledger("session forget")
@@ -2724,7 +2725,7 @@ class SQLStore:
             raise ContentBindingMismatch("deletion actor belongs to another tenant")
         with self._transaction():
             scope = self._deletion_scope(session_id)
-            self._reject_external_erasure(tuple(entry.session_id for entry in scope))
+            self._guard_external_erasure(session_id, scope, enabled=_external_root)
             if not scope:
                 raise Conflict("session not found in tenant")
             if any(entry.deletion_state == "purging" for entry in scope):
@@ -2791,12 +2792,60 @@ class SQLStore:
             if has_exact_key or has_locator:
                 raise ContentCleanupUnavailable("external content erasure is unavailable")
 
-    def complete_forget(self, session_id: str) -> None:
+    def _guard_external_erasure(
+        self, session_id: str, scope: tuple[DeletionScopeEntry, ...], *, enabled: bool, completing: bool = False
+    ) -> None:
+        if not enabled:
+            self._reject_external_erasure(tuple(entry.session_id for entry in scope))
+            return
+        from ._content_runtime import content_runtime_binding_for
+
+        binding = content_runtime_binding_for(self)
+        if (
+            binding is None
+            or binding._object_content is None
+            or any(entry.session_id != session_id or entry.parent_session_id is not None for entry in scope)
+        ):
+            raise ContentCleanupUnavailable("external erasure supports only a bound SQLite root")
+        objects = binding._object_content
+        params = (self.tenant_id, session_id)
+        rows = self._rows("SELECT key_id,provider_id,state FROM sk_session_key WHERE tenant_id=%s AND session_id=%s", params)
+        if rows:
+            ((key_id, provider_id, state),) = rows
+            if provider_id != getattr(binding.key_provider, "provider_id", None):
+                raise ContentCleanupUnavailable("external erasure requires the original key provider")
+            key, allocations = objects.erasure_inventory(*params, key_id)
+            if not completing:
+                if state == "active" and key is None:
+                    raise ContentCleanupUnavailable("external erasure lacks the committed key intent")
+                return
+            if state != "destroying" or key is not None or allocations:
+                raise ContentCleanupUnavailable("external erasure evidence is incomplete")
+            objects.verify_retired(binding.key_provider, *params, key_id)
+        elif scope and scope[0].deletion_state != "forgotten":
+            raise ContentCleanupUnavailable("external erasure requires the durable SQL key")
+        if objects.journal.scoped_key_intents(params[0], (session_id,)) or objects.journal.scoped_allocations(
+            params[0], (session_id,)
+        ):
+            raise ContentCleanupUnavailable("external erasure scope is not empty")
+        if self._rows("SELECT 1 FROM sk_content WHERE tenant_id=%s AND session_id=%s LIMIT 1", params) or self._rows(
+            "SELECT 1 FROM sk_content_link WHERE tenant_id=%s AND session_id=%s LIMIT 1", params
+        ):
+            raise ContentCleanupUnavailable("external erasure retained SQL content")
+        if completing and rows:
+            tombstone = self._tombstone(session_id, for_update=True)
+            if tombstone is None or tombstone.state is not TombstoneState.PENDING:
+                raise ContentCleanupUnavailable("external erasure requires a pending tombstone")
+            _, allow_unsigned, verifier = self._input_admission_policy()
+            self._verify_tombstone_object(tombstone, verifier, allow_unsigned=allow_unsigned)
+            self._rows("DELETE FROM sk_session_key WHERE tenant_id=%s AND session_id=%s AND state='destroying'", params)
+
+    def complete_forget(self, session_id: str, *, _external_root: bool = False) -> None:
         """Publish the complete tombstone after content/key erasure succeeds."""
         self._require_configured_ledger("session forget completion")
         with self._transaction():
             scope = self._deletion_scope(session_id)
-            self._reject_external_erasure(tuple(entry.session_id for entry in scope))
+            self._guard_external_erasure(session_id, scope, enabled=_external_root, completing=True)
             if not scope:
                 raise Conflict("session not found in tenant")
             if any(entry.deletion_state not in {"forgetting", "forgotten"} for entry in scope):
@@ -2831,6 +2880,7 @@ class SQLStore:
         bound_signer: Any | None,
         verifier: Any | None,
         allow_unsigned: bool,
+        _external_root: bool = False,
     ) -> tuple[str, ...]:
         """Freeze root/descendants, persist pending tombstones, and start purge."""
         self._require_configured_ledger("session purge")
@@ -2838,7 +2888,9 @@ class SQLStore:
             raise ContentBindingMismatch("deletion actor belongs to another tenant")
         with self._transaction():
             scope = self._deletion_scope(session_id)
-            self._reject_external_erasure(tuple(entry.session_id for entry in scope))
+            self._guard_external_erasure(session_id, scope, enabled=_external_root)
+            if _external_root and any(entry.deletion_state == "forgotten" for entry in scope):
+                raise ContentCleanupUnavailable("external purge after forget is unavailable")
             now = self._now()
             if not scope:
                 tombstones = self._rows(
@@ -2871,12 +2923,12 @@ class SQLStore:
                 )
             return tuple(entry.session_id for entry in scope)
 
-    def complete_purge(self, session_id: str) -> tuple[str, ...]:
+    def complete_purge(self, session_id: str, *, _external_root: bool = False) -> tuple[str, ...]:
         """Delete a fenced scope child-first and retain only complete tombstones."""
         self._require_configured_ledger("session purge completion")
         with self._transaction():
             scope = self._deletion_scope(session_id)
-            self._reject_external_erasure(tuple(entry.session_id for entry in scope))
+            self._guard_external_erasure(session_id, scope, enabled=_external_root, completing=True)
             if not scope:
                 rows = self._rows(
                     "SELECT session_id FROM sk_tombstone WHERE tenant_id=%s AND scope_root_session_id=%s "

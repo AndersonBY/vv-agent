@@ -7,13 +7,18 @@ closed execution boundary.
 
 from __future__ import annotations
 
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
-from vv_agent.kernel._content import ForgetTombstone, Principal, TombstoneState
+from vv_agent.kernel._content import ContentCleanupUnavailable, ForgetTombstone, KeyProvider, Principal, TombstoneState
+from vv_agent.kernel._content_runtime import content_runtime_binding_for
 from vv_agent.kernel._content_sql import CoreSQLContentStore
+from vv_agent.kernel._external_content import _SQLiteObjectContent
 from vv_agent.kernel._sql import _STORED_INBOX_COLUMNS, LedgerIntegrityError, LedgerSigner, SessionNotLive, SQLStore
+from vv_agent.kernel._sqlite import SQLiteStore
 from vv_agent.kernel._store import (
     SESSION_DELETION_INVENTORY,
     Conflict,
@@ -321,6 +326,150 @@ class SessionDeletionStore:
             with scoped._transaction():
                 self._content_store.forget_session(tenant_id, member)
 
+    def _erase_external_content(
+        self,
+        scoped: SQLiteStore,
+        objects: _SQLiteObjectContent,
+        key_provider: KeyProvider,
+        session_id: str,
+        *,
+        verify_pending: Callable[[], bool],
+        check_deadline: Callable[[], None],
+    ) -> None:
+        params = (scoped.tenant_id, session_id)
+        for finish_journal in (False, True):
+            with scoped.atomic() as tx:
+
+                def check_fence() -> None:
+                    scoped._require_content_write_fence(tx)
+                    check_deadline()
+
+                check_fence()
+                if not verify_pending():
+                    return
+                key_rows = scoped._rows("SELECT key_id,state FROM sk_session_key WHERE tenant_id=%s AND session_id=%s", params)
+                if len(key_rows) != 1:
+                    raise ContentCleanupUnavailable("external erasure lacks the durable SQL key")
+                ((key_id, state),) = key_rows
+                key, allocations = objects.erasure_inventory(*params, key_id)
+                rows = scoped._rows(
+                    "SELECT content_id,key_id,object_locator FROM sk_content WHERE tenant_id=%s AND session_id=%s",
+                    params,
+                )
+                for content_id, sql_key_id, locator in rows:
+                    allocation = allocations.get(locator)
+                    if (
+                        sql_key_id != key_id
+                        or allocation is None
+                        or allocation.owner is None
+                        or allocation.owner.content_id != content_id
+                    ):
+                        raise ContentCleanupUnavailable("external erasure cannot verify a SQL locator")
+                for locator in allocations:
+                    if scoped._rows(
+                        "SELECT 1 FROM sk_content WHERE object_locator=%s AND (tenant_id<>%s OR session_id<>%s)",
+                        (locator, *params),
+                    ):
+                        raise ContentCleanupUnavailable("external erasure locator is shared outside the frozen root")
+
+                if state == "destroying":
+                    if rows or (key is None and allocations) or (key is not None and key.state != "retired"):
+                        raise ContentCleanupUnavailable("external erasure checkpoint is inconsistent")
+                    if any(not allocation.delete_confirmed for allocation in allocations.values()):
+                        raise ContentCleanupUnavailable("external erasure lost its object claim")
+                elif key is None or key.state == "reserved" or finish_journal:
+                    raise ContentCleanupUnavailable("external erasure lacks the committed key intent")
+                if key is None or (state == "destroying" and not finish_journal):
+                    continue
+
+                retired = objects.retire(key_provider, key, check_fence=check_fence)
+                for allocation in allocations.values():
+                    check_fence()
+                    if finish_journal:
+                        if not objects.journal.finish_reap(allocation, remote_terminal=allocation.delete_confirmed):
+                            raise ContentCleanupUnavailable("external erasure object completion changed")
+                        continue
+                    if allocation.delete_confirmed:
+                        continue
+                    claim = objects.journal.claim_bound(allocation)
+                    if claim is None:
+                        raise ContentCleanupUnavailable("external erasure object claim changed")
+                    objects.objects.delete_claimed(claim, check_fence=check_fence)
+                    objects.journal.confirm_bound_delete(claim)
+                if finish_journal:
+                    if not objects.journal.finish_key_intent(retired):
+                        raise ContentCleanupUnavailable("external erasure key completion changed")
+                else:
+                    scoped._rows("DELETE FROM sk_content_link WHERE tenant_id=%s AND session_id=%s", params)
+                    scoped._rows("DELETE FROM sk_content WHERE tenant_id=%s AND session_id=%s", params)
+                    scoped._rows(
+                        "UPDATE sk_session_key SET state='destroying' WHERE tenant_id=%s AND session_id=%s AND key_id=%s",
+                        (*params, key_id),
+                    )
+                check_fence()
+
+    def _delete_external_root(
+        self, scoped: SQLStore, session_id: str, actor: Principal, *, purge: bool
+    ) -> DeletionReceipt | None:
+        binding = content_runtime_binding_for(scoped)
+        if binding is None or binding._object_content is None:
+            return None
+        if not isinstance(scoped, SQLiteStore):
+            raise ContentCleanupUnavailable("external root erasure requires SQLite")
+        objects = binding._object_content
+        deadline = time.monotonic() + 5
+
+        def check_deadline() -> None:
+            if time.monotonic() >= deadline:
+                raise ContentCleanupUnavailable("external erasure persistence budget expired")
+
+        tenant_id = scoped.tenant_id
+        with scoped._connection_lock:
+            self._require_idle_connection(scoped)
+            authority = self._authority(scoped)
+            check_deadline()
+            begin = scoped.begin_purge if purge else scoped.begin_forget
+            session_ids = begin(
+                session_id,
+                actor,
+                bound_signer=authority.bound,
+                verifier=authority.verifier,
+                allow_unsigned=authority.allow_unsigned,
+                _external_root=True,
+            )
+            if session_ids != (session_id,):
+                raise ContentCleanupUnavailable("external erasure supports one root session")
+
+            def verify_pending() -> bool:
+                (tombstone,) = self._verify_scope_evidence(
+                    scoped,
+                    tenant_id,
+                    session_id,
+                    session_ids,
+                    require_present=not purge,
+                    expected_states={"purging"} if purge else {"forgetting", "forgotten"},
+                    require_complete=False,
+                    authority=authority,
+                )
+                check_deadline()
+                return tombstone.state is TombstoneState.PENDING
+
+            self._erase_external_content(
+                scoped, objects, binding.key_provider, session_id, verify_pending=verify_pending, check_deadline=check_deadline
+            )
+            with scoped.atomic() as tx:
+                scoped._require_content_write_fence(tx)
+                verify_pending()
+                if purge:
+                    if scoped.complete_purge(session_id, _external_root=True) != session_ids:
+                        raise LedgerIntegrityError("purge completion returned a different scope")
+                else:
+                    scoped.complete_forget(session_id, _external_root=True)
+                check_deadline()
+        verify = self._verify_purge_outcome if purge else self._verify_forget_outcome
+        verify(scoped, tenant_id, session_id, session_ids, authority)
+        return DeletionReceipt("purge" if purge else "forget", session_id, session_ids, authority.authenticity)
+
     def _verify_forget_outcome(
         self,
         scoped: SQLStore,
@@ -386,8 +535,10 @@ class SessionDeletionStore:
             action="forget",
         )
         scoped = self._scoped(tenant_id)
+        external = self._delete_external_root(scoped, session_id, actor, purge=False)
+        if external is not None:
+            return external
         self._require_idle_connection(scoped)
-        scoped._reject_external_erasure(())
         authority = self._authority(scoped)
         session_ids = scoped.begin_forget(
             session_id,
@@ -433,8 +584,10 @@ class SessionDeletionStore:
             action="purge",
         )
         scoped = self._scoped(tenant_id)
+        external = self._delete_external_root(scoped, session_id, actor, purge=True)
+        if external is not None:
+            return external
         self._require_idle_connection(scoped)
-        scoped._reject_external_erasure(())
         authority = self._authority(scoped)
         session_ids = scoped.begin_purge(
             session_id,
