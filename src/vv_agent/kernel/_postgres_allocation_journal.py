@@ -31,7 +31,7 @@ _OWNER = "tenant_id,session_id,content_id,admission_session_id,admission_id,prov
 _COLUMNS = f"allocation_id,state,pin_until_ms,reservation_etag,delete_confirmed,{_OWNER}"
 _KEY_OWNER = "key_id,provider_instance_id,tenant_id,session_id,admission_root_id,admission_id"
 _KEY_COLUMNS = f"{_KEY_OWNER},state,pin_until_ms,evidence_id"
-_VERSION = 4
+_VERSION = 5
 _OWNER_MATCH = " AND ".join(f"{column} IS NOT DISTINCT FROM %s" for column in _OWNER.split(","))
 _CLAIM_MATCH = (
     f"allocation_id=%s AND state='reaping' AND pin_until_ms=%s AND reservation_etag IS NOT DISTINCT FROM %s AND {_OWNER_MATCH}"
@@ -224,21 +224,36 @@ def _install_role(connection: Connection[Any], login: str, role: JournalRole, id
     if role.mode == "key-intent":
         install(
             _KEY_TABLE,
-            ("SELECT", f"INSERT({_KEY_OWNER},pin_until_ms)", "UPDATE(state,evidence_id)", "DELETE"),
+            ("SELECT", f"INSERT({_KEY_OWNER},pin_until_ms)", "UPDATE(state)"),
             (
                 ("SELECT", tenant_scope, None),
                 ("INSERT", None, tenant_scope + sql.SQL(f" AND state='reserved' AND pin_until_ms>{CLOCK}")),
-                ("UPDATE", tenant_scope + sql.SQL(" AND state<>'retired'"), tenant_scope),
-                ("DELETE", tenant_scope + sql.SQL(" AND state='retired'"), None),
+                (
+                    "UPDATE",
+                    tenant_scope + sql.SQL(" AND state='reserved'"),
+                    tenant_scope + sql.SQL(" AND state='allocating'"),
+                ),
             ),
         )
-        install(_TABLE, ("SELECT(provider_instance_id,exact_key_id)",), (("SELECT", tenant_scope, None),))
         return
     if role.mode == "scope":
         install(_KEY_TABLE, ("SELECT",), (("SELECT", tenant_scope, None),))
         install(_TABLE, ("SELECT",), (("SELECT", tenant_scope, None),))
         return
     if role.mode == "cleanup":
+        install(
+            _KEY_TABLE,
+            ("SELECT", "UPDATE(state,evidence_id)", "DELETE"),
+            (
+                ("SELECT", tenant_scope, None),
+                (
+                    "UPDATE",
+                    tenant_scope + sql.SQL(" AND state<>'retired'"),
+                    tenant_scope + sql.SQL(" AND state IN ('reaping','retired')"),
+                ),
+                ("DELETE", tenant_scope + sql.SQL(" AND state='retired'"), None),
+            ),
+        )
         grants = ("SELECT", "UPDATE(state,delete_confirmed)", "DELETE")
         transitions = (
             ("SELECT", tenant_scope, None),

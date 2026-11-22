@@ -411,27 +411,34 @@ def test_exact_key_readback_mutations_and_cleanup_require_authority(provisioned)
     with psycopg.connect(logins[binder_role], autocommit=True) as client, pytest.raises(psycopg.errors.InsufficientPrivilege):
         client.execute(f"UPDATE {KEY_TABLE} SET state='reaping'")
     assert binder.bind(allocation_id, owner, reservation_etag=ETAG)
-    assert reopened.claim_key_intent(allocating) is None
-    claim = reopened.claim_key_intent(allocating, require_expired_pin=False)
+    with psycopg.connect(logins[key_role], autocommit=True) as client:
+        assert client.execute(f"UPDATE {KEY_TABLE} SET state='reaping' WHERE state='allocating'").rowcount == 0
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            client.execute(f"DELETE FROM {KEY_TABLE}")
+    cleanup = journals[JournalRole("cleanup", "tenant-a")]
+    assert cleanup.claim_key_intent(allocating) is None
+    claim = cleanup.claim_key_intent(allocating, require_expired_pin=False)
     assert claim is not None and claim.state == "reaping"
-    assert reopened.claim_key_intent(claim) == claim
+    assert cleanup.claim_key_intent(claim) == claim
     replacement_id = bytes([1]) * 32
     assert anonymous.reserve(replacement_id, pin_until_ms=pin)
     assert not binder.bind(replacement_id, owner, reservation_etag=ETAG)
     outcome = KeyDestroyOutcome(True, KeyDestroyStatus.DESTROYED, "receipt")
-    retired = keys.record_key_retirement(claim, outcome)
+    assert reopened.record_key_retirement(claim, outcome) is None
+    retired = cleanup.record_key_retirement(claim, outcome)
     assert retired is not None and retired.state == "retired"
-    assert reopened.record_key_retirement(claim, outcome) == retired
-    assert reopened.record_key_retirement(claim, replace(outcome, evidence_id="other")) is None
-    assert not reopened.finish_key_intent(retired)
+    assert cleanup.record_key_retirement(claim, outcome) == retired
+    assert cleanup.record_key_retirement(claim, replace(outcome, evidence_id="other")) is None
+    assert not cleanup.finish_key_intent(retired)
     bound = scope.get(allocation_id)
     assert bound is not None
-    cleanup = journals[JournalRole("cleanup", "tenant-a")]
     object_claim = cleanup.claim_bound(bound)
     assert object_claim is not None
     confirmed = cleanup.confirm_bound_delete(object_claim)
     assert cleanup.finish_reap(confirmed, remote_terminal=True)
-    assert reopened.finish_key_intent(retired)
+    with pytest.raises(ContentUnavailable):
+        reopened.finish_key_intent(retired)
+    assert cleanup.finish_key_intent(retired)
     assert reopened.get_key_intent(intent.provider_instance_id, intent.key_id) is None
 
 
@@ -451,7 +458,7 @@ def test_key_allocation_pin_is_rechecked_after_waiting_for_row_lock(provisioned)
             admin.execute("SELECT pg_sleep(%s)", ((pin - _now(admin) + 20) / 1000,))
         assert future.result(timeout=5) is None
     assert keys.get_key_intent(intent.provider_instance_id, intent.key_id) == reserved
-    assert keys.claim_key_intent(reserved).state == "reaping"
+    assert journals[JournalRole("cleanup", "tenant-a")].claim_key_intent(reserved).state == "reaping"
 
 
 @pytest.mark.parametrize("field", ["admission_session_id", "admission_id"])
@@ -515,9 +522,22 @@ def test_exact_bind_waits_for_key_cleanup_claim(provisioned):
             )
 
     with ThreadPoolExecutor(max_workers=1) as pool:
-        with psycopg.connect(logins[key_role], autocommit=True) as cleanup, cleanup.transaction():
-            cleanup.execute(f"UPDATE {KEY_TABLE} SET state='reaping' WHERE key_id=%s", (intent.key_id,))
+        with (
+            psycopg.connect(logins[JournalRole("cleanup", "tenant-a")], autocommit=True) as cleanup,
+            cleanup.transaction(),
+        ):
+            assert cleanup.execute(f"UPDATE {KEY_TABLE} SET state='reaping' WHERE key_id=%s", (intent.key_id,)).rowcount == 1
             pending = pool.submit(raw_bind)
             _wait_for_row_lock(admin, f"UPDATE {TABLE}%")
         pending.result(timeout=5)
     assert anonymous.get(bytes(32)).state == "unbound"
+
+
+def test_obsolete_journal_revision_fails_closed(provisioned):
+    admin, identity, journals, logins, _ = provisioned
+    role = JournalRole("key-intent", "tenant-a")
+    admin.execute("UPDATE vv_allocation_journal.identity SET revision=4")
+    with pytest.raises(ContentUnavailable, match="identity or policy"):
+        PostgresAllocationJournal(logins[role], identity, role)
+    with pytest.raises(ContentUnavailable, match="identity or policy"):
+        journals[role].get_key_intent("provider", "unavailable")

@@ -8,7 +8,8 @@ closed execution boundary.
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
@@ -16,8 +17,21 @@ from typing import Any
 from vv_agent.kernel._content import ContentCleanupUnavailable, ForgetTombstone, Principal, TombstoneState
 from vv_agent.kernel._content_runtime import ContentRuntimeBinding, _verify_content_binding, content_runtime_binding_for
 from vv_agent.kernel._content_sql import CoreSQLContentStore
-from vv_agent.kernel._external_content import _SQLiteObjectContent
-from vv_agent.kernel._sql import _STORED_INBOX_COLUMNS, LedgerIntegrityError, LedgerSigner, SessionNotLive, SQLStore
+from vv_agent.kernel._external_content import (
+    _PostgresObjectContent,
+    _PostgresRootErasure,
+    _RootObjectErasure,
+    _SQLiteObjectContent,
+)
+from vv_agent.kernel._postgres import PostgresStore
+from vv_agent.kernel._sql import (
+    _STORED_INBOX_COLUMNS,
+    LedgerIntegrityError,
+    LedgerSigner,
+    SessionNotLive,
+    SQLStore,
+    _ExternalRoot,
+)
 from vv_agent.kernel._sqlite import SQLiteStore
 from vv_agent.kernel._store import (
     SESSION_DELETION_INVENTORY,
@@ -93,11 +107,13 @@ class SessionDeletionStore:
         *,
         signer: LedgerSigner | None = None,
         allow_unsigned: bool | None = None,
+        _postgres_root_erasure: _PostgresRootErasure | None = None,
     ) -> None:
         self._store = store
         self._content_store = content_store
         self._signer_override = signer
         self._allow_unsigned_override = allow_unsigned
+        self._postgres_root_erasure = _postgres_root_erasure
 
     def _authority(self, scoped: SQLStore) -> _Authority:
         configured, configured_unsigned, configured_signer = scoped._input_admission_policy()
@@ -328,24 +344,17 @@ class SessionDeletionStore:
 
     def _erase_external_content(
         self,
-        scoped: SQLiteStore,
+        scoped: SQLStore,
         binding: ContentRuntimeBinding,
         session_id: str,
         *,
+        erasure: _RootObjectErasure,
+        atomic: Callable[[], AbstractContextManager[tuple[Callable[[], None], _ExternalRoot]]],
         verify_pending: Callable[[], bool],
-        check_deadline: Callable[[], None],
     ) -> None:
         params = (scoped.tenant_id, session_id)
-        objects = binding._object_content
-        if not isinstance(objects, _SQLiteObjectContent):
-            raise ContentCleanupUnavailable("external erasure requires its configured binding")
         for finish_journal in (False, True):
-            with scoped.atomic() as tx:
-
-                def check_fence() -> None:
-                    scoped._require_content_write_fence(tx)
-                    check_deadline()
-
+            with atomic() as (check_fence, _):
                 check_fence()
                 _verify_content_binding(scoped, binding)
                 if not verify_pending():
@@ -354,7 +363,7 @@ class SessionDeletionStore:
                 if len(key_rows) != 1:
                     raise ContentCleanupUnavailable("external erasure lacks the durable SQL key")
                 ((key_id, state),) = key_rows
-                key, allocations = objects.erasure_inventory(*params, key_id)
+                key, allocations = erasure.erasure_inventory(*params, key_id)
                 rows = scoped._rows(
                     "SELECT content_id,key_id,object_locator FROM sk_content WHERE tenant_id=%s AND session_id=%s",
                     params,
@@ -385,22 +394,22 @@ class SessionDeletionStore:
                 if key is None or (state == "destroying" and not finish_journal):
                     continue
 
-                retired = objects.retire(binding.key_provider, key, check_fence=check_fence)
+                retired = erasure.retire(binding.key_provider, key, check_fence=check_fence)
                 for allocation in allocations.values():
                     check_fence()
                     if finish_journal:
-                        if not objects.journal.finish_reap(allocation, remote_terminal=allocation.delete_confirmed):
+                        if not erasure.journal.finish_reap(allocation, remote_terminal=allocation.delete_confirmed):
                             raise ContentCleanupUnavailable("external erasure object completion changed")
                         continue
                     if allocation.delete_confirmed:
                         continue
-                    claim = objects.journal.claim_bound(allocation)
+                    claim = erasure.journal.claim_bound(allocation)
                     if claim is None:
                         raise ContentCleanupUnavailable("external erasure object claim changed")
-                    objects.objects.delete_claimed(claim, check_fence=check_fence)
-                    objects.journal.confirm_bound_delete(claim)
+                    erasure.content.objects.delete_claimed(claim, check_fence=check_fence)
+                    erasure.journal.confirm_bound_delete(claim)
                 if finish_journal:
-                    if not objects.journal.finish_key_intent(retired):
+                    if not erasure.journal.finish_key_intent(retired):
                         raise ContentCleanupUnavailable("external erasure key completion changed")
                 else:
                     scoped._rows("DELETE FROM sk_content_link WHERE tenant_id=%s AND session_id=%s", params)
@@ -417,8 +426,6 @@ class SessionDeletionStore:
         binding = content_runtime_binding_for(scoped)
         if binding is None or binding._object_content is None:
             return None
-        if not isinstance(scoped, SQLiteStore):
-            raise ContentCleanupUnavailable("external root erasure requires SQLite")
         deadline = time.monotonic() + 5
 
         def check_deadline() -> None:
@@ -426,20 +433,69 @@ class SessionDeletionStore:
                 raise ContentCleanupUnavailable("external erasure persistence budget expired")
 
         tenant_id = scoped.tenant_id
+        objects = binding._object_content
+        postgres_erasure = self._postgres_root_erasure
+        if isinstance(scoped, SQLiteStore) and isinstance(objects, _SQLiteObjectContent):
+            erasure = objects.erasure()
+        elif isinstance(scoped, PostgresStore) and isinstance(objects, _PostgresObjectContent):
+            if postgres_erasure is None or postgres_erasure.content is not objects:
+                raise ContentCleanupUnavailable("PostgreSQL external erasure requires explicit cleanup authority")
+            erasure = postgres_erasure.open()
+        else:
+            raise ContentCleanupUnavailable("external erasure requires its configured binding")
+
+        @contextmanager
+        def atomic() -> Iterator[tuple[Callable[[], None], _ExternalRoot]]:
+            if isinstance(scoped, SQLiteStore):
+                with scoped.atomic() as tx:
+
+                    def check_sqlite_fence() -> None:
+                        scoped._require_content_write_fence(tx)
+                        check_deadline()
+
+                    yield check_sqlite_fence, True
+            elif isinstance(scoped, PostgresStore) and isinstance(objects, _PostgresObjectContent):
+                assert postgres_erasure is not None
+                with scoped._object_publication_atomic(
+                    objects.journal, check_deadline=check_deadline, content_digest=objects._binding_digest()
+                ) as (_, check_primary_fence):
+
+                    def check_postgres_fence() -> None:
+                        check_primary_fence()
+                        postgres_erasure.require_current(session_id)
+                        check_primary_fence()
+
+                    check_postgres_fence()
+                    yield check_postgres_fence, (erasure, check_postgres_fence)
+                    check_postgres_fence()
+
         with scoped._connection_lock:
             self._require_idle_connection(scoped)
             _verify_content_binding(scoped, binding)
             authority = self._authority(scoped)
+            if isinstance(scoped, PostgresStore) and authority.allow_unsigned:
+                raise DeletionSignerUnavailable("PostgreSQL external erasure requires a ledger signer")
             check_deadline()
             begin = scoped.begin_purge if purge else scoped.begin_forget
-            session_ids = begin(
-                session_id,
-                actor,
-                bound_signer=authority.bound,
-                verifier=authority.verifier,
-                allow_unsigned=authority.allow_unsigned,
-                _external_root=True,
-            )
+            if isinstance(scoped, PostgresStore):
+                with atomic() as (_, external_root):
+                    session_ids = begin(
+                        session_id,
+                        actor,
+                        bound_signer=authority.bound,
+                        verifier=authority.verifier,
+                        allow_unsigned=False,
+                        _external_root=external_root,
+                    )
+            else:
+                session_ids = begin(
+                    session_id,
+                    actor,
+                    bound_signer=authority.bound,
+                    verifier=authority.verifier,
+                    allow_unsigned=authority.allow_unsigned,
+                    _external_root=True,
+                )
             if session_ids != (session_id,):
                 raise ContentCleanupUnavailable("external erasure supports one root session")
 
@@ -458,17 +514,17 @@ class SessionDeletionStore:
                 return tombstone.state is TombstoneState.PENDING
 
             self._erase_external_content(
-                scoped, binding, session_id, verify_pending=verify_pending, check_deadline=check_deadline
+                scoped, binding, session_id, erasure=erasure, atomic=atomic, verify_pending=verify_pending
             )
-            with scoped.atomic() as tx:
-                scoped._require_content_write_fence(tx)
+            with atomic() as (check_fence, external_root):
+                check_fence()
                 verify_pending()
                 if purge:
-                    if scoped.complete_purge(session_id, _external_root=True) != session_ids:
+                    if scoped.complete_purge(session_id, _external_root=external_root) != session_ids:
                         raise LedgerIntegrityError("purge completion returned a different scope")
                 else:
-                    scoped.complete_forget(session_id, _external_root=True)
-                check_deadline()
+                    scoped.complete_forget(session_id, _external_root=external_root)
+                check_fence()
         verify = self._verify_purge_outcome if purge else self._verify_forget_outcome
         verify(scoped, tenant_id, session_id, session_ids, authority)
         return DeletionReceipt("purge" if purge else "forget", session_id, session_ids, authority.authenticity)

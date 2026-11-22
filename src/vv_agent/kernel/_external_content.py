@@ -6,7 +6,7 @@ import secrets
 from collections.abc import Callable
 from dataclasses import dataclass
 from hashlib import sha256
-from typing import Protocol, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 from ._allocation_journal import Allocation, AllocationOwner, JournalIdentity, KeyIntent, SQLiteAllocationJournal
 from ._canonical_json import canonical_json_bytes
@@ -22,6 +22,9 @@ from ._content import (
     WrappedDataKey,
     _ExactKeyIntent,
 )
+
+if TYPE_CHECKING:
+    from ._postgres_allocation_journal import PostgresAllocationJournal
 
 _AES_GCM_TAG_BYTES = 16
 _ALLOCATION_PIN_MS = 5_000
@@ -191,8 +194,18 @@ class _PostgresObjectContent(_ObjectContent[_PostgresContentJournal]):
 class _SQLiteObjectContent(_ObjectContent[SQLiteAllocationJournal]):
     terminal_bound_delete: bool = False
 
+    def erasure(self) -> _RootObjectErasure:
+        return _RootObjectErasure(self, self.journal, self.terminal_bound_delete)
+
+
+@dataclass(frozen=True, slots=True)
+class _RootObjectErasure:
+    content: _SQLiteObjectContent | _PostgresObjectContent
+    journal: SQLiteAllocationJournal | PostgresAllocationJournal
+    terminal_bound_delete: bool
+
     def require_erasure_binding(self, key_id: str) -> None:
-        if not self.terminal_bound_delete or not key_id.startswith(self._key_prefix()):
+        if not self.terminal_bound_delete or not key_id.startswith(self.content._key_prefix()):
             raise ContentCleanupUnavailable("external erasure requires the matching journal and terminal bound DELETE")
 
     def erasure_inventory(self, tenant_id: str, session_id: str, key_id: str) -> tuple[KeyIntent | None, dict[bytes, Allocation]]:
@@ -204,13 +217,13 @@ class _SQLiteObjectContent(_ObjectContent[SQLiteAllocationJournal]):
         allocations = {}
         for row in self.journal.scoped_allocations(tenant_id, (session_id,)):
             owner = row.owner
-            if owner is None or owner != self._owner(expected_key, owner.content_id):
+            if owner is None or owner != self.content._owner(expected_key, owner.content_id):
                 raise ContentCleanupUnavailable("external object inventory does not match the frozen root")
             allocations[b"\x01" + row.allocation_id] = row
         return keys[0] if keys else None, allocations
 
     def _root_intent(self, tenant_id: str, session_id: str, key_id: str) -> _ExactKeyIntent:
-        return _ExactKeyIntent(key_id, self.provider_instance_id, tenant_id, session_id, session_id, "session/create")
+        return _ExactKeyIntent(key_id, self.content.provider_instance_id, tenant_id, session_id, session_id, "session/create")
 
     def verify_retired(self, provider: KeyProvider, tenant_id: str, session_id: str, key_id: str) -> None:
         verify = getattr(provider, "_verify_exact_retirement", None)
@@ -243,3 +256,47 @@ class _SQLiteObjectContent(_ObjectContent[SQLiteAllocationJournal]):
         if retired is None:
             raise ContentCleanupUnavailable("external key retirement record changed")
         return retired
+
+
+@dataclass(frozen=True, slots=True)
+class _ErasureCurrentnessChallenge:
+    journal_id: str
+    binding_digest: str
+    tenant_id: str
+    session_id: str
+    nonce: str
+
+
+@dataclass(frozen=True, slots=True)
+class _PostgresRootErasure:
+    """Trusted host evidence for one configured PostgreSQL object installation.
+
+    The verifier must consult a separately trusted recovery point covering the
+    primary, journal and provider inventories on every challenge. The nonce
+    binds a response to this call. The host supplies the freshness evidence.
+    """
+
+    content: _PostgresObjectContent
+    cleanup: PostgresAllocationJournal
+    prove_currentness: Callable[[_ErasureCurrentnessChallenge], _ErasureCurrentnessChallenge | None]
+    terminal_bound_delete: bool = False
+
+    def open(self) -> _RootObjectErasure:
+        from ._postgres_allocation_journal import JournalRole
+
+        if self.cleanup._role != JournalRole("cleanup", self.content.journal.tenant_id):
+            raise ContentCleanupUnavailable("PostgreSQL external erasure requires the authenticated tenant cleanup role")
+        if self.cleanup._identity != self.content.journal.identity or self.terminal_bound_delete is not True:
+            raise ContentCleanupUnavailable("PostgreSQL external erasure requires the matching journal and terminal bound DELETE")
+        return _RootObjectErasure(self.content, self.cleanup, self.terminal_bound_delete)
+
+    def require_current(self, session_id: str) -> None:
+        challenge = _ErasureCurrentnessChallenge(
+            self.content.journal.identity.journal_id,
+            self.content._binding_digest(),
+            self.content.journal.tenant_id,
+            session_id,
+            secrets.token_hex(16),
+        )
+        if self.prove_currentness(challenge) != challenge:
+            raise ContentCleanupUnavailable("PostgreSQL external erasure requires current storage evidence")
