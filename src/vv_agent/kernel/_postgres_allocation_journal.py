@@ -438,6 +438,22 @@ class PostgresAllocationJournal:
             )
             return self._allocations(rows)[0] if rows else None
 
+    def _live_allocation_ms(self, expected: Allocation) -> int | None:
+        _require_id(expected.allocation_id)
+        with self._transaction() as connection:
+            rows = _query_rows(
+                connection,
+                f"SELECT {_COLUMNS},pin_until_ms-({CLOCK}) FROM {_TABLE} WHERE allocation_id=%s",
+                (expected.allocation_id,),
+            )
+            if not rows:
+                return None
+            (row,) = rows
+            remaining_ms = row[-1]
+            if remaining_ms <= 0 or self._allocations([row[:-1]])[0] != expected:
+                return None
+            return remaining_ms
+
     def reserve(self, allocation_id: bytes, *, pin_until_ms: int) -> bool:
         _require_id(allocation_id)
         if type(pin_until_ms) is not int or not 0 < pin_until_ms < 2**63:
@@ -819,3 +835,10 @@ class PostgresObjectJournal:
         if owner.tenant_id != self._tenant_id:
             return None
         return self._scope._get_owned(allocation_id, owner)
+
+    def _live_allocation_ms(self, expected: Allocation) -> int | None:
+        if expected.owner is None:
+            return self._anonymous._live_allocation_ms(expected)
+        if expected.owner.tenant_id != self._tenant_id:
+            return None
+        return self._scope._live_allocation_ms(expected)

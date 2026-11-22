@@ -15,7 +15,7 @@ import pytest
 from vv_agent.kernel import _allocation_journal
 from vv_agent.kernel._allocation_journal import Allocation, AllocationOwner, SQLiteAllocationJournal
 from vv_agent.kernel._content import ContentBindingMismatch, ContentCleanupUnavailable, ContentIntegrityError, ContentUnavailable
-from vv_agent.session.s3_content import CiphertextTemporarilyUnavailable, S3CiphertextStore
+from vv_agent.session.s3_content import CiphertextTemporarilyUnavailable, S3CiphertextStore, _disable_region_redirect
 
 _OWNER = AllocationOwner("tenant", "child", "content", "parent", "admission", "provider", "key")
 _MARKER_TAG = '"marker-ETag"'
@@ -122,6 +122,88 @@ def test_s3_marker_then_bound_upload_and_exact_read(adapter) -> None:
     client.reply_body = _CIPHERTEXT + b"x"
     with pytest.raises(ContentIntegrityError):
         store.get(_OWNER, locator, ciphertext_size=len(_CIPHERTEXT))
+
+
+def test_s3_allocation_pin_uses_storage_clock_when_client_is_ahead(adapter, monkeypatch: pytest.MonkeyPatch) -> None:
+    journal, client, store = adapter
+    storage_now_ms = _pin() - 20_000
+    monkeypatch.setattr(_allocation_journal, "_NOW_MS", str(storage_now_ms))
+    locator = store.put(_OWNER, _CIPHERTEXT, pin_until_ms=journal._pin_until_ms(5_000), check_fence=client.fence)
+    assert len(client.calls) == 2
+    assert store.get(_OWNER, locator, ciphertext_size=len(_CIPHERTEXT)) == _CIPHERTEXT
+
+
+@pytest.mark.parametrize("operation", ["reserve", "bind"])
+@pytest.mark.parametrize("lost_ack", [False, True])
+def test_s3_requires_live_storage_pin_after_journal_mutation(
+    adapter, monkeypatch: pytest.MonkeyPatch, operation: str, lost_ack: bool
+) -> None:
+    journal, client, store = adapter
+    pin_until_ms = _pin()
+    original = getattr(journal, operation)
+
+    def expire_after_commit(allocation_id: bytes, *args: Any, **kwargs: Any) -> bool:
+        assert original(allocation_id, *args, **kwargs)
+        monkeypatch.setattr(_allocation_journal, "_NOW_MS", str(pin_until_ms))
+        if lost_ack:
+            raise ContentUnavailable("journal reply lost")
+        return True
+
+    monkeypatch.setattr(journal, operation, expire_after_commit)
+    with pytest.raises(CiphertextTemporarilyUnavailable, match="live pin"):
+        store.put(_OWNER, _CIPHERTEXT, pin_until_ms=pin_until_ms, check_fence=client.fence)
+    assert len(client.calls) == (0 if operation == "reserve" else 1)
+
+
+def test_s3_pin_readback_charges_elapsed_time_before_dispatch(adapter, monkeypatch: pytest.MonkeyPatch) -> None:
+    journal, client, _ = adapter
+    elapsed_ns = 0
+    store = S3CiphertextStore(client, bucket="fixture", journal=journal, monotonic_ns=lambda: elapsed_ns)
+    read_live_pin = journal._live_allocation_ms
+
+    def delayed_read(expected: Allocation) -> int | None:
+        nonlocal elapsed_ns
+        remaining_ms = read_live_pin(expected)
+        assert remaining_ms is not None and remaining_ms > 1
+        elapsed_ns += (remaining_ms - 1) * 1_000_000
+        return remaining_ms
+
+    monkeypatch.setattr(journal, "_live_allocation_ms", delayed_read)
+    with pytest.raises(CiphertextTemporarilyUnavailable, match="pin expired"):
+        store.put(_OWNER, _CIPHERTEXT, pin_until_ms=_pin(), check_fence=client.fence)
+    assert client.calls == []
+
+
+@pytest.mark.parametrize("expired_clock", ["storage", "monotonic"])
+def test_s3_does_not_return_locator_when_pin_expires_during_upload(
+    adapter, monkeypatch: pytest.MonkeyPatch, expired_clock: str
+) -> None:
+    journal, client, _ = adapter
+    elapsed_ns = 0
+    storage_now_ms = _pin() - 10_000
+    pin_until_ms = storage_now_ms + 5_000
+    monkeypatch.setattr(_allocation_journal, "_NOW_MS", str(storage_now_ms))
+    store = S3CiphertextStore(client, bucket="fixture", journal=journal, monotonic_ns=lambda: elapsed_ns)
+    put_object = client.put_object
+
+    def acknowledged_after_expiry(**request: Any) -> dict[str, Any]:
+        nonlocal elapsed_ns
+        reply = put_object(**request)
+        if "IfMatch" in request:
+            if expired_clock == "storage":
+                monkeypatch.setattr(_allocation_journal, "_NOW_MS", str(pin_until_ms))
+            else:
+                elapsed_ns += 5_000_000_000
+        return reply
+
+    monkeypatch.setattr(client, "put_object", acknowledged_after_expiry)
+    with pytest.raises(CiphertextTemporarilyUnavailable, match="pin"):
+        store.put(_OWNER, _CIPHERTEXT, pin_until_ms=pin_until_ms, check_fence=client.fence)
+    assert len(client.calls) == 2
+    key = client.calls[1]["Key"]
+    row = journal.get(bytes.fromhex(key.rsplit("/", maxsplit=1)[1]))
+    assert row is not None and row.state == "bound" and row.owner == _OWNER
+    assert client.objects[key] == _CIPHERTEXT
 
 
 @pytest.mark.parametrize("mode", ["marker", "ciphertext", "fence-after-put"])
@@ -236,6 +318,12 @@ def test_rejects_client_retry_policy_and_versioned_bucket(adapter) -> None:
     client.versioned = True
     with pytest.raises(ContentCleanupUnavailable, match="unversioned"):
         S3CiphertextStore(client, bucket="fixture", journal=journal)
+
+
+def test_fixed_region_handler_initializes_missing_redirect_context() -> None:
+    request_dict = {"context": {"client_region": "us-east-1"}}
+    _disable_region_redirect(request_dict)
+    assert request_dict["context"] == {"client_region": "us-east-1", "s3_redirect": {"redirected": True}}
 
 
 @pytest.mark.parametrize("region_hint", [False, True])

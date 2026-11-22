@@ -275,6 +275,17 @@ class SQLiteAllocationJournal:
             raise ContentBindingMismatch("external ciphertext locator does not match its exact owner")
         return row
 
+    def _live_allocation_ms(self, expected: Allocation) -> int | None:
+        _require_id(expected.allocation_id)
+        with self._transaction() as connection:
+            row = connection.execute(
+                f"SELECT {_ALLOCATION_COLUMNS},pin_until_ms-({_NOW_MS}) FROM allocation WHERE allocation_id=?",
+                (expected.allocation_id,),
+            ).fetchone()
+            if row is None or row[-1] <= 0 or self._allocation(row[:-1]) != expected:
+                return None
+            return row[-1]
+
     def reserve(self, allocation_id: bytes, *, pin_until_ms: int) -> bool:
         """Commit a newly generated random ID before dispatching its first PUT."""
         _require_id(allocation_id)

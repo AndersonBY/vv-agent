@@ -39,11 +39,13 @@ class _ObjectJournal(Protocol):
 
     def get_owned(self, allocation_id: bytes, owner: AllocationOwner) -> Allocation | None: ...
 
+    def _live_allocation_ms(self, expected: Allocation) -> int | None: ...
+
 
 def _disable_region_redirect(request_dict: dict[str, Any], **_: Any) -> None:
     # Botocore may perform region discovery before an attempted resend.
     context = request_dict["context"]
-    context["s3_redirect"]["redirected"] = True
+    context.setdefault("s3_redirect", {})["redirected"] = True
 
 
 def _require_first_request(request: Any, **_: Any) -> None:
@@ -55,11 +57,6 @@ def _status(reply: dict[str, Any]) -> int | None:
     return reply.get("ResponseMetadata", {}).get("HTTPStatusCode")
 
 
-def _require_live_pin(pin_until_ms: int) -> None:
-    if time.time_ns() // 1_000_000 >= pin_until_ms:
-        raise CiphertextTemporarilyUnavailable("external ciphertext allocation pin expired")
-
-
 class S3CiphertextStore:
     """Use a dedicated S3 client and a journal already verified by the host.
 
@@ -68,7 +65,9 @@ class S3CiphertextStore:
     Socket timeouts alone do not enforce that budget while a request is running.
     """
 
-    def __init__(self, client: Any, *, bucket: str, journal: _ObjectJournal) -> None:
+    def __init__(
+        self, client: Any, *, bucket: str, journal: _ObjectJournal, monotonic_ns: Callable[[], int] = time.monotonic_ns
+    ) -> None:
         if not bucket:
             raise ValueError("S3 ciphertext bucket is required")
         retries = client.meta.config.retries
@@ -83,6 +82,7 @@ class S3CiphertextStore:
         namespace = sha256(journal.identity.namespace.encode()).hexdigest()
         self._prefix = f"vv-agent-s1/{namespace}/alloc/"
         self._journal = journal
+        self._monotonic_ns = monotonic_ns
         self._require_unversioned()
 
     @property
@@ -112,6 +112,28 @@ class S3CiphertextStore:
         except ContentUnavailable:
             raise CiphertextTemporarilyUnavailable("external ciphertext journal is unavailable") from None
 
+    def _require_live_pin(self, deadline_ns: int) -> None:
+        if self._monotonic_ns() >= deadline_ns:
+            raise CiphertextTemporarilyUnavailable("external ciphertext allocation pin expired")
+
+    def _confirm_live_pin(self, expected: Allocation, check_fence: Callable[[], None], deadline_ns: int | None = None) -> int:
+        check_fence()
+        if deadline_ns is not None:
+            self._require_live_pin(deadline_ns)
+        started_ns = self._monotonic_ns()
+        try:
+            remaining_ms = self._journal._live_allocation_ms(expected)
+        except ContentUnavailable:
+            raise CiphertextTemporarilyUnavailable("external ciphertext journal is unavailable") from None
+        if remaining_ms is None:
+            raise CiphertextTemporarilyUnavailable("external ciphertext allocation could not be confirmed with a live pin")
+        # Account for the whole journal round trip and the clock's millisecond resolution.
+        observed_deadline_ns = started_ns + (remaining_ms - 1) * 1_000_000
+        deadline_ns = min(observed_deadline_ns, deadline_ns) if deadline_ns is not None else observed_deadline_ns
+        check_fence()
+        self._require_live_pin(deadline_ns)
+        return deadline_ns
+
     def put(
         self,
         owner: AllocationOwner,
@@ -128,18 +150,14 @@ class S3CiphertextStore:
         marker = secrets.token_bytes(_MARKER_BYTES)
         key = self._key(allocation_id)
         try:
-            reserved = self._journal.reserve(allocation_id, pin_until_ms=pin_until_ms)
+            if not self._journal.reserve(allocation_id, pin_until_ms=pin_until_ms):
+                raise CiphertextTemporarilyUnavailable("external ciphertext reservation is unavailable")
         except ContentUnavailable:
-            check_fence()
-            _require_live_pin(pin_until_ms)
-            reserved = self._lookup(allocation_id) == Allocation(
-                self._journal.identity.journal_id, allocation_id, "unbound", pin_until_ms
-            )
-        if not reserved:
-            raise CiphertextTemporarilyUnavailable("external ciphertext reservation is unavailable")
+            # The exact live read below determines whether the reservation committed.
+            pass
 
-        check_fence()
-        _require_live_pin(pin_until_ms)
+        expected = Allocation(self._journal.identity.journal_id, allocation_id, "unbound", pin_until_ms)
+        deadline_ns = self._confirm_live_pin(expected, check_fence)
         try:
             reply = self._client.put_object(Bucket=self._bucket, Key=key, Body=marker, ContentLength=len(marker), IfNoneMatch="*")
             etag = reply.get("ETag")
@@ -157,22 +175,16 @@ class S3CiphertextStore:
         etag = cast(str, etag)
 
         check_fence()
+        self._require_live_pin(deadline_ns)
         try:
-            bound = self._journal.bind(allocation_id, owner, reservation_etag=etag)
+            if not self._journal.bind(allocation_id, owner, reservation_etag=etag):
+                raise CiphertextTemporarilyUnavailable("external ciphertext binding is unavailable")
         except ContentUnavailable:
-            check_fence()
-            _require_live_pin(pin_until_ms)
-            try:
-                bound = self._lookup(allocation_id, owner=owner) == Allocation(
-                    self._journal.identity.journal_id, allocation_id, "bound", pin_until_ms, owner, etag
-                )
-            except ContentBindingMismatch:
-                bound = False
-        if not bound:
-            raise CiphertextTemporarilyUnavailable("external ciphertext binding is unavailable")
+            # Binding may have committed even if its acknowledgement was lost.
+            pass
 
-        check_fence()
-        _require_live_pin(pin_until_ms)
+        expected = Allocation(self._journal.identity.journal_id, allocation_id, "bound", pin_until_ms, owner, etag)
+        deadline_ns = self._confirm_live_pin(expected, check_fence, deadline_ns)
         try:
             reply = self._client.put_object(
                 Bucket=self._bucket, Key=key, Body=ciphertext, ContentLength=len(ciphertext), IfMatch=etag
@@ -182,8 +194,7 @@ class S3CiphertextStore:
             acknowledged = False
         if not acknowledged:
             raise CiphertextTemporarilyUnavailable("external ciphertext upload did not confirm success")
-        check_fence()
-        _require_live_pin(pin_until_ms)
+        self._confirm_live_pin(expected, check_fence, deadline_ns)
         return _LOCATOR_VERSION + allocation_id
 
     def get(self, owner: AllocationOwner, locator: bytes, *, ciphertext_size: int) -> bytes:
