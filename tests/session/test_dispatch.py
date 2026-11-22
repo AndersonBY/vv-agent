@@ -703,8 +703,10 @@ def test_schedule_read_includes_drive_retry_backoff(transport, clock):
             "UPDATE sk_session SET next_drive_ms=%s,drive_retry_at_ms=%s WHERE session_id='s'",
             (1_000_000, 1_000_500),
         )
+    assert not store.is_runnable("s")
     assert store.next_drive_delay_ms("s") == 500
     clock(500)
+    assert store.is_runnable("s")
     assert store.next_drive_delay_ms("s") == 0
 
 

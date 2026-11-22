@@ -2320,8 +2320,30 @@ class _KernelRunAdapter(RunAdapter):
                 *(handle.session_id for handle in handles),
             )
         )
-        for sid in session_ids:
-            self._join_session(sid)
-        # Reconcile the terminal record, operational error, and released cursor.
-        self.kernel._worker.post_observation(self._observe_with_driver)
-        self.kernel._worker.wait_idle()
+        pending_sessions = list(session_ids)
+        pending_ids = set(pending_sessions)
+
+        def enqueue(session_id: str) -> None:
+            if session_id in pending_ids:
+                return
+            session_ids.setdefault(session_id, None)
+            pending_ids.add(session_id)
+            pending_sessions.append(session_id)
+
+        while True:
+            while pending_sessions:
+                sid = pending_sessions.pop(0)
+                pending_ids.remove(sid)
+                self._join_session(sid)
+                for child_sid in self.kernel._discover_child_runtimes(self.kernel.store, sid):
+                    enqueue(child_sid)
+
+            # A child-delivery projection can wake a parent after its child drive
+            # has been reaped. Reconcile that observation before declaring this
+            # local join quiescent.
+            self.kernel._worker.post_observation(self._observe_with_driver)
+            self.kernel._worker.wait_idle()
+            for wake_sid in self.kernel._worker.active_wake_sessions:
+                enqueue(wake_sid)
+            if not pending_sessions:
+                break
