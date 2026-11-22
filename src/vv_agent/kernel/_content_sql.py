@@ -15,6 +15,7 @@ import json
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Any, Protocol, runtime_checkable
 
 from ._canonical_json import canonical_json_bytes, validate_sha256
@@ -220,8 +221,8 @@ def _blob(value: object, field_name: str) -> bytes:
     raise ContentIntegrityError(f"{field_name} is not binary data")
 
 
-def _labels_from_storage(value: object) -> tuple[ContentLabels, bytes]:
-    raw = _blob(value, "content labels")
+@lru_cache(maxsize=64)
+def _labels_from_storage(raw: bytes) -> tuple[ContentLabels, bytes]:
     try:
         payload = json.loads(raw)
         if not isinstance(payload, dict):
@@ -238,7 +239,7 @@ def _content_from_row(
     row: tuple[Any, ...],
 ) -> tuple[ContentRef, ContentState, bytes, bytes | None, bytes | None]:
     content_id, key_id, mac, size, labels_value, state_value, nonce_value, ciphertext_value, locator_value = row
-    labels, _labels_bytes = _labels_from_storage(labels_value)
+    labels, _labels_bytes = _labels_from_storage(_blob(labels_value, "content labels"))
     try:
         state = ContentState(state_value)
         ref = ContentRef(content_id=content_id, mac=mac, size=size, key_id=key_id, labels=labels)
