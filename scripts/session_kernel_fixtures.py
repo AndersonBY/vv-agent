@@ -177,6 +177,24 @@ def facts(raw: bytes, *, record_id: str | None = None) -> dict[str, Any]:
     return {"bytes_base64": base64.b64encode(raw).decode(), "sha256": sha256(raw).hexdigest(), "record_id": record_id}
 
 
+def order_child_wait_notifications(notices: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Place the parent tool's live arguments just before its durable start item."""
+    # The drive thread and record observer publish independently, with no fixed
+    # placement between the channels. This capture keeps both channel orders.
+    deltas = [index for index, notice in enumerate(notices) if notice["method"] == "item/toolCall/delta"]
+    parent, child = deltas
+    parent_item_started = next(
+        index
+        for index, notice in enumerate(notices)
+        if notice["method"] == "item/started" and notice["params"]["itemId"] == notices[parent]["params"]["itemId"]
+    )
+    assert parent_item_started < child, "parent tool start must precede the child's live arguments"
+    ordered = notices.copy()
+    ordered.pop(parent)
+    ordered.insert(parent_item_started - (parent < parent_item_started), notices[parent])
+    return ordered
+
+
 class Cut(BaseException):
     pass
 
@@ -1647,7 +1665,8 @@ class Fixtures:
         server.run_adapter.join()
         server.run_adapter.wake(sid)
         server.run_adapter.join()
-        drain()
+        child_wait_notices = drain()
+        transcript[-1]["notifications"] = order_child_wait_notifications(child_wait_notices)
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
             state = self.state(sid)

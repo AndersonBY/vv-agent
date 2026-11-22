@@ -157,6 +157,23 @@ def test_generated_fixtures_match_vendored_snapshot(generated_fixtures):
     assert not differences, differences
 
 
+@pytest.mark.parametrize("parent_arrival", [0, 2, 3])
+def test_child_wait_capture_only_places_parent_delta_at_its_start(parent_arrival):
+    fields = {"itemId": "parent-item"}
+    first = {"method": "turn/started"}
+    input_applied = {"method": "item/completed"}
+    parent_start = {"method": "item/started", "params": fields}
+    parent_delta = {"method": "item/toolCall/delta", "params": fields}
+    child_delta = {"method": "item/toolCall/delta", "params": {"itemId": "child-item"}}
+    last = {"method": "turn/completed"}
+    arrivals = [first, input_applied, parent_start, child_delta, last]
+    arrivals.insert(parent_arrival, parent_delta)
+
+    captured = AUTHOR["order_child_wait_notifications"](arrivals)
+
+    assert captured == [first, input_applied, parent_delta, parent_start, child_delta, last]
+
+
 def test_app_server_timeout_uses_public_resume_and_retains_durable_decision(monkeypatch: pytest.MonkeyPatch):
     approval_calls = 0
     replay_blocked = Event()
