@@ -26,6 +26,7 @@ from uuid import uuid4
 import vv_agent
 from vv_agent import Agent, RunConfig, Runner, ScriptedModelProvider, SQLiteStore
 from vv_agent.constants import get_default_tool_schemas
+from vv_agent.session.content_store import LocalKeyProvider
 from vv_agent.session.surfaces import SessionDriver
 from vv_agent.types import LLMResponse
 
@@ -72,18 +73,41 @@ if not extras:
     assert not any(p in sys.modules for p in ('psycopg', 'boto3', 'redis', 'celery'))
 
 def turn(workspace, store=None):
-    config = RunConfig(model_provider=ScriptedModelProvider.new('test', 'm', [LLMResponse('done')]),
+    marker = f"install-matrix-{uuid4().hex}"
+    key_provider = None
+    if store is not None:
+        store.configure_input_admission(allow_unsigned=True)
+        key_provider = LocalKeyProvider(
+            b"i" * 32,
+            state_path=workspace / f"key-state-{uuid4().hex}.sqlite3",
+        )
+    config = RunConfig(model_provider=ScriptedModelProvider.new('test', 'm', [LLMResponse(marker)]),
                        workspace=workspace, session_memory_enabled=False)
-    driver = SessionDriver(store=store) if store is not None else None
+    driver = SessionDriver(store=store, content_key_provider=key_provider) if store is not None else None
     # Runner fixes SQLite memory internally; only replace its store-constructor binding.
     # The real Runner, handle, driver, model and SQL operations all run unchanged.
     try:
         with patch('vv_agent.session.surfaces.SessionDriver', return_value=driver) if driver else nullcontext():
-            result = Runner.run_sync(Agent('install', 'Finish.', model='m'), 'go', run_config=config)
-        assert result.final_output == 'done' and result.status.value == 'completed'
+            result = Runner.run_sync(Agent('install', 'Finish.', model='m'), marker, run_config=config)
+        assert result.final_output == marker and result.status.value == 'completed'
+        if store is not None:
+            ciphertext = [bytes(row[0]) for row in store._rows(
+                'SELECT ciphertext FROM sk_content WHERE tenant_id=%s AND ciphertext IS NOT NULL',
+                (store.tenant_id,),
+            )]
+            assert ciphertext, 'durable turn wrote no encrypted content'
+            assert all(marker.encode() not in value for value in ciphertext), 'durable content contains plaintext'
+            for table in ('sk_record', 'sk_inbox', 'sk_commit'):
+                bodies = [bytes(row[0]) for row in store._rows(
+                    f'SELECT body FROM {table} WHERE tenant_id=%s',
+                    (store.tenant_id,),
+                )]
+                assert all(marker.encode() not in value for value in bodies), f'{table} contains plaintext content'
     finally:
         if driver:
             driver.close()
+        if key_provider:
+            key_provider.close()
 
 with TemporaryDirectory(prefix='vvsk-install-turn-') as directory:
     workspace = Path(directory)
