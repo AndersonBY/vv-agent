@@ -7,6 +7,7 @@ from threading import Barrier, Event
 
 import pytest
 from jsonschema import Draft202012Validator
+from support.s1_fixture_values import read_fixture_state
 from test_app_server_context import create
 from test_app_server_distributed import node, request, submission
 
@@ -29,7 +30,7 @@ def fork(server, identity="copy", **kwargs):
 
 
 def context(server, sid):
-    state, records, _ = server.kernel.store.read_state(sid)
+    state, records, _ = read_fixture_state(server.kernel.store, sid)
     return [m.to_dict() for m in project_context(records, state)]
 
 
@@ -109,7 +110,9 @@ def test_replay_before_source_changes_and_conflicts_across_nodes(tmp_path):
 
         def submit(s):
             barrier.wait(5)
-            return fork(s)["result"]
+            response = fork(s)
+            assert "result" in response, response
+            return response["result"]
 
         with ThreadPoolExecutor(2) as pool:
             receipts = list(pool.map(submit, [a, b]))
