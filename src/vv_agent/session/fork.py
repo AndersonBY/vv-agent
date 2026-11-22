@@ -2,20 +2,20 @@
 
 from __future__ import annotations
 
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from dataclasses import replace
 from hashlib import sha256
 from typing import TYPE_CHECKING, Any
 
 from vv_agent.app_server.host import AgentResolutionRequest, RunConfigResolutionRequest
 from vv_agent.app_server.protocol.identity import client_id
-from vv_agent.kernel._content import ContentRef, ContentUnavailable
+from vv_agent.kernel._content import Classification, ContentLabels, ContentRef, ContentUnavailable, SourceKind
 from vv_agent.kernel._requirements import SessionRequirements, model_capability_tags
 from vv_agent.memory.manager import MemoryManager
 from vv_agent.workspace.streaming import scan_text
 
 from .compaction import memory_settings
-from .content_runtime import SESSION_ATTRIBUTES, SESSION_PRINCIPAL_ATTRIBUTES, SESSION_WORKSPACE
+from .content_runtime import INTERNAL_LABELS, SESSION_ATTRIBUTES, SESSION_PRINCIPAL_ATTRIBUTES, SESSION_WORKSPACE
 from .context_view import context_messages, project_view
 from .projection import fold_hydrated_records, hydrate_records, hydration_for_session_store
 from .records import SessionSpec, copy_json, digest, inherited_seed_policies
@@ -100,11 +100,88 @@ def _destination_principal(
     return dict(payload) | {"attributes": attributes_ref.to_dict()}
 
 
-def fork_thread(kernel, host, params, principal: PrincipalInput | None = None):
-    from vv_agent.kernel._content_runtime import ContentRuntimeUnavailable, _uses_postgres_objects
+class _ForkContentReader:
+    """Capture the exact references whose authenticated values were prepared."""
 
-    if _uses_postgres_objects(kernel.store):
-        raise ContentRuntimeUnavailable("fork is unavailable for PostgreSQL object sessions")
+    def __init__(self, reader, links=None):
+        self._reader = reader
+        self.links = {} if links is None else links
+
+    @property
+    def binding(self):
+        return self._reader.binding
+
+    def read(self, tenant_id, session_id, owner, slot, ref):
+        value = self._reader.read(tenant_id, session_id, owner, slot, ref)
+        if self.links.setdefault((owner, slot), ref) != ref:
+            raise ContentUnavailable("fork source content link changed during preparation")
+        return value
+
+    @contextmanager
+    def _read_frame(self, **kwargs):
+        with self._reader._read_frame(**kwargs) as reader:
+            yield _ForkContentReader(reader, self.links)
+
+    def labels(self) -> ContentLabels:
+        # A projected context can combine several sources into one message.
+        labels = [ContentLabels(), *(ref.labels for ref in self.links.values())]
+        source = tuple(kind for kind in SourceKind if any(kind in value.source for value in labels))
+        classification = next(
+            (kind for kind in reversed(tuple(Classification)) if any(value.classification is kind for value in labels)),
+            Classification.INTERNAL,
+        )
+        return ContentLabels(source=source, classification=classification)
+
+    def verify_links(self, writer: SessionContentWriter) -> None:
+        record_seqs = []
+        input_ids = []
+        owners = []
+        for (owner, slot), ref in self.links.items():
+            kind, _, identity = owner.partition(":")
+            if kind == "record":
+                seq = int(identity)
+                record_seqs.append(seq)
+                owners.append((slot, ref, seq, None))
+            else:
+                if kind != "input":
+                    raise ValueError("fork source content has an invalid owner")
+                input_ids.append(identity)
+                owners.append((slot, ref, None, identity))
+        with writer._durable._read_frame(
+            writer.tenant_id, writer.session_id, record_seqs=record_seqs, input_ids=input_ids, validate_each_read=False
+        ) as frame:
+            for slot, ref, seq, input_id in owners:
+                frame.assert_link(writer.tenant_id, writer.session_id, ref, slot, record_seq=seq, input_id=input_id)
+
+
+def _object_fork_principal(principal, writer, original, logical, context_labels):
+    if principal is None:
+        payload = {"tenant_id": writer.tenant_id, "subject_id": "app-server", "subject_kind": "service"}
+        ref = writer._put_creation_json({"role": "app-server"}, labels=INTERNAL_LABELS)
+        return payload | {"attributes": ref.to_dict()}
+    payload = _principal_payload(principal)
+    if payload["tenant_id"] != writer.tenant_id:
+        raise PermissionError("fork principal tenant does not match the session tenant")
+    attributes = payload["attributes"]
+    source_ref = ContentRef.from_dict(original["attributes"])
+    if isinstance(attributes, ContentRef):
+        if attributes != source_ref:
+            raise ValueError("persisted fork principal requires the source principal attributes")
+        attributes = logical["attributes"]
+    copied = attributes == logical["attributes"]
+    value = copy_json(attributes)
+    if copied and isinstance(value.get("seed"), dict) and "messages" in value["seed"]:
+        value["seed"]["messages"] = [
+            writer.put_json(message, labels=context_labels).to_dict() for message in value["seed"]["messages"]
+        ]
+    ref = writer._put_creation_json(value, labels=source_ref.labels if copied else ContentLabels())
+    return payload | {"attributes": ref.to_dict()}
+
+
+def fork_thread(kernel, host, params, principal: PrincipalInput | None = None):
+    from vv_agent.kernel._content_runtime import _uses_postgres_objects
+
+    object_backed = _uses_postgres_objects(kernel.store)
     source = params["threadId"]
     sid = "fork/" + digest([source, params["forkId"]])
     previous = _replay(kernel, sid, params)
@@ -137,6 +214,10 @@ def fork_thread(kernel, host, params, principal: PrincipalInput | None = None):
     source_records = tuple(r for r in records if r.seq <= cut.seq)
     factory = _fold_factory_for(kernel.store)
     hydration = hydration_for_session_store(kernel.store, source)
+    source_reader = _ForkContentReader(hydration.reader) if object_backed else None
+    if source_reader is not None:
+        kernel.store._require_object_root_session(source)
+        hydration = replace(hydration, reader=source_reader)
     records = hydrate_records(source_records, hydration)
     state = fold_hydrated_records(records, source_records, factory, hydration)
     view = project_view(
@@ -255,21 +336,44 @@ def fork_thread(kernel, host, params, principal: PrincipalInput | None = None):
         bootstrap=fork_bootstrap,
     )
     try:
-        with kernel.store.atomic() as tx:
+        atomic = kernel._root_publication_atomic if object_backed else kernel.store.atomic
+        with atomic() as tx:
             content_writer = getattr(tx, "content_writer", None)
             if not callable(content_writer):
                 raise ValueError("fork requires a transaction with trusted content capability")
             destination = content_writer(tenant_id=kernel.tenant_id, session_id=sid)
-            # Serialize competing forks without locking the source against its worker.
-            destination._lock_creation_identity()
-            previous = _replay(kernel, sid, params)
-            if previous is not None:
-                return previous
+            if object_backed:
+                # The tenant publication lock already serializes object-backed creates.
+                if destination.tx.preflight_create(sid):
+                    raise Conflict("fork destination already exists")
+                kernel.store._require_object_root_session(source)
+                current = kernel.store.read(source, after_seq=cut.seq - 1, through_seq=cut.seq, limit=1).records
+                if len(current) != 1 or current[0].record.digest != cut.record.digest:
+                    raise Conflict("fork source cut changed")
+            else:
+                # Serialize competing forks without locking the source against its worker.
+                destination._lock_creation_identity()
+                previous = _replay(kernel, sid, params)
+                if previous is not None:
+                    return previous
             source_content = content_writer(tenant_id=kernel.tenant_id, session_id=source)
             source_principal = page.records[0].record._payload["principal"]
             source_workspace = page.records[0].record._payload["workspace"]
 
             def destination_spec(writer):
+                if source_reader is not None:
+                    source_reader.verify_links(source_content)
+                    logical = records[0].record._payload
+                    labels = source_reader.labels()
+                    workspace = writer.put_json(logical["workspace"], labels=ContentRef.from_dict(source_workspace).labels)
+                    attributes = copy_json(spec.attributes)
+                    attributes["seed"]["messages"] = [writer.put_json(message, labels=labels).to_dict() for message in copied]
+                    return replace(
+                        spec,
+                        principal=_object_fork_principal(principal, writer, source_principal, logical["principal"], labels),
+                        workspace=workspace.to_dict(),
+                        attributes=writer._put_creation_json(attributes, labels=labels).to_dict(),
+                    )
                 source_content.assert_record(1, source_principal["attributes"], SESSION_PRINCIPAL_ATTRIBUTES)
                 source_content.assert_record(1, source_workspace, SESSION_WORKSPACE)
                 workspace = writer.copy_json_from(source_content, source_workspace)

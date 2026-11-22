@@ -256,6 +256,8 @@ def _deferred_content_writer(writer: SessionContentWriter) -> tuple[SessionConte
     )
     deferred._durable = durable
     deferred.durable = cast(DurableContentStore, _ValidatedDurableContentStore(durable))
+    if isinstance(writer._binding._object_content, _PostgresObjectContent):
+        deferred._creation_json = {}
     return deferred, backend
 
 
@@ -686,6 +688,7 @@ class SessionContentWriter:
             )
         self.durable = cast(DurableContentStore, _ValidatedDurableContentStore(durable))
         self._published_refs = _published_refs if _published_refs is not None else set()
+        self._creation_json: dict[ContentRef, bytes] | None = None
 
     @classmethod
     def bind(
@@ -740,11 +743,25 @@ class SessionContentWriter:
     def put_json(self, value: Any, *, labels: ContentLabels = _DEFAULT_LABELS) -> ContentRef:
         return self.put_bytes(canonical_json_bytes(value), labels=labels)
 
+    def _put_creation_json(self, value: Any, *, labels: ContentLabels = _DEFAULT_LABELS) -> ContentRef:
+        self.tx._active()
+        if self._creation_json is None:
+            raise RuntimeError("creation JSON reuse requires a deferred PostgreSQL object writer")
+        body = canonical_json_bytes(value)
+        ref = self.put_bytes(body, labels=labels)
+        self._creation_json[ref] = body
+        return ref
+
     def get_bytes(self, ref: ContentRef | Mapping[str, Any]) -> bytes:
         return self._durable.get(self.tenant_id, self.session_id, _content_ref(ref))
 
     def get_json(self, ref: ContentRef | Mapping[str, Any]) -> Any:
         try:
+            if self._creation_json is not None:
+                self.tx._active()
+                body = self._creation_json.get(_content_ref(ref))
+                if body is not None:
+                    return json.loads(body)
             return json.loads(self.get_bytes(ref))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ValueError("stored content is not JSON") from exc
@@ -844,39 +861,43 @@ class SessionContentWriter:
         if not existing:
             factory_writer, deferred_backend = _deferred_content_writer(self)
 
-        spec = spec_factory(factory_writer)
-        if self._binding._object_content is not None and spec.parent_session_id is not None:
-            raise ContentRuntimeUnavailable("external content child admission is unavailable")
-        if spec.session_id != self.session_id:
-            raise ValueError("session spec does not match the content writer binding")
-        principal = Principal.from_dict(spec.principal)
-        if principal.tenant_id != self.tenant_id:
-            raise ValueError("session principal must use the content writer tenant")
-        if spec.attributes is None:
-            if deferred_backend is not None:
-                raise ValueError("new session attributes require content publication")
-            return self.tx.create(spec, consumers=consumers)
+        try:
+            spec = spec_factory(factory_writer)
+            if self._binding._object_content is not None and spec.parent_session_id is not None:
+                raise ContentRuntimeUnavailable("external content child admission is unavailable")
+            if spec.session_id != self.session_id:
+                raise ValueError("session spec does not match the content writer binding")
+            principal = Principal.from_dict(spec.principal)
+            if principal.tenant_id != self.tenant_id:
+                raise ValueError("session principal must use the content writer tenant")
+            if spec.attributes is None:
+                if deferred_backend is not None:
+                    raise ValueError("new session attributes require content publication")
+                return self.tx.create(spec, consumers=consumers)
 
-        if existing:
-            # Replay receives a committed reference-form spec. Validate its
-            # declared roots without treating mappings as new producer values.
-            _content_ref(spec.workspace)
-            _content_ref(spec.attributes)
-            return self.tx.create(spec, consumers=consumers)
+            if existing:
+                # Replay receives a committed reference-form spec. Validate its
+                # declared roots without treating mappings as new producer values.
+                _content_ref(spec.workspace)
+                _content_ref(spec.attributes)
+                return self.tx.create(spec, consumers=consumers)
 
-        workspace_ref = _creation_ref(factory_writer, spec.workspace)
-        attributes = _creation_ref(factory_writer, spec.attributes)
-        principal_attributes = _creation_ref(factory_writer, spec.principal["attributes"])
-        principal_payload = (
-            spec.principal | {"attributes": principal_attributes} if principal_attributes is not None else spec.principal
-        )
+            workspace_ref = _creation_ref(factory_writer, spec.workspace)
+            attributes = _creation_ref(factory_writer, spec.attributes)
+            principal_attributes = _creation_ref(factory_writer, spec.principal["attributes"])
+            principal_payload = (
+                spec.principal | {"attributes": principal_attributes} if principal_attributes is not None else spec.principal
+            )
 
-        created_content = publish_session_created_content(
-            factory_writer,
-            principal=principal_payload,
-            workspace=workspace_ref if workspace_ref is not None else spec.workspace,
-            attributes=attributes if attributes is not None else spec.attributes,
-        )
+            created_content = publish_session_created_content(
+                factory_writer,
+                principal=principal_payload,
+                workspace=workspace_ref if workspace_ref is not None else spec.workspace,
+                attributes=attributes if attributes is not None else spec.attributes,
+            )
+        finally:
+            if factory_writer._creation_json is not None:
+                factory_writer._creation_json.clear()
         published = replace(
             spec,
             principal=created_content.principal,

@@ -25,7 +25,6 @@ from vv_agent.memory.token_utils import count_tokens
 from vv_agent.model import ScriptedModelProvider
 from vv_agent.session.content_runtime import SESSION_WORKSPACE
 from vv_agent.session.content_store import AESGCMCipher, LocalKeyProvider
-from vv_agent.session.fork import fork_thread
 from vv_agent.session.postgres import PostgresStore
 from vv_agent.session.records import InboxItem
 from vv_agent.session.result import project_result
@@ -305,8 +304,6 @@ def test_postgres_sdk_root_object_create_push_and_cold_read(object_publication, 
                     driver.push("objects", replace(item, target_turn_id="turn", generation=1))
                 with pytest.raises(ContentRuntimeUnavailable, match="worker controls"):
                     driver.control("objects", "close", "control")
-                with pytest.raises(ContentRuntimeUnavailable, match="fork is unavailable"):
-                    fork_thread(driver, None, {})
                 assert len(client.calls) == before
                 assert store.peek_inbox("objects") == ()
                 assert not driver.push("objects", item).replayed
