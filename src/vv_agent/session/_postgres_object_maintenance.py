@@ -148,7 +148,7 @@ def reconcile_postgres_failed_root_create_key(
     authority: _PostgresRootErasure,
     root_id: str,
     *,
-    deadline_ns: int | None = None,
+    deadline_ns: int,
     clock_ns: Callable[[], int] = time.monotonic_ns,
 ) -> PostgresFailedRootCreateKeyReconciliation:
     """Retire one expired exact key left by a failed root create.
@@ -157,15 +157,16 @@ def reconcile_postgres_failed_root_create_key(
     supplies the exact provider; no provider or key identity is accepted from
     the caller. SQL presence always wins over stale failure evidence, and a
     missing currentness proof leaves every provider and journal allocation
-    untouched.
+    untouched. The host must bound each key-provider request with provider
+    timeouts. This routine checks the monotonic deadline around those calls.
     """
     if not isinstance(root_id, str) or not root_id:
         raise ValueError("PostgreSQL failed root create requires a non-empty root ID")
-    if deadline_ns is not None and (type(deadline_ns) is not int or deadline_ns <= 0):
+    if type(deadline_ns) is not int or deadline_ns <= 0:
         raise ValueError("PostgreSQL failed root create deadline must be positive monotonic nanoseconds")
 
     def check_deadline() -> None:
-        if deadline_ns is not None and clock_ns() >= deadline_ns:
+        if clock_ns() >= deadline_ns:
             raise TimeoutError("PostgreSQL failed root create deadline expired")
 
     check_deadline()
@@ -187,11 +188,10 @@ def reconcile_postgres_failed_root_create_key(
         _,
         check_fence,
     ):
-        if deadline_ns is not None:
-            remaining_ns = deadline_ns - clock_ns()
-            check_fence()
-            statement_ms = min(2**31 - 1, max(1, remaining_ns // 1_000_000))
-            store._rows("SELECT set_config('statement_timeout',%s,true)", (f"{statement_ms}ms",))
+        remaining_ns = deadline_ns - clock_ns()
+        check_fence()
+        statement_ms = min(2**31 - 1, max(1, remaining_ns // 1_000_000))
+        store._rows("SELECT set_config('statement_timeout',%s,true)", (f"{statement_ms}ms",))
 
         objects.verify_installation(journal.identity.database_id, provider)
         intents = journal.key_intents_for_admission(journal.tenant_id, root_id, root_id, "session/create")

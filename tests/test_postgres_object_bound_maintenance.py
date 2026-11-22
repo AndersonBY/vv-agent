@@ -5,7 +5,9 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from dataclasses import replace
 from hashlib import sha256
+from inspect import Parameter, signature
 from threading import Event
+from typing import cast
 from uuid import uuid4
 
 import pytest
@@ -331,6 +333,19 @@ def test_pg_bound_maintenance_requires_currentness_and_exact_locator_identity(er
         assert any(locator[1:].hex() in key for key in client.objects)
 
 
+def test_failed_root_create_key_requires_deadline_before_accessing_storage():
+    deadline = signature(reconcile_postgres_failed_root_create_key).parameters["deadline_ns"]
+    assert deadline.kind is Parameter.KEYWORD_ONLY and deadline.default is Parameter.empty
+
+    store = cast(PostgresStore, None)
+    authority = cast(_PostgresRootErasure, None)
+    for invalid in (0, -1, False):
+        with pytest.raises(ValueError, match="positive monotonic nanoseconds"):
+            reconcile_postgres_failed_root_create_key(store, authority, "root", deadline_ns=invalid)
+    with pytest.raises(TimeoutError, match="deadline expired"):
+        reconcile_postgres_failed_root_create_key(store, authority, "root", deadline_ns=1, clock_ns=lambda: 1)
+
+
 def test_pg_failed_root_create_key_reconciles_and_keeps_committed_root_protected(erasure_storage, monkeypatch):
     dsn, provider, objects, cleanup, _, _ = erasure_storage
     root_id = "failed-root-create"
@@ -363,7 +378,9 @@ def test_pg_failed_root_create_key_reconciles_and_keeps_committed_root_protected
         (fresh,) = cleanup.scoped_key_intents(TENANT_A, (root_id,))
         assert fresh.intent.key_id == fresh_key and fresh.state == "allocating"
 
-        protected = reconcile_postgres_failed_root_create_key(store, authority, root_id)
+        protected = reconcile_postgres_failed_root_create_key(
+            store, authority, root_id, deadline_ns=time.monotonic_ns() + 5_000_000_000
+        )
         assert protected.status == "preserved" and protected.key_id == fresh_key
         assert cleanup.get_key_intent(fresh.intent.provider_instance_id, fresh_key) == fresh
         assert provider._verify_exact_retirement(fresh.intent) is None
@@ -379,7 +396,9 @@ def test_pg_failed_root_create_key_defers_allocations_and_missing_currentness(er
         intent = _lose_failed_create_key_reply(store, provider, objects, root_id, monkeypatch)
 
         with pytest.raises(ContentCleanupUnavailable, match="current storage evidence"):
-            reconcile_postgres_failed_root_create_key(store, _authority(objects, cleanup, current=False), root_id)
+            reconcile_postgres_failed_root_create_key(
+                store, _authority(objects, cleanup, current=False), root_id, deadline_ns=time.monotonic_ns() + 5_000_000_000
+            )
         current = cleanup.get_key_intent(intent.provider_instance_id, intent.key_id)
         assert current is not None and current.state == "allocating"
         assert provider._verify_exact_retirement(intent) is None
@@ -393,7 +412,9 @@ def test_pg_failed_root_create_key_defers_allocations_and_missing_currentness(er
         )
         assert any(locator[1:].hex() in key for key in erasure_storage[-1].objects)
 
-        deferred = reconcile_postgres_failed_root_create_key(store, authority, root_id)
+        deferred = reconcile_postgres_failed_root_create_key(
+            store, authority, root_id, deadline_ns=time.monotonic_ns() + 5_000_000_000
+        )
         assert deferred.status == "deferred" and deferred.key_id == intent.key_id
         assert cleanup.get_key_intent(intent.provider_instance_id, intent.key_id) == current
         assert provider._verify_exact_retirement(intent) is None
@@ -412,7 +433,9 @@ def test_pg_failed_root_create_key_preserves_tombstone_owned_state(erasure_stora
             (TENANT_A, root_id, sha256(b"tombstone").hexdigest(), b"{}", intent.key_id, b"signature", root_id),
         )
 
-        result = reconcile_postgres_failed_root_create_key(store, _authority(objects, cleanup), root_id)
+        result = reconcile_postgres_failed_root_create_key(
+            store, _authority(objects, cleanup), root_id, deadline_ns=time.monotonic_ns() + 5_000_000_000
+        )
         assert result.status == "preserved" and result.key_id == intent.key_id
         current = cleanup.get_key_intent(intent.provider_instance_id, intent.key_id)
         assert current is not None and current.state == "allocating"
@@ -450,7 +473,7 @@ def test_pg_failed_root_create_key_retries_lost_terminal_ack(erasure_storage, mo
                 patch.setattr(provider, "_retire_exact_key", retire_then_lose_reply)
             else:
                 patch.setattr(type(cleanup), "record_key_retirement", record_then_lose_reply)
-            reconcile_postgres_failed_root_create_key(store, authority, root_id)
+            reconcile_postgres_failed_root_create_key(store, authority, root_id, deadline_ns=time.monotonic_ns() + 5_000_000_000)
 
         interrupted = cleanup.get_key_intent(intent.provider_instance_id, intent.key_id)
         assert interrupted is not None and interrupted.state == ("reaping" if phase == "provider" else "retired")
@@ -459,7 +482,9 @@ def test_pg_failed_root_create_key_retries_lost_terminal_ack(erasure_storage, mo
         if phase == "journal":
             with monkeypatch.context() as patch, pytest.raises(ContentCleanupUnavailable, match="retirement evidence changed"):
                 patch.setattr(provider, "_verify_exact_retirement", lambda _intent: None)
-                reconcile_postgres_failed_root_create_key(store, authority, root_id)
+                reconcile_postgres_failed_root_create_key(
+                    store, authority, root_id, deadline_ns=time.monotonic_ns() + 5_000_000_000
+                )
             assert cleanup.get_key_intent(intent.provider_instance_id, intent.key_id) == interrupted
 
         def unexpected_retirement(_intent):
@@ -467,7 +492,14 @@ def test_pg_failed_root_create_key_retries_lost_terminal_ack(erasure_storage, mo
 
         with monkeypatch.context() as patch:
             patch.setattr(provider, "_retire_exact_key", unexpected_retirement)
-            resumed = reconcile_postgres_failed_root_create_key(store, authority, root_id)
+            resumed = reconcile_postgres_failed_root_create_key(
+                store, authority, root_id, deadline_ns=time.monotonic_ns() + 5_000_000_000
+            )
         assert resumed.status == "completed" and resumed.evidence_id == evidence[0]
         assert cleanup.get_key_intent(intent.provider_instance_id, intent.key_id) is None
-        assert reconcile_postgres_failed_root_create_key(store, authority, root_id).status == "completed"
+        assert (
+            reconcile_postgres_failed_root_create_key(
+                store, authority, root_id, deadline_ns=time.monotonic_ns() + 5_000_000_000
+            ).status
+            == "completed"
+        )
