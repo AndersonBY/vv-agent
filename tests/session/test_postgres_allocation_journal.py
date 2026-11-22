@@ -89,15 +89,19 @@ def test_object_store_reconciles_lost_journal_commit_reply(provisioned, monkeypa
     anonymous = journals[JournalRole("anonymous")]
     binder_a, scope_a = JournalRole("binder", "tenant-a"), JournalRole("scope", "tenant-a")
     binder_b, scope_b = JournalRole("binder", "tenant-b"), JournalRole("scope", "tenant-b")
-    journal = PostgresObjectJournal(anonymous=anonymous, binder=journals[binder_a], scope=journals[scope_a])
-    foreign = PostgresObjectJournal(anonymous=anonymous, binder=journals[binder_b], scope=journals[scope_b])
+    keys_a, keys_b = JournalRole("key-intent", "tenant-a"), JournalRole("key-intent", "tenant-b")
+    journal = PostgresObjectJournal(
+        anonymous=anonymous, binder=journals[binder_a], scope=journals[scope_a], keys=journals[keys_a]
+    )
+    foreign = PostgresObjectJournal(
+        anonymous=anonymous, binder=journals[binder_b], scope=journals[scope_b], keys=journals[keys_b]
+    )
     with pytest.raises(ValueError, match="matching provisioned role"):
-        PostgresObjectJournal(anonymous=anonymous, binder=journals[binder_a], scope=journals[scope_b])
-    keys = journals[JournalRole("key-intent", "tenant-a")]
+        PostgresObjectJournal(anonymous=anonymous, binder=journals[binder_a], scope=journals[scope_b], keys=journals[keys_a])
     intent = _ExactKeyIntent("s1-exact-key-" + "a" * 64, "provider", "tenant-a", "child", "parent", "admission")
     pin = _pin()
-    reserved = keys.reserve_key_intent(intent, pin_until_ms=pin)
-    assert reserved is not None and keys.claim_key_allocation(reserved) is not None
+    reserved = journal.reserve_key_intent(intent, pin_until_ms=pin)
+    assert reserved is not None and journal.claim_key_allocation(reserved) is not None
     owner = replace(OWNER, key_id=intent.key_id)
     client = _Client(lambda allocation_id: journal.get_anonymous(allocation_id) or journal.get_owned(allocation_id, owner), owner)
     objects = S3CiphertextStore(client, bucket="fixture", journal=journal)
@@ -134,6 +138,7 @@ def test_object_store_reconciles_lost_journal_commit_reply(provisioned, monkeypa
         anonymous=anonymous,
         binder=journals[binder_a],
         scope=PostgresAllocationJournal(logins[scope_a], identity, scope_a),
+        keys=PostgresAllocationJournal(logins[keys_a], identity, keys_a),
     )
     row = reopened.get_owned(locator[1:], owner)
     assert row is not None and row.owner == owner and row.state == "bound"
@@ -144,6 +149,44 @@ def test_object_store_reconciles_lost_journal_commit_reply(provisioned, monkeypa
     denied = S3CiphertextStore(client, bucket="fixture", journal=foreign)
     with pytest.raises(ContentUnavailable):
         denied.get(replace(owner, tenant_id="tenant-b"), locator, ciphertext_size=len(_CIPHERTEXT))
+
+
+def test_object_journal_uses_exact_tenant_key_authority(provisioned):
+    admin, identity, journals, logins, _ = provisioned
+    anonymous = journals[JournalRole("anonymous")]
+    tenant = "tenant-a"
+    key_role = JournalRole("key-intent", tenant)
+    binder, scope, keys = journals[JournalRole("binder", tenant)], journals[JournalRole("scope", tenant)], journals[key_role]
+    with pytest.raises(ContentUnavailable, match="identity or policy"):
+        PostgresAllocationJournal(logins[key_role], replace(identity, database_id="other-primary"), key_role)
+    for wrong in (scope, journals[JournalRole("key-intent", "tenant-b")]):
+        with pytest.raises(ValueError, match="matching provisioned role"):
+            PostgresObjectJournal(anonymous=anonymous, binder=binder, scope=scope, keys=wrong)
+
+    journal = PostgresObjectJournal(anonymous=anonymous, binder=binder, scope=scope, keys=keys)
+    assert journal.tenant_id == tenant and journal.identity == identity
+    intent = _ExactKeyIntent("s1-exact-key-" + "a" * 64, "provider", tenant, "child", "parent", "admission")
+    pin = _now(admin) + 10_000
+    foreign = replace(intent, tenant_id="tenant-b", key_id="s1-exact-key-" + "b" * 64)
+    assert journal.reserve_key_intent(foreign, pin_until_ms=pin) is None
+    assert journals[JournalRole("key-intent", foreign.tenant_id)].reserve_key_intent(foreign, pin_until_ms=pin) is not None
+    assert journal.get_key_intent(foreign.provider_instance_id, foreign.key_id) is None
+    assert journal.reserve_key_intent(intent, pin_until_ms=_now(admin)) is None
+    reserved = journal.reserve_key_intent(intent, pin_until_ms=pin)
+    assert reserved is not None and reserved.intent == intent
+    assert journal.reserve_key_intent(intent, pin_until_ms=pin) is None
+    assert journal.key_intents_for_admission("tenant-b", "child", "parent", "admission") == ()
+    assert journal.key_intents_for_admission(tenant, "child", "parent", "different") == ()
+    assert journal.key_intents_for_admission(tenant, "child", "parent", "admission") == (reserved,)
+    assert journal.get_key_intent("other-provider", intent.key_id) is None
+    assert journal.claim_key_allocation(replace(reserved, intent=replace(intent, session_id="different"))) is None
+    assert journal.claim_key_allocation(replace(reserved, journal_id="different")) is None
+    assert journal.claim_key_allocation(replace(reserved, intent=replace(intent, tenant_id="tenant-b"))) is None
+    assert journal.get_key_intent(intent.provider_instance_id, intent.key_id) == reserved
+    allocated = journal.claim_key_allocation(reserved)
+    assert allocated is not None and allocated.state == "allocating"
+    assert journal.get_key_intent(intent.provider_instance_id, intent.key_id) == allocated
+    assert journal.claim_key_allocation(reserved) is None
 
 
 def test_bound_row_survives_primary_rollback_and_requires_exact_claim(provisioned, postgres_admin_dsn):

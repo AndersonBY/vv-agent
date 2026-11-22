@@ -659,7 +659,7 @@ class PostgresAllocationJournal:
 
 
 class PostgresObjectJournal:
-    """Compose the provisioned object roles for one authenticated tenant."""
+    """Compose object and key allocation roles for one authenticated tenant."""
 
     def __init__(
         self,
@@ -667,24 +667,51 @@ class PostgresObjectJournal:
         anonymous: PostgresAllocationJournal,
         binder: PostgresAllocationJournal,
         scope: PostgresAllocationJournal,
+        keys: PostgresAllocationJournal,
     ) -> None:
         tenant_id = scope._role.tenant_id
         if (
             tenant_id is None
             or scope._role != JournalRole("scope", tenant_id)
             or binder._role != JournalRole("binder", tenant_id)
+            or keys._role != JournalRole("key-intent", tenant_id)
             or anonymous._role != JournalRole("anonymous")
-            or not (scope._identity == binder._identity == anonymous._identity)
+            or not (scope._identity == binder._identity == anonymous._identity == keys._identity)
         ):
             raise ValueError("object journal requires matching provisioned role bindings")
         self._tenant_id = tenant_id
         self._anonymous = anonymous
         self._binder = binder
         self._scope = scope
+        self._keys = keys
 
     @property
     def identity(self) -> JournalIdentity:
         return self._scope._identity
+
+    @property
+    def tenant_id(self) -> str:
+        return self._tenant_id
+
+    def get_key_intent(self, provider_instance_id: str, key_id: str) -> KeyIntent | None:
+        return self._scope.get_key_intent(provider_instance_id, key_id)
+
+    def key_intents_for_admission(
+        self, tenant_id: str, session_id: str, admission_root_id: str, admission_id: str
+    ) -> tuple[KeyIntent, ...]:
+        if tenant_id != self._tenant_id:
+            return ()
+        return self._scope.key_intents_for_admission(tenant_id, session_id, admission_root_id, admission_id)
+
+    def reserve_key_intent(self, intent: _ExactKeyIntent, *, pin_until_ms: int) -> KeyIntent | None:
+        if intent.tenant_id != self._tenant_id:
+            return None
+        return self._keys.reserve_key_intent(intent, pin_until_ms=pin_until_ms)
+
+    def claim_key_allocation(self, expected: KeyIntent) -> KeyIntent | None:
+        if expected.intent.tenant_id != self._tenant_id:
+            return None
+        return self._keys.claim_key_allocation(expected)
 
     def reserve(self, allocation_id: bytes, *, pin_until_ms: int) -> bool:
         return self._anonymous.reserve(allocation_id, pin_until_ms=pin_until_ms)
