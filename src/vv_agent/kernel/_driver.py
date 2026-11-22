@@ -532,15 +532,21 @@ class CoreDriver:
         timings: list[tuple[str, float, str, str | None]] = []
         atomic_start = self.clock.monotonic_ns()
         atomic_error = None
-        # Renewal may update append's lease, but cannot extend this transaction's budget.
-        persistence_deadline = self.scope.safety_deadline
+        persistence_deadline: float | None = self.scope.safety_deadline
 
         def check_deadline() -> None:
-            if self.clock.monotonic() >= persistence_deadline:
+            deadline = self.scope.safety_deadline if persistence_deadline is None else persistence_deadline
+            if self.clock.monotonic() >= deadline:
                 raise LeaseLost("session persistence reached the lease safety deadline")
 
-        def commit_lease() -> Lease:
+        def freeze_deadline() -> None:
+            nonlocal persistence_deadline
+            if persistence_deadline is None:
+                persistence_deadline = self.scope.safety_deadline
             check_deadline()
+
+        def commit_lease() -> Lease:
+            freeze_deadline()
             return latch.enter_context(self.scope.committing())
 
         @contextmanager
@@ -561,8 +567,14 @@ class CoreDriver:
             check_deadline()
             with ExitStack() as latch, self.store.atomic() as tx:
                 bind_deadline = getattr(tx, "_bind_persistence_deadline", None)
-                if callable(bind_deadline):
-                    bind_deadline(check_deadline)
+                # PostgreSQL can renew until a session row lock is requested.
+                # External allocations must share the deadline taken before prepare.
+                if (
+                    callable(bind_deadline)
+                    and bind_deadline(check_deadline, freeze_deadline)
+                    and not getattr(tx, "_requires_early_persistence_deadline", False)
+                ):
+                    persistence_deadline = None
                 if prepare is not None:
                     with phase("prepare"):
                         prepared_records.extend(prepare(tx))
