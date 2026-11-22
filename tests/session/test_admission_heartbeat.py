@@ -9,6 +9,7 @@ from time import monotonic, monotonic_ns, sleep
 
 import pytest
 
+from vv_agent.kernel._content_runtime import _ContentSessionTxAdapter
 from vv_agent.kernel._postgres import PostgresStore as CorePostgresStore
 from vv_agent.session import children, kernel, timing
 from vv_agent.session.postgres import PostgresStore
@@ -22,6 +23,7 @@ from .helpers import fixture_child_spec, fixture_content_reader, read_fixture_st
 from .test_children import parent_runtime
 from .test_recovery_matrix import runtime as base_runtime
 from .test_recovery_matrix import start
+from .test_sim_injection import ManualClock
 
 pytestmark = pytest.mark.postgres
 TTL = 400
@@ -218,6 +220,43 @@ def test_long_admission_hold_renews_or_fails_before_commit(store, database, comp
     if phase == "prepare":
         assert diagnostic[0].callback_ms >= 3 * observed_ttl
     assert diagnostic[0].kernel_atomic_ms >= diagnostic[0].callback_ms
+
+
+@pytest.mark.parametrize("external", [False, True])
+def test_postgres_external_admission_retains_early_deadline(store, database, monkeypatch, external):
+    monkeypatch.setattr(_ContentSessionTxAdapter, "_requires_early_persistence_deadline", external, raising=False)
+    start(store)
+    store._rows("CREATE TABLE host_child (id INTEGER PRIMARY KEY)")
+    clock = ManualClock()
+    rt = runtime(store, database, [], clock=clock, ttl_ms=4000, heartbeat_seconds=INTERVAL)
+    lease = store.acquire("s", owner="admission", ttl_ms=rt.ttl_ms)
+    assert lease is not None
+    scope = kernel._Scope(lease, rt, now_ms=store._now())
+    driver = kernel._Driver(store, "s", rt, scope)
+    initial_deadline = scope.safety_deadline
+
+    with open_store(database) as renewal:
+
+        def prepare(_tx):
+            store._rows("INSERT INTO host_child VALUES (1)")
+            clock.advance(2000)
+            scope.poll(renewal)
+            clock.advance(2000)
+            assert initial_deadline < clock.monotonic() < scope.safety_deadline
+            assert scope.lease.epoch == lease.epoch
+            return []
+
+        try:
+            if external:
+                with pytest.raises(LeaseLost, match="session persistence reached the lease safety deadline"):
+                    driver.commit([], prepare=prepare)
+            else:
+                driver.commit([], prepare=prepare)
+        finally:
+            scope.close()
+            store.release(scope.lease)
+
+    assert store._rows("SELECT * FROM host_child") == ([] if external else [(1,)])
 
 
 def test_slow_append_encoding_uses_last_lease(store, database, monkeypatch):
