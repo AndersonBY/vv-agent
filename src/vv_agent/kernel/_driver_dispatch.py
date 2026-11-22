@@ -15,6 +15,7 @@ from ._boundary_hydration import hydrate_input
 from ._call_context import CompiledCallFacts
 from ._child_store import ChildSession, InvalidChildBatch, create_child
 from ._child_summary import child_summary
+from ._content import Principal
 from ._content_runtime import ContentRuntimeUnavailable, _uses_postgres_objects
 from ._driver import CoreDriver
 from ._driver_planning import (
@@ -254,6 +255,27 @@ def _task(driver: CoreDriver, *, copy: bool = False) -> AgentTask:
     return task if not copy else deepcopy(task)
 
 
+def _validate_child_batch_identities(specs: Sequence[ChildSession], plan: Record, *, parent_tenant_id: str) -> None:
+    """Validate all identities before any child can allocate content or write a row."""
+
+    seen: set[str] = set()
+    for child in specs:
+        spec = child.spec
+        if spec.parent_session_id is not None and spec.parent_session_id != plan.session_id:
+            raise ValueError("child spec parent must match the admitting parent")
+        principal = Principal.from_dict(spec.principal)
+        if principal.tenant_id != parent_tenant_id:
+            raise ValueError("child principal must use the parent transaction tenant")
+        session_id = spec.session_id
+        if not isinstance(session_id, str) or not session_id or "\x00" in session_id:
+            raise ValueError("identity must be nonempty text without NUL")
+        if session_id == plan.session_id:
+            raise InvalidChildBatch("child session ID must differ from the parent session")
+        if session_id in seen:
+            raise InvalidChildBatch("duplicate child membership")
+        seen.add(session_id)
+
+
 def preflight(plan: Record) -> Generator[object, Any, ToolExecutionResult | None]:
     try:
         blocked = admission.session_preflight_result(plan, handler_managed=(yield PreflightHandler(plan)))
@@ -330,6 +352,7 @@ def admit_children(driver: CoreDriver, tx: SessionTx, request: AdmitChildren) ->
         if any(type(c.yield_on_steer) is not bool or (c.background and c.yield_on_steer) for c in specs):
             raise InvalidChildBatch("Only foreground children may declare yield_on_steer=True")
         assert specs is not None
+        _validate_child_batch_identities(specs, plan, parent_tenant_id=driver.scope.lease.tenant_id)
         generation = driver.state.turns[plan.turn_id or ""].start._payload["generation"]
         inherited = inherited_seed_policies(driver.session_attributes())
         inherited_specs = []
