@@ -33,6 +33,7 @@ from vv_agent.session.content_runtime import (
 )
 from vv_agent.session.content_store import LocalKeyProvider
 from vv_agent.session.deletion import SessionDeletionStore
+from vv_agent.session.sqlite import SQLiteStore
 from vv_agent.session.supervisor import _tick
 from vv_agent.session.surfaces import SessionDriver
 from vv_agent.types import LLMResponse, ToolCall
@@ -125,7 +126,8 @@ def _set_default_retry_window(monkeypatch: pytest.MonkeyPatch, seconds: float = 
 
 
 def _drive_retry_at(driver: SessionDriver, session_id: str) -> int:
-    return driver._root_store._one(
+    store = cast(SQLiteStore, driver._root_store)
+    return store._one(
         "SELECT drive_retry_at_ms FROM sk_session WHERE tenant_id=? AND session_id=?",
         (TENANT, session_id),
     )[0]
@@ -366,7 +368,7 @@ def test_session_worker_defers_preturn_key_outage_then_completes(
     _set_default_retry_window(monkeypatch)
     key_provider = _provider(tmp_path, "worker-preturn")
     reader = _ToggleContentReader()
-    model_calls: list[dict[str, Any]] = []
+    model_calls: list[Any] = []
     holder: dict[str, SessionDriver] = {}
 
     def runtime_factory(store, agent, config, task, session_id):
@@ -399,7 +401,9 @@ def test_session_worker_defers_preturn_key_outage_then_completes(
         reader.outage = True
         handle.start()
 
-        _wait_until(lambda: reader.failed.is_set() and _drive_retry_at(driver, session_id) > driver._root_store._now())
+        _wait_until(
+            lambda: reader.failed.is_set() and _drive_retry_at(driver, session_id) > cast(SQLiteStore, driver._root_store)._now()
+        )
         assert "turn_failed" not in _record_kinds(driver, session_id)
         assert model_calls == []
 
@@ -448,7 +452,7 @@ def test_session_worker_recovers_active_turn_without_replaying_calls(
     _set_default_retry_window(monkeypatch)
     key_provider = _provider(tmp_path, "worker-active")
     reader = _ToggleContentReader()
-    model_calls: list[dict[str, Any]] = []
+    model_calls: list[Any] = []
     tool_calls: list[str] = []
     holder: dict[str, SessionDriver] = {}
 
@@ -507,7 +511,9 @@ def test_session_worker_recovers_active_turn_without_replaying_calls(
             "reply",
         )
 
-        _wait_until(lambda: reader.failed.is_set() and _drive_retry_at(driver, session_id) > driver._root_store._now())
+        _wait_until(
+            lambda: reader.failed.is_set() and _drive_retry_at(driver, session_id) > cast(SQLiteStore, driver._root_store)._now()
+        )
         state, _, _ = driver.store.read_state(session_id)
         assert state.active_turn_id is not None
         assert "turn_failed" not in _record_kinds(driver, session_id)
@@ -562,9 +568,9 @@ def test_supervisor_retry_gate_recovers_preturn_key_outage(tmp_path: Path) -> No
             )
             == 1
         )
-        _wait_until(lambda: _drive_retry_at(driver, session_id) > driver._root_store._now())
+        _wait_until(lambda: _drive_retry_at(driver, session_id) > cast(SQLiteStore, driver._root_store)._now())
         retry_at = _drive_retry_at(driver, session_id)
-        assert retry_at <= driver._root_store._now() + 150
+        assert retry_at <= cast(SQLiteStore, driver._root_store)._now() + 150
         assert "turn_failed" not in _record_kinds(driver, session_id)
         assert model_calls == []
 

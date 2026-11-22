@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from threading import Barrier, Event, current_thread
 from time import monotonic
+from typing import cast
 
 import pytest
 
@@ -63,6 +64,7 @@ def test_drive_store_factory_preserves_sqlite_timeouts_worker_and_admission(tmp_
         store.configure_input_admission(allow_unsigned=True)
 
         with store.drive_store_factory()() as drive:
+            drive = cast(SQLiteStore, drive)
             assert drive.connection.execute("PRAGMA busy_timeout").fetchone() == (8000,)
             assert drive.heartbeat_busy_timeout_ms == 125
             with drive.heartbeat_store() as heartbeat:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 from support.s1_fixture_values import create_fixture_session, wrap_fixture_store
@@ -41,7 +42,9 @@ def _run_driver(driver: SessionDriver, session_id: str, workspace: Path) -> str:
         ),
         "go",
     )
-    return handle.result(timeout=10).final_output
+    output = handle.result(timeout=10).final_output
+    assert output is not None
+    return output
 
 
 def test_sqlite_tenant_x_driver_completes_without_reading_tenant_y(tmp_path: Path) -> None:
@@ -91,7 +94,7 @@ def test_sqlite_facade_cannot_destroy_another_tenants_key(
 
             tenant_x = store.for_tenant(TENANT_X)
             with pytest.raises(ContentBindingMismatch, match="another tenant"), tenant_x.atomic() as tx:
-                SQLiteContentStore(tx, provider).forget_session(TENANT_Y, "cross-tenant")
+                SQLiteContentStore(cast(Any, tx), provider).forget_session(TENANT_Y, "cross-tenant")
 
             assert destroyed == []
             assert store._one(
@@ -100,7 +103,7 @@ def test_sqlite_facade_cannot_destroy_another_tenants_key(
             ) == (1,)
 
             with pytest.raises(ContentBindingMismatch, match="another tenant"), tenant_x.atomic():
-                SQLiteContentStore(tenant_x, provider).forget_session(TENANT_Y, "source-facade")
+                SQLiteContentStore(cast(Any, tenant_x), provider).forget_session(TENANT_Y, "source-facade")
 
             assert destroyed == []
             assert store._one(

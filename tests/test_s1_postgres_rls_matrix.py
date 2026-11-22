@@ -216,11 +216,13 @@ def _wait_for_blocked_settings_lock(database: RLSDatabase, role: str) -> None:
     deadline = time.monotonic() + 10
     with psycopg.connect(_dsn(database, database.migration_role, database.migration_password), autocommit=True) as observer:
         while time.monotonic() < deadline:
-            blocked = observer.execute(
+            blocked_row = observer.execute(
                 "SELECT EXISTS(SELECT 1 FROM pg_locks l JOIN pg_stat_activity a USING(pid) "
                 "WHERE a.datname=current_database() AND a.usename=%s AND NOT l.granted)",
                 (role,),
-            ).fetchone()[0]
+            ).fetchone()
+            assert blocked_row is not None
+            blocked = blocked_row[0]
             if blocked:
                 return
             time.sleep(0.05)

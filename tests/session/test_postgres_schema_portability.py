@@ -92,9 +92,9 @@ def test_postgres_store_keeps_runtime_binding_checks(monkeypatch):
     )
 
     worker_binding = _postgres.RuntimeBinding("worker")
-    worker = _postgres.PostgresStore(worker_connection, fold_factory=_fold_factory, runtime_binding=worker_binding)
+    worker = _postgres.PostgresStore(cast(Any, worker_connection), fold_factory=_fold_factory, runtime_binding=worker_binding)
     tenant_binding = _postgres.RuntimeBinding("tenant", "tenant-a")
-    tenant = _postgres.PostgresStore(tenant_connection, fold_factory=_fold_factory, runtime_binding=tenant_binding)
+    tenant = _postgres.PostgresStore(cast(Any, tenant_connection), fold_factory=_fold_factory, runtime_binding=tenant_binding)
 
     assert calls == [
         ("role", worker_binding),
