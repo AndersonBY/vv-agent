@@ -773,6 +773,14 @@ process restarts. Losing it fails reads closed because wrapped keys no longer
 have active lifecycle state. It is still a development provider, not a
 production KMS.
 
+The internal SQLite object-storage runtime pins a randomly assigned primary
+database identity and a digest of the allocation journal, exact key-provider
+instance and object namespace. Provision the binding once while writers are
+quiesced. Each runtime that opens the primary must verify the provisioned
+sidecar, provider and bucket configuration before serving content. Restored
+copies can retain the same identity. Keep restores fenced until a separately
+trusted recovery point covers the primary, allocations and key revocations.
+
 `SessionDeletionStore` fences a root and all descendants before deleting their
 keys, content and SQL rows. Forget retains the reference-form ledger skeleton and
 one complete tombstone per session; purge removes the registered session tables

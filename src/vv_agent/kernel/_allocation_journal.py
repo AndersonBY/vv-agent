@@ -253,6 +253,11 @@ class SQLiteAllocationJournal:
     def identity(self) -> JournalIdentity:
         return self._identity
 
+    def verify_identity(self) -> JournalIdentity:
+        """Verify the provisioned metadata and schema in the current file."""
+        with self._transaction():
+            return self._identity
+
     def get_anonymous(self, allocation_id: bytes) -> Allocation | None:
         row = self.get(allocation_id)
         return row if row is not None and row.owner is None else None

@@ -13,10 +13,9 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
-from vv_agent.kernel._content import ContentCleanupUnavailable, ForgetTombstone, KeyProvider, Principal, TombstoneState
-from vv_agent.kernel._content_runtime import content_runtime_binding_for
+from vv_agent.kernel._content import ContentCleanupUnavailable, ForgetTombstone, Principal, TombstoneState
+from vv_agent.kernel._content_runtime import ContentRuntimeBinding, _verify_content_binding, content_runtime_binding_for
 from vv_agent.kernel._content_sql import CoreSQLContentStore
-from vv_agent.kernel._external_content import _SQLiteObjectContent
 from vv_agent.kernel._sql import _STORED_INBOX_COLUMNS, LedgerIntegrityError, LedgerSigner, SessionNotLive, SQLStore
 from vv_agent.kernel._sqlite import SQLiteStore
 from vv_agent.kernel._store import (
@@ -329,14 +328,16 @@ class SessionDeletionStore:
     def _erase_external_content(
         self,
         scoped: SQLiteStore,
-        objects: _SQLiteObjectContent,
-        key_provider: KeyProvider,
+        binding: ContentRuntimeBinding,
         session_id: str,
         *,
         verify_pending: Callable[[], bool],
         check_deadline: Callable[[], None],
     ) -> None:
         params = (scoped.tenant_id, session_id)
+        objects = binding._object_content
+        if objects is None:
+            raise ContentCleanupUnavailable("external erasure requires its configured binding")
         for finish_journal in (False, True):
             with scoped.atomic() as tx:
 
@@ -345,6 +346,7 @@ class SessionDeletionStore:
                     check_deadline()
 
                 check_fence()
+                _verify_content_binding(scoped, binding)
                 if not verify_pending():
                     return
                 key_rows = scoped._rows("SELECT key_id,state FROM sk_session_key WHERE tenant_id=%s AND session_id=%s", params)
@@ -382,7 +384,7 @@ class SessionDeletionStore:
                 if key is None or (state == "destroying" and not finish_journal):
                     continue
 
-                retired = objects.retire(key_provider, key, check_fence=check_fence)
+                retired = objects.retire(binding.key_provider, key, check_fence=check_fence)
                 for allocation in allocations.values():
                     check_fence()
                     if finish_journal:
@@ -416,7 +418,6 @@ class SessionDeletionStore:
             return None
         if not isinstance(scoped, SQLiteStore):
             raise ContentCleanupUnavailable("external root erasure requires SQLite")
-        objects = binding._object_content
         deadline = time.monotonic() + 5
 
         def check_deadline() -> None:
@@ -426,6 +427,7 @@ class SessionDeletionStore:
         tenant_id = scoped.tenant_id
         with scoped._connection_lock:
             self._require_idle_connection(scoped)
+            _verify_content_binding(scoped, binding)
             authority = self._authority(scoped)
             check_deadline()
             begin = scoped.begin_purge if purge else scoped.begin_forget
@@ -455,7 +457,7 @@ class SessionDeletionStore:
                 return tombstone.state is TombstoneState.PENDING
 
             self._erase_external_content(
-                scoped, objects, binding.key_provider, session_id, verify_pending=verify_pending, check_deadline=check_deadline
+                scoped, binding, session_id, verify_pending=verify_pending, check_deadline=check_deadline
             )
             with scoped.atomic() as tx:
                 scoped._require_content_write_fence(tx)

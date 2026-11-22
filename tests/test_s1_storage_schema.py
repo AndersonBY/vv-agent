@@ -220,7 +220,10 @@ def test_sqlite_installs_complete_s1_schema_and_reopens(tmp_path):
         assert store.connection.execute("PRAGMA user_version").fetchone() == (0,)
         store.install_schema()
         assert store.connection.execute("PRAGMA user_version").fetchone() == (_sqlite.SCHEMA_VERSION,)
-        assert store.connection.execute("SELECT * FROM sk_settings").fetchall() == [(1, "S1", 1)]
+        settings = store.connection.execute("SELECT singleton,storage_major,write_level FROM sk_settings").fetchall()
+        assert settings == [(1, "S1", 1)]
+        installation = store._object_installation()
+        assert installation is not None and len(installation[0]) == 64 and installation[1] is None
         assert _sqlite._schema_fingerprint(store.connection) == _sqlite.SCHEMA_FINGERPRINT
 
         actual_tables = {
@@ -230,7 +233,11 @@ def test_sqlite_installs_complete_s1_schema_and_reopens(tmp_path):
             )
         }
         assert actual_tables == TABLES
-        assert {table: _sqlite_columns(store.connection, table) for table in TABLES} == EXPECTED_COLUMNS
+        sqlite_columns = {
+            **EXPECTED_COLUMNS,
+            "sk_settings": EXPECTED_COLUMNS["sk_settings"] | {"database_id", "external_content_binding"},
+        }
+        assert {table: _sqlite_columns(store.connection, table) for table in TABLES} == sqlite_columns
 
         for table in SESSION_TABLES:
             assert next(row for row in store.connection.execute(f"PRAGMA table_info({table})") if row[1] == "tenant_id")[3] == 1
@@ -268,6 +275,7 @@ def test_sqlite_installs_complete_s1_schema_and_reopens(tmp_path):
     with sqlite_store(path) as reopened:
         assert reopened.connection.execute("PRAGMA user_version").fetchone() == (_sqlite.SCHEMA_VERSION,)
         assert reopened.connection.execute("SELECT storage_major,write_level FROM sk_settings").fetchone() == ("S1", 2)
+        assert reopened._object_installation() == installation
         reopened.install_schema()
 
 
@@ -299,7 +307,9 @@ def test_sqlite_schema_fingerprint_rejects_changed_check(tmp_path):
     path = tmp_path / "changed-check.sqlite"
     connection = sqlite3.connect(path)
     connection.executescript(_sqlite.DDL.replace("write_level >= 1", "write_level >= 0"))
-    connection.execute("INSERT INTO sk_settings(singleton,storage_major,write_level) VALUES (1,'S1',1)")
+    connection.execute(
+        "INSERT INTO sk_settings(singleton,storage_major,write_level,database_id) VALUES (1,'S1',1,?)", ("a" * 64,)
+    )
     connection.execute(f"PRAGMA user_version={_sqlite.SCHEMA_VERSION}")
     connection.close()
 

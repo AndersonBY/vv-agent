@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from contextlib import closing
+from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +15,14 @@ from vv_agent.kernel._content import (
     KeyUnavailable,
     Principal,
     WrappedDataKey,
+)
+from vv_agent.kernel._content_runtime import (
+    ContentRuntimeBinding,
+    SessionContentWriter,
+    _provision_sqlite_object_content,
+)
+from vv_agent.kernel._content_runtime import (
+    durable_content_store as core_durable_content_store,
 )
 from vv_agent.kernel._external_content import _SQLiteObjectContent
 from vv_agent.kernel._records import InboxItem
@@ -50,14 +58,104 @@ class S3Fixture(_Client):
         return {"ResponseMetadata": {"HTTPStatusCode": 200}}
 
 
+def _provision_journal(store: SQLiteStore, path: Path) -> SQLiteAllocationJournal:
+    store.install_schema()
+    installation = store._object_installation()
+    assert installation is not None
+    identity = SQLiteAllocationJournal.provision(path, database_id=installation[0], namespace="fixture")
+    return SQLiteAllocationJournal(path, identity)
+
+
+def test_object_installation_rejects_mismatched_components_before_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    primary, other_primary, key_path, other_key_path = (
+        tmp_path / name for name in ("primary.sqlite", "other.sqlite", "keys.sqlite", "other-keys.sqlite")
+    )
+    with (
+        SQLiteStore.standalone(str(primary)) as raw,
+        SQLiteStore.standalone(str(other_primary)) as other,
+        closing(LocalKeyProvider(b"x" * 32, state_path=key_path)) as provider,
+        closing(LocalKeyProvider(b"x" * 32, state_path=other_key_path)) as other_provider,
+    ):
+        journal = _provision_journal(raw, tmp_path / "allocation.sqlite")
+        other_journal = _provision_journal(other, tmp_path / "other-allocation.sqlite")
+        provider_id = provider._provision_exact_key_lifecycle()
+        other_provider._provision_exact_key_lifecycle()
+        client = S3Fixture(journal)
+        objects = S3CiphertextStore(client, bucket="fixture", journal=journal)
+        external = _SQLiteObjectContent(journal, objects, provider_id)
+        with pytest.raises(ContentUnavailable, match="has not been provisioned"):
+            bind_content_runtime(raw, key_provider=provider, cipher=AESGCMCipher(), _object_content=external)
+        with pytest.raises(ContentUnavailable, match="different SQLite installation"):
+            _provision_sqlite_object_content(other, key_provider=provider, objects=external)
+        with pytest.raises(ContentUnavailable, match="same allocation journal"):
+            _provision_sqlite_object_content(
+                raw,
+                key_provider=provider,
+                objects=_SQLiteObjectContent(
+                    journal, S3CiphertextStore(client, bucket="fixture", journal=other_journal), provider_id
+                ),
+            )
+        with pytest.raises(ContentUnavailable, match="provisioned exact key provider"):
+            _provision_sqlite_object_content(raw, key_provider=other_provider, objects=external)
+        _provision_sqlite_object_content(raw, key_provider=provider, objects=external)
+        with pytest.raises(ContentUnavailable, match="no prior binding"):
+            _provision_sqlite_object_content(raw, key_provider=provider, objects=external)
+        with pytest.raises(ContentUnavailable, match="requires its external content binding"):
+            bind_content_runtime(raw, key_provider=provider, cipher=AESGCMCipher())
+        with monkeypatch.context() as patch, pytest.raises(ContentUnavailable, match="does not match the SQLite installation"):
+            patch.setattr(client, "get_bucket_versioning", lambda **_: {"ResponseMetadata": {"HTTPStatusCode": 200}})
+            bind_content_runtime(
+                raw,
+                key_provider=provider,
+                cipher=AESGCMCipher(),
+                _object_content=_SQLiteObjectContent(
+                    journal, S3CiphertextStore(client, bucket="wrong-bucket", journal=journal), provider_id
+                ),
+            )
+        with pytest.raises(ContentUnavailable, match="provisioned exact key provider"):
+            bind_content_runtime(raw, key_provider=other_provider, cipher=AESGCMCipher(), _object_content=external)
+
+        configured = bind_content_runtime(raw, key_provider=provider, cipher=AESGCMCipher(), _object_content=external)
+        with pytest.raises(ContentUnavailable, match="has not been provisioned"):
+            core_durable_content_store(other, binding=configured)
+        with other.atomic() as tx, pytest.raises(ContentUnavailable, match="has not been provisioned"):
+            SessionContentWriter.bind(tx, tenant_id="default", session_id="unrelated", binding=configured)
+        with raw.atomic() as tx, pytest.raises(ContentUnavailable, match="requires its external content binding"):
+            SessionContentWriter.bind(
+                tx, tenant_id="default", session_id="unrelated", binding=ContentRuntimeBinding(provider, AESGCMCipher())
+            )
+
+        raw.configure_input_admission(allow_unsigned=True)
+        with (
+            closing(SessionDriver(store=raw, open_store=lambda: SQLiteStore.standalone(str(primary)))) as driver,
+            driver._open_drive_store() as worker,
+        ):
+            assert worker.tenant_id == "default"
+
+        @contextmanager
+        def open_unrelated():
+            with SQLiteStore.standalone(str(other_primary)) as worker:
+                bind_content_runtime(worker, key_provider=provider, cipher=AESGCMCipher())
+                yield worker
+
+        with (
+            closing(SessionDriver(store=raw, open_store=open_unrelated)) as driver,
+            pytest.raises(ContentUnavailable, match="has not been provisioned"),
+            driver._open_drive_store(),
+        ):
+            pytest.fail("external worker opened an unrelated primary")
+        assert client.calls == []
+        assert journal.scoped_key_intents("default", ("unrelated",)) == ()
+        assert raw._rows("SELECT session_id FROM sk_session") == []
+        assert other._rows("SELECT session_id FROM sk_session") == []
+
+
 def test_sqlite_session_driver_object_round_trip(tmp_path: Path) -> None:
     primary = tmp_path / "sessions.sqlite"
     sidecar = tmp_path / "allocation.sqlite"
     key_path = tmp_path / "keys.sqlite"
-    identity = SQLiteAllocationJournal.provision(sidecar, database_id="test-primary", namespace="fixture")
-    journal = SQLiteAllocationJournal(sidecar, identity)
-    client = S3Fixture(journal)
-    objects = S3CiphertextStore(client, bucket="fixture", journal=journal)
     with (
         SQLiteStore.standalone(str(primary)) as raw,
         closing(LocalKeyProvider(b"x" * 32, state_path=key_path)) as provider,
@@ -68,7 +166,11 @@ def test_sqlite_session_driver_object_round_trip(tmp_path: Path) -> None:
             inline_record = inline.store.read("inline", limit=1).records[0].record
             inline_ref = ContentRef.from_dict(inline_record.payload["workspace"])
         provider_id = provider._provision_exact_key_lifecycle()
+        journal = _provision_journal(raw, sidecar)
+        client = S3Fixture(journal)
+        objects = S3CiphertextStore(client, bucket="fixture", journal=journal)
         external = _SQLiteObjectContent(journal, objects, provider_id)
+        _provision_sqlite_object_content(raw, key_provider=provider, objects=external)
         bind_content_runtime(raw, key_provider=provider, cipher=AESGCMCipher(), _object_content=external)
         with closing(SessionDriver(store=raw)) as driver:
             raw.connection.execute("BEGIN DEFERRED")
@@ -102,7 +204,7 @@ def test_sqlite_session_driver_object_round_trip(tmp_path: Path) -> None:
                 deletion.purge_session("default", "objects", actor=actor)
             assert raw._rows("SELECT deletion_state FROM sk_session WHERE session_id=%s", ("objects",)) == [("live",)]
 
-    reopened_journal = SQLiteAllocationJournal(sidecar, identity)
+    reopened_journal = SQLiteAllocationJournal(sidecar, journal.identity)
     reopened_objects = S3CiphertextStore(client, bucket="fixture", journal=reopened_journal)
     with (
         SQLiteStore.standalone(str(primary)) as reopened,
@@ -138,18 +240,12 @@ def test_external_root_erasure_resumes_after_restart(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str, cut: str
 ) -> None:
     primary, key_path, sidecar = (tmp_path / name for name in ("primary.sqlite", "keys.sqlite", "allocation.sqlite"))
-    identity = SQLiteAllocationJournal.provision(sidecar, database_id="primary", namespace="fixture")
-    journal = SQLiteAllocationJournal(sidecar, identity)
-    client = S3Fixture(journal)
     signer = Signer()
     delete_keys: list[str] = []
-    original_delete = client.delete_object
 
     def observe_delete(*, Bucket: str, Key: str) -> dict[str, Any]:
         delete_keys.append(Key)
         return original_delete(Bucket=Bucket, Key=Key)
-
-    monkeypatch.setattr(client, "delete_object", observe_delete)
 
     class Interrupted(RuntimeError):
         pass
@@ -157,9 +253,14 @@ def test_external_root_erasure_resumes_after_restart(
     with SQLiteStore.standalone(str(primary)) as raw, closing(LocalKeyProvider(b"x" * 32, state_path=key_path)) as provider:
         raw.configure_input_admission(signer=signer)
         provider_id = provider._provision_exact_key_lifecycle()
+        journal = _provision_journal(raw, sidecar)
+        client = S3Fixture(journal)
+        original_delete = client.delete_object
+        monkeypatch.setattr(client, "delete_object", observe_delete)
         binding = _SQLiteObjectContent(
             journal, S3CiphertextStore(client, bucket="fixture", journal=journal), provider_id, terminal_bound_delete=True
         )
+        _provision_sqlite_object_content(raw, key_provider=provider, objects=binding)
         bind_content_runtime(raw, key_provider=provider, cipher=AESGCMCipher(), _object_content=binding)
         with closing(SessionDriver(store=raw)) as driver:
             driver.create("objects", "/external")
@@ -223,11 +324,13 @@ def test_external_root_erasure_resumes_after_restart(
         with pytest.raises(KeyUnavailable):
             provider.unwrap("default", "objects", wrapped)
 
-        reopened = SQLiteAllocationJournal(sidecar, identity)
+        reopened = SQLiteAllocationJournal(sidecar, journal.identity)
         for candidate in (
             SQLiteAllocationJournal(
                 tmp_path / "wrong.sqlite",
-                SQLiteAllocationJournal.provision(tmp_path / "wrong.sqlite", database_id="primary", namespace="fixture"),
+                SQLiteAllocationJournal.provision(
+                    tmp_path / "wrong.sqlite", database_id=journal.identity.database_id, namespace="fixture"
+                ),
             ),
             reopened,
         ):
@@ -239,11 +342,8 @@ def test_external_root_erasure_resumes_after_restart(
                 provider_id,
                 terminal_bound_delete=True,
             )
-            bind_content_runtime(raw, key_provider=provider, cipher=AESGCMCipher(), _object_content=wrong)
-            service = SessionDeletionStore(raw, SQLiteContentStore(raw, provider))
-            erase = service.forget_session if operation == "forget" else service.purge_session
-            with pytest.raises(ContentCleanupUnavailable, match="matching journal"):
-                erase("default", "objects", actor=actor)
+            with pytest.raises(ContentUnavailable, match="does not match the SQLite installation"):
+                bind_content_runtime(raw, key_provider=provider, cipher=AESGCMCipher(), _object_content=wrong)
         binding = _SQLiteObjectContent(
             reopened, S3CiphertextStore(client, bucket="fixture", journal=reopened), provider_id, terminal_bound_delete=True
         )

@@ -18,6 +18,7 @@ from vv_agent.kernel._content import (
     _EXACT_KEY_ID_PREFIX,
     ContentBindingMismatch,
     ContentCleanupUnavailable,
+    ContentUnavailable,
     ForgetTombstone,
     Principal,
     SessionHead,
@@ -2777,11 +2778,15 @@ class SQLStore:
             return tuple(entry.session_id for entry in scope)
 
     def _reject_external_erasure(self, session_ids: tuple[str, ...]) -> None:
-        from ._content_runtime import content_runtime_binding_for
+        from ._content_runtime import _verify_content_binding, content_runtime_binding_for
 
         binding = content_runtime_binding_for(self)
         if binding is not None and binding._object_content is not None:
             raise ContentCleanupUnavailable("external content erasure is unavailable")
+        try:
+            _verify_content_binding(self, binding)
+        except ContentUnavailable as exc:
+            raise ContentCleanupUnavailable("external content erasure requires its configured binding") from exc
         for session_id in session_ids:
             (has_exact_key, has_locator) = self._one(
                 "SELECT EXISTS (SELECT 1 FROM sk_session_key WHERE tenant_id=%s AND session_id=%s "
@@ -2798,7 +2803,7 @@ class SQLStore:
         if not enabled:
             self._reject_external_erasure(tuple(entry.session_id for entry in scope))
             return
-        from ._content_runtime import content_runtime_binding_for
+        from ._content_runtime import _verify_content_binding, content_runtime_binding_for
 
         binding = content_runtime_binding_for(self)
         if (
@@ -2807,6 +2812,7 @@ class SQLStore:
             or any(entry.session_id != session_id or entry.parent_session_id is not None for entry in scope)
         ):
             raise ContentCleanupUnavailable("external erasure supports only a bound SQLite root")
+        _verify_content_binding(self, binding)
         objects = binding._object_content
         params = (self.tenant_id, session_id)
         rows = self._rows("SELECT key_id,provider_id,state FROM sk_session_key WHERE tenant_id=%s AND session_id=%s", params)

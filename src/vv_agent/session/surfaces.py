@@ -40,6 +40,7 @@ from vv_agent.kernel._content_publication import (
     link_declared_input_content,
     publish_session_created_content,
 )
+from vv_agent.kernel._content_runtime import _verify_content_binding
 from vv_agent.kernel._driver_inputs import _pending_batch_in_state, _steer_held_in_state
 from vv_agent.kernel._postgres import PostgresStore as CorePostgresStore
 from vv_agent.kernel._postgres import _bind_tenant_context
@@ -76,6 +77,7 @@ from .content_runtime import (
     SessionContentWriter,
     _ContentSessionStoreAdapter,
     bind_content_key_provider,
+    bind_content_runtime,
     content_key_provider_for,
     content_runtime_binding_for,
     durable_content_reader,
@@ -807,7 +809,16 @@ class SessionDriver:
         with manager as store:
             if getattr(store, "tenant_id", None) != self.tenant_id:
                 store = store.for_tenant(self.tenant_id)
-            if content_runtime_binding_for(store) is None:
+            current = content_runtime_binding_for(store)
+            binding = content_runtime_binding_for(self._root_store)
+            if binding is not None and binding._object_content is not None:
+                if current is None:
+                    bind_content_runtime(
+                        store, key_provider=binding.key_provider, cipher=binding.cipher, _object_content=binding._object_content
+                    )
+                else:
+                    _verify_content_binding(store, binding)
+            elif current is None:
                 bind_content_key_provider(store, self.content_key_provider)
             store = wrap_session_content_store(store, self.content_key_provider)
 

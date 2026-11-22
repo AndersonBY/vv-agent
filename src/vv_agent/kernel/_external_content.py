@@ -31,6 +31,8 @@ class _ObjectStore(Protocol):
     @property
     def _storage_identity(self) -> tuple[str, str, str]: ...
 
+    def _uses_journal(self, journal: SQLiteAllocationJournal) -> bool: ...
+
     def put(self, owner: AllocationOwner, ciphertext: bytes, *, pin_until_ms: int, check_fence: Callable[[], None]) -> bytes: ...
 
     def get(self, owner: AllocationOwner, locator: bytes, *, ciphertext_size: int) -> bytes: ...
@@ -49,15 +51,35 @@ class _SQLiteObjectContent:
     provider_instance_id: str
     terminal_bound_delete: bool = False
 
-    def _key_prefix(self) -> str:
-        identity = self.journal._identity
+    def _binding_digest(self) -> str:
+        identity = self.journal.identity
         endpoint, bucket, prefix = self.objects._storage_identity
         if not all(isinstance(value, str) and value for value in (endpoint, bucket, prefix)):
             raise ContentCleanupUnavailable("external content requires a stable object storage identity")
         binding = canonical_json_bytes(
             [identity.journal_id, identity.database_id, identity.namespace, self.provider_instance_id, endpoint, bucket, prefix]
         )
-        return _EXACT_KEY_ID_PREFIX + sha256(binding).hexdigest()[:32]
+        return sha256(binding).hexdigest()
+
+    def verify_installation(self, database_id: str, provider: KeyProvider) -> str:
+        if self.journal.verify_identity().database_id != database_id:
+            raise ContentUnavailable("external content journal belongs to a different SQLite installation")
+        if not self.objects._uses_journal(self.journal):
+            raise ContentUnavailable("external content object adapter requires the same allocation journal")
+        provider_instance_id = getattr(provider, "_exact_key_provider_instance_id", None)
+        if (
+            not callable(provider_instance_id)
+            or provider_instance_id() != self.provider_instance_id
+            or not all(
+                callable(getattr(provider, method, None))
+                for method in ("_allocate_exact_key", "_retire_exact_key", "_verify_exact_retirement")
+            )
+        ):
+            raise ContentUnavailable("external content requires the provisioned exact key provider")
+        return self._binding_digest()
+
+    def _key_prefix(self) -> str:
+        return _EXACT_KEY_ID_PREFIX + self._binding_digest()[:32]
 
     def require_erasure_binding(self, key_id: str) -> None:
         if not self.terminal_bound_delete or not key_id.startswith(self._key_prefix()):

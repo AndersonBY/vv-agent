@@ -27,6 +27,7 @@ from ._content import (
     ContentLabels,
     ContentRef,
     ContentSessionWriter,
+    ContentUnavailable,
     KeyProvider,
     KeyUnavailable,
     Principal,
@@ -301,6 +302,40 @@ _add_slot_spec(_input_slot_specs, INPUT_ACTOR_ATTRIBUTES, 0)
 _INPUT_SLOT_SPECS: Mapping[str, int] = MappingProxyType(_input_slot_specs)
 
 
+def _verify_content_binding(store: object, binding: ContentRuntimeBinding | None) -> None:
+    root = _root_store(store)
+    external = binding is not None and binding._object_content is not None
+    if not isinstance(root, SQLiteStore):
+        if external:
+            raise ContentUnavailable("external content requires a file-backed SQLite store")
+        return
+    installation = root._object_installation()
+    if binding is None or binding._object_content is None:
+        if installation is not None and installation[1] is not None:
+            raise ContentUnavailable("SQLite installation requires its external content binding")
+        return
+    if installation is None or installation[1] is None:
+        raise ContentUnavailable("SQLite external content binding has not been provisioned")
+    database_id, expected = installation
+    if binding._object_content.verify_installation(database_id, binding.key_provider) != expected:
+        raise ContentUnavailable("external content binding does not match the SQLite installation")
+
+
+def _provision_sqlite_object_content(store: SQLiteStore, *, key_provider: KeyProvider, objects: _SQLiteObjectContent) -> None:
+    """Pin the object configuration on an installed, quiesced primary."""
+
+    with store._connection_lock:
+        if store._transaction_in_progress():
+            raise ContentUnavailable("external content provisioning requires an idle SQLite connection")
+        with store._transaction():
+            installation = store._object_installation()
+            if installation is None or installation[1] is not None:
+                raise ContentUnavailable("external content requires an installed SQLite store with no prior binding")
+            database_id, _ = installation
+            digest = objects.verify_installation(database_id, key_provider)
+            store._rows("UPDATE sk_settings SET external_content_binding=%s WHERE singleton=1", (digest,))
+
+
 def bind_content_runtime(
     store: SessionStore,
     *,
@@ -311,9 +346,8 @@ def bind_content_runtime(
     """Attach one explicit provider/cipher pair to a store's process-local root."""
 
     root = _root_store(store)
-    if _object_content is not None and (not isinstance(root, SQLiteStore) or root.path == ":memory:"):
-        raise ContentRuntimeUnavailable("external content requires a file-backed SQLite store")
     binding = ContentRuntimeBinding(key_provider, cipher, _object_content)
+    _verify_content_binding(root, binding)
     setattr(root, CONTENT_RUNTIME_BINDING_ATTRIBUTE, binding)
     if store is not root:
         setattr(store, CONTENT_RUNTIME_BINDING_ATTRIBUTE, binding)
@@ -346,6 +380,7 @@ def durable_content_store(
     selected = binding or content_runtime_binding_for(store)
     if selected is None:
         raise ContentRuntimeUnavailable("a content key provider must be explicitly bound to the session store")
+    _verify_content_binding(root, selected)
     if isinstance(root, SQLiteStore):
         source = store._store if isinstance(store, _ContentSessionStoreAdapter) else store
         if not isinstance(source, (SQLiteStore, _TenantSQLStore)):
@@ -595,7 +630,9 @@ class SessionContentWriter:
         self._durable: CoreSQLContentStore = durable
         self._write_memo = _write_memo if _write_memo is not None else _ContentWriteMemo()
         self._durable.bind_transaction(tx, write_memo=self._write_memo)
-        if binding._object_content is not None:
+        if binding._object_content is None:
+            _verify_content_binding(tx.store, binding)
+        else:
             if not isinstance(tx.store, SQLiteStore):
                 raise ContentRuntimeUnavailable("external content requires a SQLite write transaction")
             sqlite = tx.store
@@ -607,6 +644,9 @@ class SessionContentWriter:
                     raise KeyUnavailable("external content persistence budget expired")
 
             tx._bind_external_deadline(check_deadline)
+            sqlite._require_content_write_fence(tx)
+            _verify_content_binding(tx.store, binding)
+            sqlite._require_content_write_fence(tx)
             self._durable._bind_object_content(
                 binding._object_content, check_write=lambda: sqlite._require_content_write_fence(tx)
             )
@@ -911,6 +951,8 @@ class _ContentSessionStoreAdapter:
         @contextmanager
         def open_store() -> Iterator[SessionStore]:
             with root_factory() as store:
+                if self._binding._object_content is not None:
+                    _verify_content_binding(store, self._binding)
                 yield cast(SessionStore, _ContentSessionStoreAdapter(store, self._binding))
 
         return open_store

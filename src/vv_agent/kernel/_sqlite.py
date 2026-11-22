@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import secrets
 import sqlite3
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager, suppress
@@ -22,9 +23,9 @@ SCHEMA_VERSION = 4
 STORAGE_MAJOR = "S1"
 DEFAULT_BUSY_TIMEOUT_MS = 5000
 DEFAULT_HEARTBEAT_BUSY_TIMEOUT_MS = 250
-SCHEMA_FINGERPRINT_VERSION = "S1-sqlite-schema-v2"
+SCHEMA_FINGERPRINT_VERSION = "S1-sqlite-schema-v3"
 # Update this digest with intentional DDL changes and contract review.
-SCHEMA_FINGERPRINT = "45ef6bca2841dcd317ea61984760b5d838638bb3fc08fbd997a1c4c71d17ad27"
+SCHEMA_FINGERPRINT = "60446855526b178427bea806638e7fbf6d8632bb6accac1b5a57832c6de9666f"
 SCHEMA_TABLES = frozenset(
     {
         "sk_settings",
@@ -45,7 +46,11 @@ DDL = """
 CREATE TABLE sk_settings (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     storage_major TEXT NOT NULL CHECK (storage_major = 'S1'),
-    write_level INTEGER NOT NULL CHECK (write_level >= 1)
+    write_level INTEGER NOT NULL CHECK (write_level >= 1),
+    database_id TEXT NOT NULL CHECK (length(database_id) = 64 AND database_id NOT GLOB '*[^0-9a-f]*'),
+    external_content_binding TEXT CHECK (
+        length(external_content_binding) = 64 AND external_content_binding NOT GLOB '*[^0-9a-f]*'
+    )
 ) STRICT;
 CREATE TABLE sk_session (
     tenant_id TEXT NOT NULL, session_id TEXT NOT NULL,
@@ -406,6 +411,20 @@ class SQLiteStore(SQLStore):
     def _epoch(self) -> int:
         return self._transaction_state.epoch
 
+    def _object_installation(self) -> tuple[str, str | None] | None:
+        with self._connection_lock:
+            try:
+                row = self.connection.execute(
+                    "SELECT database_id,external_content_binding FROM sk_settings WHERE singleton=1"
+                ).fetchone()
+            except sqlite3.OperationalError:
+                if self.connection.execute("PRAGMA user_version").fetchone() == (0,):
+                    return None
+                raise
+            if row is None:
+                raise ValueError("SQLite S1 installation settings are missing")
+            return row
+
     def install_schema(self) -> None:
         with self._connection_lock:
             version = self.connection.execute("PRAGMA user_version").fetchone()[0]
@@ -418,7 +437,10 @@ class SQLiteStore(SQLStore):
                 for statement in DDL.split(";"):
                     if statement.strip():
                         self.connection.execute(statement)
-                self.connection.execute("INSERT INTO sk_settings(singleton,storage_major,write_level) VALUES (1,'S1',1)")
+                self.connection.execute(
+                    "INSERT INTO sk_settings(singleton,storage_major,write_level,database_id) VALUES (1,'S1',1,?)",
+                    (secrets.token_hex(32),),
+                )
                 self.connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
                 if not _schema_is_current(self.connection):
                     raise ValueError("session SQLite schema fingerprint does not match this runtime")

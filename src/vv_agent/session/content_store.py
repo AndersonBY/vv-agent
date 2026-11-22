@@ -218,6 +218,10 @@ class LocalKeyProvider:
             raise KeyUnavailable("exact key provider state is unavailable")
         return row[0]
 
+    def _exact_key_provider_instance_id(self) -> str:
+        with self._lock:
+            return self._exact_key_instance_id(self._state_connection())
+
     def _exact_key_binding(self, connection: sqlite3.Connection, intent: _ExactKeyIntent) -> bytes:
         if intent.provider_instance_id != self._exact_key_instance_id(connection):
             raise ContentBindingMismatch("exact key belongs to another provider instance")
