@@ -40,6 +40,7 @@ from vv_agent.session.postgres import PostgresStore
 from vv_agent.session.records import SessionSpec, digest
 from vv_agent.session.result import project_result
 from vv_agent.session.s3_content import S3CiphertextStore
+from vv_agent.session.worker import LocalWorker
 from vv_agent.types import LLMResponse, Message
 
 _RUSTFS_ENDPOINT = os.environ.get("VV_P2_RUSTFS_ENDPOINT")
@@ -534,6 +535,7 @@ def test_signed_postgres_object_turn_start_and_stale_owner(object_publication, r
             publication = server.kernel._root_publication_atomic
             monkeypatch.setattr(server.kernel, "_root_publication_atomic", partial(track_publication, publication))
         worker_a, worker_b = a.kernel._worker, b.kernel._worker
+        assert isinstance(worker_a, LocalWorker) and isinstance(worker_b, LocalWorker)
         created = request(a, "create", "thread/start", {"inputId": sid, "cwd": str(tmp_path)})
         assert created.get("result", {}).get("threadId") == sid, created
         assert store.read(sid, limit=1).records[0].record.feature_level == 2
