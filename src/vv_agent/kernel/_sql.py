@@ -1780,6 +1780,7 @@ class SQLStore:
         stored_rows, chains = self._verified_records(session_id, head, parsed_records=parsed_records)
         stored_inputs = self._stored_inputs(session_id, row[1])
         cached = self._cached_prefix(session_id)
+        retained_records: tuple[StoredRecord, ...] = ()
         if cached is not None:
             valid = (
                 (cached.tenant_id, cached.session_id) == (self.tenant_id, session_id)
@@ -1791,20 +1792,15 @@ class SQLStore:
             if not valid:
                 self._fold_cache = cached = None
                 self._previous_prefix = None
-            elif cached.epoch != epoch:
-                # The immutable prefix survives a lease change; execution authority does not.
-                cached = _Prefix(
-                    self.tenant_id,
-                    session_id,
-                    epoch,
-                    cached.head_digest,
-                    cached.reducer,
-                    cached.records,
-                    stored_inputs,
-                    row[1],
-                    cached.chains,
+            else:
+                # The chain covers record bodies. SQL supplies the wrapper metadata.
+                retained_records = tuple(
+                    stored
+                    if stored.commit_id == commit_id and stored.writer_epoch == writer_epoch and stored.created_ms == created_ms
+                    else StoredRecord(stored.record, seq, commit_id, writer_epoch, created_ms)
+                    for stored, (_, seq, commit_id, writer_epoch, created_ms, _) in zip(cached.records, stored_rows, strict=False)
                 )
-        through = len(cached.records) if cached else 0
+        through = len(retained_records)
         if cached is not None and through == head:
             cached = _Prefix(
                 self.tenant_id,
@@ -1812,7 +1808,7 @@ class SQLStore:
                 epoch,
                 cached.head_digest,
                 cached.reducer,
-                cached.records,
+                retained_records,
                 stored_inputs,
                 row[1],
                 chains,
@@ -1850,7 +1846,7 @@ class SQLStore:
             epoch,
             head_digest,
             reducer,
-            (cached.records if cached else ()) + tuple(records),
+            retained_records + tuple(records),
             stored_inputs,
             row[1],
             chains,
