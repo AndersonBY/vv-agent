@@ -9,6 +9,7 @@ from collections.abc import Callable, Iterable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from copy import copy
 from dataclasses import dataclass, field, replace
+from functools import cached_property
 from hashlib import sha256
 from typing import Any, Protocol, cast
 
@@ -389,7 +390,6 @@ class SQLStore:
     _input_admission_configured = False
     _input_admission_allow_unsigned = False
     _input_admission_signer: LedgerSigner | None = None
-    _commit_parse_cache: dict[tuple[bytes, bytes], _CommitPayload] | None = None
     _fold_cache: _Prefix | None = None
     _previous_prefix: _Prefix | None = None
     _tenant_id = DEFAULT_TENANT_ID
@@ -401,6 +401,10 @@ class SQLStore:
     def __init__(self, *, fold_factory: Callable[[], Fold]):
         self.fold_factory = fold_factory
         self._transaction_state = _TransactionState()
+
+    @cached_property
+    def _commit_parse_cache(self) -> dict[tuple[bytes, bytes], _CommitPayload]:
+        return {}
 
     @property
     def tenant_id(self) -> str:
@@ -485,7 +489,7 @@ class SQLStore:
         scoped._tenant_id = tenant_id
         scoped._fold_cache = None
         scoped._previous_prefix = None
-        scoped._commit_parse_cache = None
+        scoped.__dict__.pop("_commit_parse_cache", None)
         return scoped
 
     @property
@@ -1217,8 +1221,6 @@ class SQLStore:
             raise LedgerIntegrityError("commit metadata is not canonical JCS")
         key = (body, sequence_body)
         cache = self._commit_parse_cache
-        if cache is None:
-            cache = self._commit_parse_cache = {}
         cached = cache.get(key)
         if cached is not None:
             return cached
