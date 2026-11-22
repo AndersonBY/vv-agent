@@ -17,6 +17,7 @@ class AppServer:
         host: AppServerHost | None = None,
         store=None,
         content_key_provider=None,
+        open_claim_store=None,
         state_manager: ThreadStateManager | None = None,
         router: OutgoingRouter | None = None,
         processor: MessageProcessor | None = None,
@@ -29,7 +30,12 @@ class AppServer:
         self.transport = transport or StdioJsonlTransport()
         self.host = host or DefaultAppServerHost()
         managed = _managed_worker or getattr(_root_store(store), "runtime_mode", None) == "worker"
-        self.kernel = SessionDriver(store=store, content_key_provider=content_key_provider, _known_sessions=not managed)
+        self.kernel = SessionDriver(
+            store=store,
+            content_key_provider=content_key_provider,
+            open_claim_store=open_claim_store,
+            _known_sessions=not managed,
+        )
         self.store = _KernelThreadStore(self.kernel)
         self.state_manager = state_manager or ThreadStateManager()
         self.router = router or OutgoingRouter()

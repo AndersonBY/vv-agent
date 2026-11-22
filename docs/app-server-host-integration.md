@@ -158,6 +158,19 @@ handle stays Unknown and cannot automatically retry. See
   for the requested page. offset/limit bound those folds and the response, not
   the catalog scan; avoid frequent global listing on a large store.
 
+## PostgreSQL with S3 content
+
+To execute root turns, pass the authenticated tenant store with object content
+bound as `store` and pass a separate connection factory as `open_claim_store`.
+Use `functools.partial(PostgresStore.worker_standalone, worker_dsn)` for the
+factory. Both logins must point to the same provisioned PostgreSQL installation.
+The worker connection claims leases scoped to the authenticated tenant. Execution
+and lease renewal use separate connections authenticated as that tenant.
+
+For this storage backend, the App Server can create and fork root threads and
+accept `turn/start`. Keep the same `inputId` and parameters when retrying a
+submission. If the server returns `-32001`, retry once publication is available.
+
 ## Custom stores
 
 The SQL stores implement the App Server reads and admission lock. A custom

@@ -26,11 +26,12 @@ from vv_agent.kernel._provider_outcomes import ProviderResultInvalid
 from vv_agent.kernel._requirements import SessionRequirements, normalize_requirements
 from vv_agent.kernel._sql import UnsupportedFeatureLevel
 from vv_agent.kernel._state import queued_input_starts_turn
+from vv_agent.kernel._store import ObjectPublicationBusy
 from vv_agent.model import ModelError
 from vv_agent.types import AgentStatus, Message
 
 from .bindings import MissingHostBinding
-from .content_runtime import SessionContentWriter
+from .content_runtime import ContentRuntimeUnavailable, SessionContentWriter
 from .context_view import context_view
 from .projection import (
     SessionHydration,
@@ -44,7 +45,7 @@ from .reducer import ExecutionState
 from .result import project_result
 from .runtime import static_model_selection_requirements, static_session_requirements, static_worker_supports
 from .store import Conflict, StoredRecord
-from .surfaces import PrincipalInput, SessionDriver, _KnownSessionOwner, _principal_payload, _read_snapshot
+from .surfaces import PrincipalInput, SessionDriver, _KnownSessionOwner, _persisted_principal, _principal_payload, _read_snapshot
 from .timing import Clock, SystemClock
 
 
@@ -837,7 +838,14 @@ class _KernelRunAdapter(RunAdapter):
         stored = self.kernel.store.read_input(thread_id, input_id)
         if stored is None:
             return None
-        actor_payload = self._controller_actor_payload(thread_id, actor)
+        persisted = _persisted_principal(actor) if actor is not None and _uses_postgres_objects(self.kernel.store) else None
+        if persisted is None:
+            actor_payload = self._controller_actor_payload(thread_id, actor)
+        else:
+            actor_payload = persisted.to_dict()
+            actor_payload["attributes"] = self.kernel.read_record_content(
+                thread_id, 1, persisted.attributes, slot=SESSION_PRINCIPAL_ATTRIBUTES
+            )
         if not self._submission_matches(
             thread_id,
             stored.item,
@@ -1546,6 +1554,83 @@ class _KernelRunAdapter(RunAdapter):
             replace(config, shared_state=shared_state, initial_messages=None, metadata=config.metadata | metadata),
         )
 
+    def _submit_object_start(self, *, thread_id, input_id, expected_turn_id, content, actor, runtime):
+        turn_id = f"{thread_id}/turn/{input_id}"
+        authenticated_actor = self.kernel._session_principal(thread_id)
+        expected_actor = authenticated_actor.to_dict()
+        expected_actor["attributes"] = self.kernel.read_record_content(
+            thread_id, 1, authenticated_actor.attributes, slot=SESSION_PRINCIPAL_ATTRIBUTES
+        )
+        if actor is not None and canonical_json_bytes(_principal_payload(actor)) != canonical_json_bytes(expected_actor):
+            raise PermissionError("input actor does not match the session principal")
+        registration = self.kernel._prepare_runtime_registration(thread_id, runtime, turn_id=turn_id, armed=True)
+        static_requirements = static_session_requirements(
+            registration.agent,
+            registration.config,
+            registration.resolved,
+            level=2,
+            handler_version=registration.handler_version,
+            extra_capabilities=self.kernel.capabilities,
+        )
+        store = cast(Any, self.kernel.store)
+        with self._state_manager.turn_lock(thread_id):
+            previous_registration = self.kernel._runtimes.get(thread_id)
+            installed = False
+            try:
+                with self.kernel._root_publication_atomic() as tx:
+                    ceiling = store._write_ceiling()
+                    tx.lock_session(thread_id)
+                    store._require_object_root_session(thread_id)
+                    raced = store.read_input(thread_id, input_id) is not None
+                    if not raced:
+                        state, _, _ = store.read_state(thread_id)
+                        if state.closed or state.archived:
+                            raise TurnMismatch("Thread is closed or archived")
+                        if expected_turn_id != next(reversed(state.turns), None):
+                            raise TurnMismatch("turn_mismatch")
+                        if self.kernel._current_object_root_turn(store, thread_id, state, ready_only=False) is not None:
+                            raise TurnMismatch("Thread already has an active turn")
+                        self.kernel._runtimes[thread_id] = registration
+                        installed = True
+                        receipt = self.kernel._push_in_transaction(
+                            tx,
+                            thread_id,
+                            InboxItem(input_id, "user", {"content": content}),
+                            actor=authenticated_actor,
+                            actor_subject_id="app-server",
+                            registration=registration,
+                            ceiling=ceiling,
+                            static_requirements=static_requirements,
+                            authenticated_actor=authenticated_actor,
+                        )
+                if not raced:
+                    return {
+                        "threadId": thread_id,
+                        "turnId": turn_id,
+                        "inputId": input_id,
+                        "inputSeq": receipt.input_seq,
+                        "accepted": True,
+                        "replayed": receipt.replayed,
+                    }
+            except BaseException:
+                if installed and self.kernel._runtimes.get(thread_id) is registration:
+                    if previous_registration is None:
+                        self.kernel._runtimes.pop(thread_id, None)
+                    else:
+                        self.kernel._runtimes[thread_id] = previous_registration
+                raise
+        replayed = self._replay_submission(
+            thread_id=thread_id,
+            input_id=input_id,
+            expected_turn_id=expected_turn_id,
+            kind="start",
+            content=content,
+            actor=actor,
+        )
+        if replayed is None:
+            raise SubmissionConflict("submission_conflict")
+        return replayed
+
     def submit_input(
         self,
         *,
@@ -1563,6 +1648,28 @@ class _KernelRunAdapter(RunAdapter):
         content = (
             _prepared_content if _prepared_content is not None else _content(self, input, metadata or {}, kind, expected_turn_id)
         )
+        if _uses_postgres_objects(self.kernel.store):
+            if kind != "start":
+                raise ContentRuntimeUnavailable("PostgreSQL object sessions support root turn/start input only")
+            if _start_runtime is None:
+                raise ContentRuntimeUnavailable("PostgreSQL object turn/start requires open_claim_store")
+            try:
+                payload = self._submit_object_start(
+                    thread_id=thread_id,
+                    input_id=input_id,
+                    expected_turn_id=expected_turn_id,
+                    content=content,
+                    actor=actor,
+                    runtime=_start_runtime,
+                )
+            except ObjectPublicationBusy:
+                raise
+            except Conflict as exc:
+                raise SubmissionConflict("submission_conflict") from exc
+            if self._router.is_registered(connection_id):
+                self._turn_connections[(thread_id, payload["turnId"])] = connection_id
+            return payload, content
+
         if kind == "start" and _start_runtime is not None:
             self.kernel._ensure_static_worker_support(
                 level=_start_runtime.requirements_bound().level,
@@ -1837,7 +1944,9 @@ class _KernelRunAdapter(RunAdapter):
             )
             runtime_config = self._turn_runtime_config(config, thread_id=thread_id, turn_id=tid)
             runtime = self.kernel.runtime(agent, runtime_config, session_id=thread_id)
-            self.kernel._register_runtime(thread_id, runtime, armed=True)
+            self.kernel._register_runtime(
+                thread_id, runtime, tid=tid if _uses_postgres_objects(self.kernel.store) else None, armed=True
+            )
         handle = self.kernel.start(
             thread_id,
             agent,

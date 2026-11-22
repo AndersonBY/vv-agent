@@ -4,18 +4,19 @@ from __future__ import annotations
 
 import os
 import time
-from collections.abc import Iterator
-from contextlib import closing, contextmanager
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager, closing, contextmanager
 from dataclasses import replace
 from functools import partial
 from pathlib import Path
+from threading import Event, current_thread, local
 from typing import Any
 from urllib.parse import urlsplit
 from uuid import uuid4
 
 import pytest
 from session.test_s1_checkpoint_signer_acceptance import Signer
-from test_app_server_distributed import request
+from test_app_server_distributed import eventually, request, submission
 from test_postgres_object_publication_fence import object_publication as object_publication
 from test_s1_postgres_rls import TENANT_A, TENANT_B
 from test_s1_postgres_rls import disposable_pg as disposable_pg
@@ -28,12 +29,16 @@ from vv_agent.kernel._content import Classification, ContentLabels, ContentRef, 
 from vv_agent.kernel._content_runtime import SessionContentWriter, _provision_postgres_object_content, bind_content_runtime
 from vv_agent.kernel._external_content import _PostgresObjectContent
 from vv_agent.kernel._postgres_allocation_journal import PostgresAllocationJournal, PostgresObjectJournal
+from vv_agent.kernel._store import Lease, SessionStore
+from vv_agent.llm.base import LlmRequest
+from vv_agent.memory.token_utils import count_tokens
 from vv_agent.session import fork, s3_content
-from vv_agent.session._s3_transport import _S3ProcessTransport, _S3Request
+from vv_agent.session._s3_transport import _S3ProcessTransport, _S3Request, _S3TransportError
 from vv_agent.session.content_runtime import SESSION_ATTRIBUTES, SESSION_PRINCIPAL_ATTRIBUTES, SESSION_WORKSPACE
 from vv_agent.session.content_store import AESGCMCipher, LocalKeyProvider
 from vv_agent.session.postgres import PostgresStore
 from vv_agent.session.records import SessionSpec, digest
+from vv_agent.session.result import project_result
 from vv_agent.session.s3_content import S3CiphertextStore
 from vv_agent.types import LLMResponse, Message
 
@@ -138,6 +143,8 @@ def _server(
     *,
     owner: PostgresStore | None = None,
     stall_after_ciphertext: bool = False,
+    open_claim_store: Callable[[], AbstractContextManager[SessionStore]] | None = None,
+    host: DefaultAppServerHost | None = None,
 ) -> Iterator[tuple[AppServer, PostgresStore, S3CiphertextStore]]:
     with (
         closing(LocalKeyProvider(master_key, state_path=key_path)) as provider,
@@ -153,11 +160,16 @@ def _server(
             _provision_postgres_object_content(owner, key_provider=provider, objects=objects)
         store.configure_input_admission(signer)
         bind_content_runtime(store, key_provider=provider, cipher=AESGCMCipher(), _object_content=objects)
-        host = _Host(
-            agent=Agent("test", "Answer."),
-            run_config=RunConfig(model_provider=ScriptedModelProvider.new("test", "m", [LLMResponse("answer")])),
+        server = AppServer(
+            store=store,
+            host=host
+            or _Host(
+                agent=Agent("test", "Answer."),
+                run_config=RunConfig(model_provider=ScriptedModelProvider.new("test", "m", [LLMResponse("answer")])),
+            ),
+            open_claim_store=open_claim_store,
+            transport=ChannelTransport(connection_id=uuid4().hex, outbound_capacity=100),
         )
-        server = AppServer(store=store, host=host, transport=ChannelTransport(connection_id=uuid4().hex, outbound_capacity=100))
         with closing(server.kernel):
             assert "result" in request(server, "init", "initialize", {"clientInfo": {"name": "object-fork"}})
             yield server, store, adapter
@@ -414,3 +426,237 @@ def test_signed_postgres_object_thread_start_replay_and_timeout(object_publicati
         orphan = journal._scope.get(bytes.fromhex(orphan_key.rsplit("/", 1)[1]))
         assert orphan is not None and orphan.state == "bound" and orphan.owner is not None
         assert (orphan.owner.session_id, orphan.owner.admission_session_id) == (timed_out, timed_out)
+
+
+def test_signed_postgres_object_turn_start_and_stale_owner(object_publication, rustfs, tmp_path, monkeypatch):
+    owner, primary, journals, worker_dsn = object_publication
+    endpoint, bucket, inspector = rustfs
+    journal = journals[TENANT_A]
+    signer = Signer()
+    sid = "turn-root"
+    key_path, master_key = tmp_path / "keys.sqlite", os.urandom(32)
+    open_server = partial(_server, primary[TENANT_A], endpoint, bucket, signer=signer, key_path=key_path, master_key=master_key)
+    open_claim_store = partial(PostgresStore.worker_standalone, worker_dsn)
+    owner._rows("UPDATE sk_settings SET write_level=2 WHERE singleton=1")
+
+    prompts = ("signed first prompt", "signed second prompt")
+    count_tokens(prompts[0], "m")
+    calls: list[tuple[str, LlmRequest]] = []
+
+    def host(node: str) -> _Host:
+        def reply(model_request: LlmRequest) -> LLMResponse:
+            calls.append((node, model_request))
+            return LLMResponse(f"answer from {node}")
+
+        return _Host(
+            agent=Agent("test", "Answer."),
+            run_config=RunConfig(
+                model_provider=ScriptedModelProvider.from_callback("test", "m", reply), metadata={"resolved_by": node}
+            ),
+        )
+
+    enabled: set[str] = set()
+    one_shot: set[str] = set()
+    claims: list[tuple[int, Lease]] = []
+    renewals: list[tuple[int, Lease]] = []
+    drives: set[int] = set()
+    deferred: list[Lease] = []
+    deferred_event = Event()
+    claim_runnable, renew, defer_drive = PostgresStore.claim_runnable, PostgresStore.renew, PostgresStore.defer_drive
+    execute = _S3ProcessTransport.execute
+    transport_errors: list[tuple[str, str, str]] = []
+    fence = local()
+    fenced_writes: list[str] = []
+
+    @contextmanager
+    def track_publication(publication):
+        with publication() as tx:
+            fence.active = True
+            try:
+                yield tx
+            finally:
+                fence.active = False
+
+    def execute_with_diagnostics(transport, request: _S3Request, **kwargs):
+        if getattr(fence, "active", False):
+            assert request.operation != "get_object", "App Server input publication issued an S3 GET under the primary fence"
+            if request.operation == "put_object":
+                fenced_writes.append(request.operation)
+        try:
+            return execute(transport, request, **kwargs)
+        except _S3TransportError as exc:
+            transport_errors.append((request.operation, current_thread().name, str(exc)))
+            raise
+
+    def claim(store, *, owner, **kwargs):
+        if owner not in enabled:
+            return ()
+        claimed = claim_runnable(store, owner=owner, **kwargs)
+        for item in claimed:
+            if item.lease is not None:
+                assert store.runtime_mode == "worker" and not store.claims_all_tenants
+                assert store._input_admission_policy() == (True, False, signer)
+                claims.append((store.connection.info.backend_pid, item.lease))
+                if owner in one_shot:
+                    enabled.discard(owner)
+        return claimed
+
+    def heartbeat(store, lease, **kwargs):
+        result = renew(store, lease, **kwargs)
+        assert store.credential_tenant_id == TENANT_A
+        assert store._input_admission_policy() == (True, False, signer)
+        renewals.append((store.connection.info.backend_pid, result.lease))
+        return result
+
+    def drive(build_runtime, store, session_id):
+        assert store.credential_tenant_id == TENANT_A
+        assert store._input_admission_policy() == (True, False, signer)
+        drives.add(store.connection.info.backend_pid)
+        return build_runtime(store, session_id)
+
+    def defer(store, lease, **kwargs):
+        defer_drive(store, lease, **kwargs)
+        deferred.append(lease)
+        deferred_event.set()
+
+    monkeypatch.setattr(PostgresStore, "claim_runnable", claim)
+    monkeypatch.setattr(PostgresStore, "renew", heartbeat)
+    monkeypatch.setattr(PostgresStore, "defer_drive", defer)
+    monkeypatch.setattr(_S3ProcessTransport, "execute", execute_with_diagnostics)
+
+    with (
+        open_server(journal, owner=owner, open_claim_store=open_claim_store, host=host("A")) as (a, store, adapter),
+        open_server(_reopen(journal), open_claim_store=open_claim_store, host=host("B")) as (b, peer, _),
+    ):
+        for server in (a, b):
+            build_runtime = server.kernel._build_runtime_for_claim
+            monkeypatch.setattr(server.kernel, "_build_runtime_for_claim", partial(drive, build_runtime))
+            publication = server.kernel._root_publication_atomic
+            monkeypatch.setattr(server.kernel, "_root_publication_atomic", partial(track_publication, publication))
+        worker_a, worker_b = a.kernel._worker, b.kernel._worker
+        created = request(a, "create", "thread/start", {"inputId": sid, "cwd": str(tmp_path)})
+        assert created.get("result", {}).get("threadId") == sid, created
+        assert store.read(sid, limit=1).records[0].record.feature_level == 2
+        first = submission(sid, "first", text=prompts[0])
+        enabled.add(worker_a._owner)
+
+        def submit(server, params):
+            for attempt in range(5):
+                started = request(server, f"{params['inputId']}-{attempt}", "turn/start", params)
+                if started.get("error", {}).get("code") != -32001:
+                    break
+                time.sleep(0.05)
+            assert started.get("result", {}).get("replayed") is False, (started, transport_errors[-8:])
+            return started["result"]
+
+        fenced_writes.clear()
+        first_receipt = submit(a, first)
+        first_turn = first_receipt["turnId"]
+
+        def ended(turn_id):
+            return any(row.record.turn_id == turn_id and row.record.kind == "turn_ended" for row in store.read(sid).records)
+
+        def wait_for_turn(turn_id, worker):
+            try:
+                eventually(lambda: ended(turn_id) and store.lease_status(sid)[2] == 0, timeout=30)
+            except AssertionError as exc:
+                records = [(row.seq, row.record.kind, row.record.turn_id) for row in store.read(sid).records][-12:]
+                lease_and_route = store._one(
+                    "SELECT lease_epoch,lease_owner,drive_retry_at_ms,level,handler_version FROM sk_session WHERE session_id=%s",
+                    (sid,),
+                )
+                claim_ids = [(lease.owner, lease.epoch) for _, lease in claims][-8:]
+                defer_ids = [(lease.owner, lease.epoch) for lease in deferred][-8:]
+                raise AssertionError(
+                    f"Turn {turn_id} did not settle. Worker error={worker.last_error!r}, claims={claim_ids}, "
+                    f"deferrals={defer_ids}, lease and route={lease_and_route}, records={records}, "
+                    f"transport errors={transport_errors[-8:]}"
+                ) from exc
+
+        wait_for_turn(first_turn, worker_a)
+        enabled.discard(worker_a._owner)
+        assert a.kernel._runtimes[sid].turn_id == first_turn
+        assert [node for node, _ in calls] == ["A"]
+        first_head = store.verify_ledger(sid)
+
+        second = submission(sid, "second", expected=first_turn, text=prompts[1])
+        second_receipt = submit(b, second)
+        second_turn = second_receipt["turnId"]
+        assert fenced_writes
+        assert b.kernel._runtimes[sid].turn_id == second_turn
+        assert a.kernel._runtimes[sid].turn_id == first_turn
+        published = _keys(inspector, bucket)
+
+        steer = submission(sid, "steer", expected=first_turn, text="unexpected steer")
+        assert "error" in request(b, "steer", "turn/steer", steer)
+        cancel = {"threadId": sid, "expectedTurnId": first_turn, "actionId": "cancel"}
+        assert "error" in request(b, "cancel", "turn/interrupt", cancel)
+        assert [row.item.input_id for row in store.peek_inbox(sid)] == ["second"]
+        assert _keys(inspector, bucket) == published
+
+        stale_claim_offset, stale_defer_offset = len(claims), len(deferred)
+        deferred_event.clear()
+        one_shot.add(worker_a._owner)
+        enabled.add(worker_a._owner)
+        a.wake(sid)
+        assert deferred_event.wait(15), worker_a.last_error
+        eventually(lambda: store.lease_status(sid)[2] == 0)
+        [stale_lease] = deferred[stale_defer_offset:]
+        [(_, stale_claim)] = claims[stale_claim_offset:]
+        assert (stale_lease.tenant_id, stale_lease.session_id, stale_lease.owner, stale_lease.epoch) == (
+            TENANT_A,
+            sid,
+            worker_a._owner,
+            stale_claim.epoch,
+        )
+        assert store._one("SELECT drive_retry_at_ms FROM sk_session WHERE session_id=%s", (sid,))[0] > 0
+        assert [node for node, _ in calls] == ["A"]
+        assert store.verify_ledger(sid) == first_head
+        assert [row.item.input_id for row in store.peek_inbox(sid)] == ["second"]
+        assert _keys(inspector, bucket) == published
+
+        enabled.add(worker_b._owner)
+        b.wake(sid)
+        wait_for_turn(second_turn, worker_b)
+        enabled.discard(worker_b._owner)
+        assert {lease.owner for _, lease in claims[:stale_claim_offset]} == {worker_a._owner}
+        assert {lease.owner for _, lease in claims[stale_claim_offset + 1 :]} == {worker_b._owner}
+        assert all((lease.tenant_id, lease.session_id) == (TENANT_A, sid) for _, lease in claims)
+        assert renewals and {lease.owner for _, lease in renewals} >= {worker_a._owner, worker_b._owner}
+        roots = {store.connection.info.backend_pid, peer.connection.info.backend_pid}
+        claim_pids, heartbeat_pids = ({pid for pid, _ in seen} for seen in (claims, renewals))
+        assert drives.isdisjoint(roots | claim_pids | heartbeat_pids)
+        assert roots.isdisjoint(claim_pids | heartbeat_pids) and claim_pids.isdisjoint(heartbeat_pids)
+        for (node, model_request), prompt in zip(calls, prompts, strict=True):
+            assert model_request.metadata["resolved_by"] == node
+            assert any(message.role == "user" and message.content == prompt for message in model_request.messages)
+        assert [node for node, _ in calls] == ["A", "B"]
+        for turn_id in (first_turn, second_turn):
+            [start] = [
+                row.record
+                for row in store.read(sid).records
+                if row.record.turn_id == turn_id and row.record.kind == "turn_started"
+            ]
+            assert start._payload["requirements"]["level"] == 2
+        assert store.peek_inbox(sid) == ()
+        for input_id in ("first", "second"):
+            retained = store.read_input(sid, input_id)
+            assert retained is not None and retained.consumed_seq is not None and retained.item.admission_proof is not None
+            assert retained.item.feature_level == 2
+            assert retained.item.actor is not None and retained.item.actor["subject_id"] == _PRINCIPAL["subject_id"]
+        objects = store._rows("SELECT ciphertext,object_locator FROM sk_content WHERE session_id=%s", (sid,))
+        assert objects and all(ciphertext is None and locator is not None for ciphertext, locator in objects)
+        physical = _keys(inspector, bucket)
+        assert {adapter._key(locator[1:]) for _, locator in objects} == physical
+        head = store.verify_ledger(sid)
+
+    with open_server(_reopen(journal)) as (cold, store, _):
+        for params, receipt in ((first, first_receipt), (second, second_receipt)):
+            replay = request(cold, "replay-" + params["inputId"], "turn/start", params)
+            assert replay.get("result") == receipt | {"replayed": True}, replay
+        conflicting = second | {"input": [{"type": "text", "text": "different prompt"}]}
+        assert request(cold, "conflict", "turn/start", conflicting)["error"]["code"] == -32024
+        assert project_result(cold.kernel.store, sid, first_turn).final_output == "answer from A"
+        assert project_result(cold.kernel.store, sid, second_turn).final_output == "answer from B"
+        assert store.verify_ledger(sid) == head
+        assert _keys(inspector, bucket) == physical

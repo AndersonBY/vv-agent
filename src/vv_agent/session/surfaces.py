@@ -107,10 +107,11 @@ from .projection import (
     project_records,
 )
 from .records import InboxItem, Record, SessionSpec
-from .reducer import _fold_factory_for
+from .reducer import ExecutionState, _fold_factory_for
 from .result import project_result
 from .runtime import (
     Runtime,
+    RuntimeNotReady,
     _resolve_static_model_config,
     static_model_selection_requirements,
     static_session_requirements,
@@ -285,6 +286,7 @@ class _RuntimeRegistration:
     requirements: SessionRequirements
     observer: Callable[[RunEvent], None] | None
     armed: bool = False
+    turn_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -1339,7 +1341,19 @@ class SessionDriver:
         handler_version: str | None = None,
         armed: bool = False,
     ) -> _RuntimeRegistration:
-        del tid
+        registration = self._prepare_runtime_registration(sid, runtime, turn_id=tid, handler_version=handler_version, armed=armed)
+        self._runtimes[sid] = registration
+        return registration
+
+    def _prepare_runtime_registration(
+        self,
+        sid: str,
+        runtime: Runtime,
+        *,
+        turn_id: str | None = None,
+        handler_version: str | None = None,
+        armed: bool = False,
+    ) -> _RuntimeRegistration:
         selected_handler = self._handler_version(handler_version or runtime.handler_version)
         default_hook = Runtime.__dataclass_fields__["hook"].default
         if self.runtime_factory is None and (runtime.children or runtime.host_bindings or runtime.hook is not default_hook):
@@ -1366,7 +1380,7 @@ class SessionDriver:
             level=worker_level,
             capabilities=supports,
         )
-        registration = _RuntimeRegistration(
+        return _RuntimeRegistration(
             session_id=sid,
             agent=runtime.agent,
             config=runtime.config,
@@ -1376,9 +1390,8 @@ class SessionDriver:
             requirements=requirements,
             observer=runtime.config.stream,
             armed=armed,
+            turn_id=turn_id,
         )
-        self._runtimes[sid] = registration
-        return registration
 
     def _runtime_registration(self, sid: str) -> _RuntimeRegistration:
         registration = self._runtimes.get(sid)
@@ -1418,8 +1431,30 @@ class SessionDriver:
             raise Conflict(f"session {sid!r} has no session_created record")
         return hydrate_record_payload(page.records[0], hydration_for_session_store(store, sid))
 
+    @staticmethod
+    def _current_object_root_turn(store: SessionStore, sid: str, state: ExecutionState, *, ready_only: bool = True) -> str | None:
+        if state.active_turn_id is not None:
+            return state.active_turn_id
+        queued = [
+            InboxItem(**record._payload["input"])
+            for input_id, record in state.applied_inputs.items()
+            if input_id not in state.admitted_inputs and queued_input_starts_turn(record)
+        ]
+        queued.extend(
+            entry.item
+            for entry in store.peek_inbox(sid, ready_only=ready_only)
+            if entry.item.kind in {"user", "follow_up"} and entry.item.target_turn_id is None
+        )
+        selected = next((item for item in queued if item.kind == "user"), queued[0] if queued else None)
+        return f"{sid}/turn/{selected.input_id}" if selected is not None else None
+
     def _build_runtime_for_claim(self, store: SessionStore, sid: str) -> Runtime:
         registration, child_chain = self._runtime_lineage(store, sid)
+        if registration.turn_id is not None and _uses_postgres_objects(store):
+            state, _, _ = store.read_state(sid)
+            current_turn = self._current_object_root_turn(store, sid, state)
+            if not registration.armed or current_turn != registration.turn_id:
+                raise RuntimeNotReady(self._worker.support.failure_backoff_ms)
         runtime = self._runtime_for_session(
             store,
             registration.agent,
@@ -2109,6 +2144,7 @@ class SessionDriver:
                 session_id,
                 runtime=make_runtime,
                 failure_backoff_ms=retry_delay_ms,
+                _one_turn=registration.turn_id is not None and _uses_postgres_objects(store),
                 _lease=lease,
                 _initial_polled=provider_failure_polled,
             )
@@ -3200,6 +3236,7 @@ class SessionDriver:
         *,
         registration: _RuntimeRegistration | None = None,
         ceiling: int | None = None,
+        static_requirements: SessionRequirements | None = None,
     ) -> InboxItem:
         """Attach the contract-41 requirement for one level-2 logical input."""
 
@@ -3222,18 +3259,18 @@ class SessionDriver:
             and routing.requirements.handler_version not in {None, registration.handler_version}
         ):
             raise Conflict("registered runtime handler does not match the current route")
-        static_requirements = None
-        if registration is not None:
-            static_requirements = static_session_requirements(
-                registration.agent,
-                registration.config,
-                registration.resolved,
-                level=2,
-                handler_version=registration.handler_version,
-                extra_capabilities=self.capabilities,
-            )
-        else:
-            static_requirements = _session_requirements(self.store, sid)
+        if static_requirements is None:
+            if registration is not None:
+                static_requirements = static_session_requirements(
+                    registration.agent,
+                    registration.config,
+                    registration.resolved,
+                    level=2,
+                    handler_version=registration.handler_version,
+                    extra_capabilities=self.capabilities,
+                )
+            else:
+                static_requirements = _session_requirements(self.store, sid)
         session_requirements = _merge_registration_requirements(
             routing.requirements,
             registration,
@@ -3331,10 +3368,20 @@ class SessionDriver:
         actor_subject_id: str = "local",
         registration: _RuntimeRegistration | None = None,
         ceiling: int | None = None,
+        static_requirements: SessionRequirements | None = None,
+        authenticated_actor: Principal | None = None,
     ):
         _reject_public_provider_ingress(item, actor=actor, actor_subject_id=actor_subject_id)
         writer = SessionContentWriter.bind(tx, tenant_id=self.tenant_id, session_id=sid)
-        item = self._route_inbox_item(sid, item, registration=registration, ceiling=ceiling)
+        item = self._route_inbox_item(
+            sid, item, registration=registration, ceiling=ceiling, static_requirements=static_requirements
+        )
+        if registration is not None and ceiling is not None:
+            effective_requirements = static_requirements or registration.requirements
+            cast(Any, self.store)._admit_level(
+                ceiling=ceiling,
+                required=max(item.feature_level, effective_requirements.level),
+            )
         item = self._prepare_item(sid, item, writer)
         persisted = False
         actor = actor if actor is not None else item.actor
@@ -3345,13 +3392,19 @@ class SessionDriver:
             persisted = True
         if _is_provider_recovery_actor(actor):
             raise Conflict("provider-recovery actor is reserved for trusted recovery ingress")
-        bound_actor, actor_attributes = self._bound_actor(
-            actor,
-            subject_id=actor_subject_id,
-            writer=writer,
-            input_id=item.input_id,
-            persisted=persisted,
-        )
+        if authenticated_actor is not None:
+            if _persisted_principal(actor) != authenticated_actor:
+                raise Conflict("retained actor changed before input admission")
+            actor_attributes = writer.assert_record(1, authenticated_actor.attributes, SESSION_PRINCIPAL_ATTRIBUTES)
+            bound_actor = authenticated_actor.to_dict()
+        else:
+            bound_actor, actor_attributes = self._bound_actor(
+                actor,
+                subject_id=actor_subject_id,
+                writer=writer,
+                input_id=item.input_id,
+                persisted=persisted,
+            )
         item = replace(item, actor=bound_actor)
         receipt = tx.push(sid, item)
         link_declared_input_content(writer, item)

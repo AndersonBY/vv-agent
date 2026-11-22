@@ -988,16 +988,19 @@ class MessageProcessor:
         params = self._submission_params(connection_id, request)
         if params is None:
             return
-        self._run_adapter.start_turn(
-            connection_id=connection_id,
-            thread_id=params["threadId"],
-            input=params["input"],
-            input_id=params["inputId"],
-            expected_turn_id=params["expectedTurnId"],
-            metadata=params.get("metadata"),
-            request_id=request.id,
-            actor=principal,
-        )
+        try:
+            self._run_adapter.start_turn(
+                connection_id=connection_id,
+                thread_id=params["threadId"],
+                input=params["input"],
+                input_id=params["inputId"],
+                expected_turn_id=params["expectedTurnId"],
+                metadata=params.get("metadata"),
+                request_id=request.id,
+                actor=principal,
+            )
+        except ObjectPublicationBusy:
+            self._router.send_error(connection_id, request.id, AppServerError.server_overloaded())
 
     def _handle_turn_resume(self, connection_id: str, request: JsonRpcRequest) -> None:
         params = self._params_object(connection_id, request)
