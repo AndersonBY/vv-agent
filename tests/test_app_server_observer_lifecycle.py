@@ -427,23 +427,24 @@ def test_blocked_local_model_does_not_block_observer_store_or_thread(tmp_path, m
         monkeypatch.setattr(b.run_adapter, "_observe", record_observation)
         request(a, 1, "thread/start", {"inputId": "thread"})
         assert "result" in request(b, 2, "thread/resume", {"threadId": "thread"})
-        monkeypatch.setattr(b.kernel.store, "read", lambda *_a, **_k: pytest.fail("observer used kernel.store.read"))
-        monkeypatch.setattr(
-            b.kernel.store,
-            "read_state",
-            lambda *_a, **_k: pytest.fail("observer used kernel.store.read_state"),
-        )
-        tid = request(a, 3, "turn/start", submission())["result"]["turnId"]
-        assert entered.wait(5)
-        _, messages = _until(b.transport, lambda message: message.get("method") == "turn/started")
-        assert _lifecycle(messages) == [("turn/started", tid)]
-        _eventually(lambda: bool(observed))
-        assert all(thread_id == b.kernel._worker._thread.ident for thread_id, _, _ in observed)
-        assert all(store_id != id(b.kernel.store) for _, store_id, _ in observed)
-        assert all(connection_id != id(getattr(b.kernel.store, "connection", None)) for _, _, connection_id in observed)
-        assert b.kernel._worker._drive_thread_ident is None
-        release.set()
-        _until(b.transport, lambda message: message.get("method") == "turn/completed")
+        with monkeypatch.context() as observer_reads:
+            observer_reads.setattr(b.kernel.store, "read", lambda *_a, **_k: pytest.fail("observer used kernel.store.read"))
+            observer_reads.setattr(
+                b.kernel.store,
+                "read_state",
+                lambda *_a, **_k: pytest.fail("observer used kernel.store.read_state"),
+            )
+            tid = request(a, 3, "turn/start", submission())["result"]["turnId"]
+            assert entered.wait(5)
+            _, messages = _until(b.transport, lambda message: message.get("method") == "turn/started")
+            assert _lifecycle(messages) == [("turn/started", tid)]
+            _eventually(lambda: bool(observed))
+            assert all(thread_id == b.kernel._worker._thread.ident for thread_id, _, _ in observed)
+            assert all(store_id != id(b.kernel.store) for _, store_id, _ in observed)
+            assert all(connection_id != id(getattr(b.kernel.store, "connection", None)) for _, _, connection_id in observed)
+            assert b.kernel._worker._drive_thread_ident is None
+            release.set()
+            _until(b.transport, lambda message: message.get("method") == "turn/completed")
 
 
 def test_observer_resume_never_claims_live_approval_request_owner(tmp_path):
@@ -651,7 +652,11 @@ def test_reconnect_while_model_runs_moves_live_owner_without_duplicate_approval(
                 "result": {"decision": "allow", "reason": "reconnected owner"},
             },
         )
-        _until(reconnected, lambda message: message.get("method") == "turn/completed")
+        _, messages = _until(
+            reconnected,
+            lambda message: message.get("method") == "turn/completed" and message["params"]["status"] == "completed",
+        )
+        assert not any(message.get("method") == "approval/request" for message in messages)
         assert calls == ["ran"]
 
 
@@ -740,6 +745,8 @@ def test_provider_result_invalid_warns_once_and_stays_parked_across_backoff(tmp_
         try:
             provider_server.start()
             handle = provider_server.attempt().wait["handle"]
+            parked_state, _, _ = store.read_state(PROVIDER_THREAD)
+            retained_handle = next(iter(parked_state.waits.values()))["handle"]
             business.finish()
             business.setting("invalid", "call")
             provider_server.due()
@@ -781,7 +788,7 @@ def test_provider_result_invalid_warns_once_and_stays_parked_across_backoff(tmp_
             assert attempt.state == "parked"
             assert attempt.wait["handle"] == handle
             assert attempt.unknown is None
-            assert next(iter(state.waits.values()))["handle"] == handle
+            assert next(iter(state.waits.values()))["handle"] == retained_handle
             assert any(row.record.kind == "op_parked" for row in records)
             assert not any(row.record.kind == "turn_ended" for row in records)
             assert isinstance(failure.error, ProviderResultInvalid) and failure.terminal
