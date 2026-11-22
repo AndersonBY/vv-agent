@@ -39,7 +39,8 @@ _OWNER = "tenant_id,session_id,content_id,admission_session_id,admission_id,prov
 _COLUMNS = f"allocation_id,state,pin_until_ms,reservation_etag,delete_confirmed,{_OWNER}"
 _KEY_OWNER = "key_id,provider_instance_id,tenant_id,session_id,admission_root_id,admission_id"
 _KEY_COLUMNS = f"{_KEY_OWNER},state,pin_until_ms,evidence_id"
-_VERSION = 6
+_VERSION = 7
+_BOUND_PAGE_LIMIT = 8
 _OWNER_MATCH = " AND ".join(f"{column} IS NOT DISTINCT FROM %s" for column in _OWNER.split(","))
 _CLAIM_MATCH = (
     f"allocation_id=%s AND state='reaping' AND pin_until_ms=%s AND reservation_etag IS NOT DISTINCT FROM %s AND {_OWNER_MATCH}"
@@ -76,6 +77,7 @@ _DDL = (
         )
     )""",
     f"CREATE INDEX allocation_expiry ON {_TABLE}(pin_until_ms,allocation_id) WHERE tenant_id IS NULL",
+    f"CREATE INDEX allocation_tenant_expiry ON {_TABLE}(tenant_id,pin_until_ms,allocation_id) WHERE tenant_id IS NOT NULL",
     f"CREATE INDEX allocation_owner ON {_TABLE}(tenant_id,session_id)",
     f"CREATE INDEX allocation_admission ON {_TABLE}(tenant_id,admission_session_id)",
     f"CREATE INDEX allocation_key ON {_TABLE}(provider_instance_id,key_id) WHERE key_id IS NOT NULL",
@@ -162,7 +164,9 @@ SELECT jsonb_build_array(
     (SELECT jsonb_agg(pg_get_triggerdef(t.oid) ORDER BY t.tgname)
      FROM pg_trigger t JOIN pg_class rel ON rel.oid=t.tgrelid WHERE rel.relnamespace=n.oid AND NOT t.tgisinternal),
     (SELECT jsonb_agg(pg_get_functiondef(f.oid) ORDER BY f.proname)
-     FROM pg_proc f WHERE f.pronamespace=n.oid)
+     FROM pg_proc f WHERE f.pronamespace=n.oid),
+    (SELECT pg_get_indexdef(i.oid) FROM pg_class i
+     WHERE i.relnamespace=n.oid AND i.relname='allocation_tenant_expiry' AND i.relkind='i')
 )::text
 FROM pg_class allocation JOIN pg_namespace n ON n.oid=allocation.relnamespace
 WHERE n.nspname=%s AND allocation.relname='allocation' AND allocation.relkind='r'
@@ -539,6 +543,33 @@ class PostgresAllocationJournal:
                 )
             )
 
+    def expired_bound_candidates(self, *, limit: int, after: tuple[int, bytes] = (0, b"")) -> tuple[Allocation, ...]:
+        """Return one cleanup-role page of expired tenant-bound journal rows."""
+        if self._role.mode != "cleanup" or self._role.tenant_id is None:
+            raise ContentCleanupUnavailable("bound allocation cleanup requires the tenant cleanup role")
+        if type(limit) is not int or not 0 < limit <= _BOUND_PAGE_LIMIT:
+            raise ValueError(f"bound allocation candidate limit must be between 1 and {_BOUND_PAGE_LIMIT}")
+        if (
+            not isinstance(after, tuple)
+            or len(after) != 2
+            or type(after[0]) is not int
+            or after[0] < 0
+            or not isinstance(after[1], bytes)
+            or len(after[1]) not in {0, 32}
+        ):
+            raise ValueError("bound allocation candidate cursor is invalid")
+        with self._transaction() as connection:
+            return self._allocations(
+                _query_rows(
+                    connection,
+                    f"SELECT {_COLUMNS} FROM {_TABLE} WHERE tenant_id=%s "
+                    "AND state IN ('bound','reaping') "
+                    f"AND pin_until_ms<=(SELECT {CLOCK}) AND (pin_until_ms,allocation_id)>(%s,%s) "
+                    "ORDER BY pin_until_ms,allocation_id LIMIT %s",
+                    (self._role.tenant_id, *after, limit),
+                )
+            )
+
     def scoped_allocations(self, tenant_id: str, session_ids: tuple[str, ...]) -> tuple[Allocation, ...]:
         _require_text(tenant_id, *session_ids)
         with self._transaction() as connection:
@@ -563,8 +594,12 @@ class PostgresAllocationJournal:
                 return claimed
             return None
 
-    def claim_bound(self, expected: Allocation) -> Allocation | None:
-        """Claim only the exact binding the caller found safe under the primary fence."""
+    def claim_bound(self, expected: Allocation, *, require_expired_pin: bool = False) -> Allocation | None:
+        """Claim one exact binding under its caller's primary fence.
+
+        Orphan maintenance requires an expired pin; authorized root erasure keeps
+        the default so it can claim a live allocation inside its deletion path.
+        """
         _require_id(expected.allocation_id)
         if (
             expected.journal_id != self._identity.journal_id
@@ -576,6 +611,8 @@ class PostgresAllocationJournal:
         with self._transaction() as connection:
             actual = self._get(connection, expected.allocation_id, lock=expected.state == "bound")
             if actual != expected:
+                return None
+            if require_expired_pin and _query_rows(connection, f"SELECT {CLOCK}>=%s", (expected.pin_until_ms,)) != [(True,)]:
                 return None
             if expected.state == "reaping":
                 return actual
