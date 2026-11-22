@@ -801,6 +801,36 @@ external object locator also requires an idempotent cleaner attached with
 retryable deletion rather than an assumed remote success. Provider copies, host
 tables, logs, exports and backups remain outside this deletion boundary.
 
+#### S3 ciphertext transport
+
+The internal S1 S3 adapter expects the trusted host to own a helper process
+with one SDK client and one in-flight operation. Start the helper against the
+configured endpoint and complete the adapter's separate bucket versioning probe
+before opening publication transactions. The client uses one attempt per
+request against that endpoint. A busy or unavailable helper fails the operation
+immediately. Reap an invalidated helper outside SQL transactions and start its
+replacement after the previous process exits. Close it on host shutdown.
+
+Each adapter operation has a five-second transport ceiling. Publication and
+deletion also inherit the caller's remaining transaction budget. Before each
+PUT, publication checks the write fence and checks the allocation pin against
+the journal clock. The marker and ciphertext PUTs share one deadline. Deletion
+verifies the exact cleanup claim, probes bucket versioning, and checks the
+fence before issuing DELETE. The probe and DELETE share one deadline. A timed-out
+write yields no locator and a timed-out DELETE leaves its claim unconfirmed.
+Preserve that journal evidence for reconciliation because a dispatched request
+can still take effect at the endpoint after the helper exits.
+
+Reads check the response length against the ciphertext size derived from the
+verified content reference. The transport bounds read allocation by that size
+and buffers the ciphertext in memory. Response metadata has a separate 64 KiB
+limit.
+
+Local HTTP fixtures exercise the helper, stalled S3 requests and SQLite
+rollback. Application startup and shutdown integration is pending. Journal and
+key-provider calls have separate timing boundaries. Object currentness after an
+uncertain request or a restore requires separate evidence.
+
 ## Model selection
 
 A user can switch the model for the next cycle while a session runs. The host
