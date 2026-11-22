@@ -387,6 +387,7 @@ class SessionDeletionStore:
         )
         scoped = self._scoped(tenant_id)
         self._require_idle_connection(scoped)
+        scoped._reject_external_erasure(())
         authority = self._authority(scoped)
         session_ids = scoped.begin_forget(
             session_id,
@@ -433,6 +434,7 @@ class SessionDeletionStore:
         )
         scoped = self._scoped(tenant_id)
         self._require_idle_connection(scoped)
+        scoped._reject_external_erasure(())
         authority = self._authority(scoped)
         session_ids = scoped.begin_purge(
             session_id,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, replace
@@ -27,6 +28,7 @@ from ._content import (
     ContentRef,
     ContentSessionWriter,
     KeyProvider,
+    KeyUnavailable,
     Principal,
     SessionHead,
     SourceKind,
@@ -49,6 +51,7 @@ from ._content_publication import (
 from ._content_reader import _LinkValidatedContentStore, _OwnerBoundContentStore
 from ._content_sql import CoreSQLContentStore, _ContentWriteMemo
 from ._content_store import ContentCipher, DurableContentStore
+from ._external_content import _SQLiteObjectContent
 from ._postgres import CorePostgresContentStore, PostgresStore
 from ._records import SessionSpec
 from ._sql import SQLSessionTx, _TenantSQLStore
@@ -89,6 +92,7 @@ class ContentRuntimeBinding:
 
     key_provider: KeyProvider
     cipher: ContentCipher
+    _object_content: _SQLiteObjectContent | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.key_provider, KeyProvider):
@@ -195,7 +199,6 @@ class _DeferredContentBackend:
             return 1
         if query.startswith("INSERT INTO sk_content("):
             values = self._insert_values(query, params)
-            values["object_locator"] = None
             self._content[cast(str, values["content_id"])] = values
             self._mutations.append((query, params))
             return 1
@@ -203,7 +206,6 @@ class _DeferredContentBackend:
             _tenant, _session, content_id = params
             values = self._content[cast(str, content_id)]
             values["state"] = "live"
-            values["object_locator"] = None
             values["pin_until_ms"] = None
             self._mutations.append((query, params))
             return 1
@@ -240,6 +242,8 @@ def _deferred_content_writer(writer: SessionContentWriter) -> tuple[SessionConte
         provider_id=writer._durable._provider_id,
     )
     durable.bind_transaction(writer.tx, write_memo=writer._write_memo)
+    if writer._binding._object_content is not None:
+        durable._bind_object_content(writer._binding._object_content, check_write=writer._durable._check_object_write)
     deferred = SessionContentWriter(
         tx=writer.tx,
         tenant_id=writer.tenant_id,
@@ -302,11 +306,14 @@ def bind_content_runtime(
     *,
     key_provider: KeyProvider,
     cipher: ContentCipher,
+    _object_content: _SQLiteObjectContent | None = None,
 ) -> ContentRuntimeBinding:
     """Attach one explicit provider/cipher pair to a store's process-local root."""
 
-    binding = ContentRuntimeBinding(key_provider, cipher)
     root = _root_store(store)
+    if _object_content is not None and (not isinstance(root, SQLiteStore) or root.path == ":memory:"):
+        raise ContentRuntimeUnavailable("external content requires a file-backed SQLite store")
+    binding = ContentRuntimeBinding(key_provider, cipher, _object_content)
     setattr(root, CONTENT_RUNTIME_BINDING_ATTRIBUTE, binding)
     if store is not root:
         setattr(store, CONTENT_RUNTIME_BINDING_ATTRIBUTE, binding)
@@ -348,6 +355,8 @@ def durable_content_store(
             selected.key_provider,
             selected.cipher,
         )
+        if selected._object_content is not None:
+            durable._bind_object_content(selected._object_content)
     elif isinstance(root, PostgresStore):
         source = store._store if isinstance(store, _ContentSessionStoreAdapter) else store
         if not isinstance(source, (PostgresStore, _TenantSQLStore)):
@@ -586,6 +595,21 @@ class SessionContentWriter:
         self._durable: CoreSQLContentStore = durable
         self._write_memo = _write_memo if _write_memo is not None else _ContentWriteMemo()
         self._durable.bind_transaction(tx, write_memo=self._write_memo)
+        if binding._object_content is not None:
+            if not isinstance(tx.store, SQLiteStore):
+                raise ContentRuntimeUnavailable("external content requires a SQLite write transaction")
+            sqlite = tx.store
+            sqlite._require_content_write_fence(tx)
+            deadline = time.monotonic() + 5
+
+            def check_deadline() -> None:
+                if time.monotonic() >= deadline:
+                    raise KeyUnavailable("external content persistence budget expired")
+
+            tx._bind_external_deadline(check_deadline)
+            self._durable._bind_object_content(
+                binding._object_content, check_write=lambda: sqlite._require_content_write_fence(tx)
+            )
         self.durable = cast(DurableContentStore, _ValidatedDurableContentStore(durable))
         self._published_refs = _published_refs if _published_refs is not None else set()
 
@@ -722,6 +746,10 @@ class SessionContentWriter:
             record_seq=record_seq,
         )
 
+    def _require_child_creation(self) -> None:
+        if self._binding._object_content is not None:
+            raise ContentRuntimeUnavailable("external content child admission is unavailable")
+
     def create_session(
         self,
         spec_factory: Callable[[SessionContentWriter], SessionSpec],
@@ -736,6 +764,8 @@ class SessionContentWriter:
             factory_writer, deferred_backend = _deferred_content_writer(self)
 
         spec = spec_factory(factory_writer)
+        if self._binding._object_content is not None and spec.parent_session_id is not None:
+            raise ContentRuntimeUnavailable("external content child admission is unavailable")
         if spec.session_id != self.session_id:
             raise ValueError("session spec does not match the content writer binding")
         principal = Principal.from_dict(spec.principal)
@@ -796,6 +826,10 @@ class _ContentSessionTxAdapter:
         self._binding = binding
         self._published_refs: set[ContentRef] = set()
         self._write_memo = _ContentWriteMemo()
+
+    @property
+    def _requires_early_persistence_deadline(self) -> bool:
+        return self._binding._object_content is not None
 
     def content_writer(self, *, tenant_id: str, session_id: str):
         return SessionContentWriter(

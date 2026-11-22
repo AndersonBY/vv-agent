@@ -210,6 +210,9 @@ def create_child(tx: SessionTx, child: ChildSession, plan: Record, generation: i
         requirements = normalize_requirements(child.spec.bootstrap)
     parent_writer = _content_writer(tx, tenant_id=tenant_id, session_id=plan.session_id)
     child_writer = _content_writer(tx, tenant_id=tenant_id, session_id=child.spec.session_id)
+    require_child_creation = getattr(child_writer, "_require_child_creation", None)
+    if require_child_creation is not None:
+        require_child_creation()
 
     def child_spec(writer):
         source_principal_attributes = parent_writer.assert_record(1, principal.attributes, SESSION_PRINCIPAL_ATTRIBUTES)

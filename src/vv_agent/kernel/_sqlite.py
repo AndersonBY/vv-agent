@@ -366,6 +366,7 @@ class SQLiteStore(SQLStore):
             if outer:
                 self.connection.execute("BEGIN IMMEDIATE")
                 state.epoch += 1
+                state.sqlite_write_fence = True
             else:
                 self.connection.execute(f"SAVEPOINT {savepoint}")
             state.depth += 1
@@ -381,6 +382,15 @@ class SQLiteStore(SQLStore):
                 raise
             finally:
                 state.depth -= 1
+                if outer:
+                    state.sqlite_write_fence = False
+
+    def _require_content_write_fence(self, tx: SQLSessionTx) -> None:
+        with self._connection_lock:
+            tx._active()
+            if not self._transaction_state.sqlite_write_fence or self._transaction_state.depth != 1:
+                raise RuntimeError("external content requires a store-owned SQLite write transaction")
+            tx._check_content_persistence_deadline()
 
     def _transaction_id(self) -> object:
         with self._connection_lock:

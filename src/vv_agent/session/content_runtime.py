@@ -105,6 +105,11 @@ class SessionContentWriter(CoreSessionContentWriter):
 def bind_content_key_provider(store: SessionStore, key_provider: KeyProvider) -> None:
     """Attach the SDK production cipher with the legacy provider-only API."""
 
+    current = content_runtime_binding_for(store)
+    if current is not None and current._object_content is not None:
+        if current.key_provider is not key_provider:
+            raise ContentRuntimeUnavailable("external content cannot switch key providers")
+        return
     bind_content_runtime(store, key_provider=key_provider, cipher=AESGCMCipher())
 
 

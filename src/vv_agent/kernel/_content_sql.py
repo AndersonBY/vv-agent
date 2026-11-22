@@ -19,6 +19,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from ._canonical_json import canonical_json_bytes, validate_sha256
 from ._content import (
+    _EXACT_KEY_ID_PREFIX,
     ContentBindingMismatch,
     ContentCleanupUnavailable,
     ContentIntegrityError,
@@ -41,6 +42,7 @@ from ._content_store import (
     SessionKeyRecord,
     SessionKeyState,
 )
+from ._external_content import _SQLiteObjectContent
 
 _DATA_KEY_BYTES = 32
 _NONCE_BYTES = 12
@@ -281,6 +283,28 @@ def _link_slot(value: object) -> str:
     return slot
 
 
+def _read_ciphertext(
+    objects: _SQLiteObjectContent | None,
+    tenant_id: str,
+    session_id: str,
+    ref: ContentRef,
+    nonce: bytes,
+    ciphertext: bytes | None,
+    locator: bytes | None,
+) -> bytes:
+    if len(nonce) != _NONCE_BYTES:
+        raise ContentIntegrityError("content nonce is malformed")
+    if locator is not None:
+        if objects is None:
+            raise ContentUnavailable("external content requires its bound SQLite runtime")
+        return objects.get(tenant_id, session_id, ref.content_id, ref.key_id, locator, size=ref.size)
+    if ciphertext is None:
+        raise ContentUnavailable("content ciphertext is unavailable")
+    if len(ciphertext) < 16:
+        raise ContentIntegrityError("content ciphertext is malformed")
+    return ciphertext
+
+
 class _ContentReadFrame:
     """One disposable content snapshot with lazy local key and plaintext use."""
 
@@ -298,6 +322,7 @@ class _ContentReadFrame:
         cipher: ContentCipher,
         provider_id: str,
         validate_each_read: bool,
+        object_content: _SQLiteObjectContent | None = None,
     ) -> None:
         self.tenant_id = _text(tenant_id, "tenant_id")
         self.session_id = _text(session_id, "session_id")
@@ -319,6 +344,7 @@ class _ContentReadFrame:
         self._cipher = cipher
         self._provider_id = provider_id
         self._validate_each_read = validate_each_read
+        self._object_content = object_content
         self._session_key: SessionKeyRecord | None = None
         self._parsed_content: dict[str, tuple[ContentRef, ContentState, bytes, bytes | None, bytes | None]] = {}
         self._data_key: bytes | None = None
@@ -477,13 +503,10 @@ class _ContentReadFrame:
                 key, _state, nonce, ciphertext, locator = self._validated_content(tenant_id, session_id, ref)
         else:
             key, _state, nonce, ciphertext, locator = self._validated_content(tenant_id, session_id, ref)
-        if locator is not None or ciphertext is None:
-            raise ContentUnavailable("content ciphertext is unavailable")
-        if len(nonce) != _NONCE_BYTES or len(ciphertext) < 16:
-            raise ContentIntegrityError("content metadata or ciphertext is malformed")
         cached = self._plaintext.get(ref)
         if cached is not None:
             return cached
+        encrypted = _read_ciphertext(self._object_content, tenant_id, session_id, ref, nonce, ciphertext, locator)
 
         if self._data_key is None:
             data_key = self._key_provider.unwrap(
@@ -497,7 +520,7 @@ class _ContentReadFrame:
         plaintext = self._cipher.decrypt(
             self._data_key,
             nonce,
-            ciphertext,
+            encrypted,
             _content_aad(
                 tenant_id,
                 session_id,
@@ -548,7 +571,7 @@ class _ContentReadFrame:
         key: SessionKeyRecord,
         state: ContentState,
         nonce: bytes,
-        ciphertext: bytes,
+        ciphertext: bytes | None,
         locator: bytes | None = None,
     ) -> bytes:
         if self._validate_each_read:
@@ -607,6 +630,12 @@ class CoreSQLContentStore:
         self._object_locator_cleaner = object_locator_cleaner
         self._write_memo: _ContentWriteMemo | None = None
         self._transaction_active: Callable[[], None] | None = None
+        self._object_content: _SQLiteObjectContent | None = None
+        self._check_object_write: Callable[[], None] | None = None
+
+    def _bind_object_content(self, binding: _SQLiteObjectContent, *, check_write: Callable[[], None] | None = None) -> None:
+        self._object_content = binding
+        self._check_object_write = check_write
 
     def bind_transaction(self, tx: Any, *, write_memo: _ContentWriteMemo | None = None) -> None:
         """Bind caches to one caller-owned transaction and its active guard."""
@@ -707,13 +736,25 @@ class CoreSQLContentStore:
             self._discard_session_memo(tenant_id, session_id)
             raise
         try:
+            self._check_external_key_write(key)
             self._restore_key(key)
+            if key.key_id.startswith(_EXACT_KEY_ID_PREFIX) and self._check_object_write is not None:
+                self._check_object_write()
         except BaseException:
             self._discard_session_memo(tenant_id, session_id)
             raise
         if memo is not None:
             memo.session_keys[binding] = key
         return key
+
+    def _check_external_key_write(self, key: SessionKeyRecord) -> None:
+        if not key.key_id.startswith(_EXACT_KEY_ID_PREFIX):
+            return
+        if self._object_content is None or self._check_object_write is None:
+            raise KeyUnavailable("external content requires its bound SQLite runtime")
+        self._check_object_write()
+        self._object_content._key(key.tenant_id, key.session_id, key.key_id)
+        self._check_object_write()
 
     @staticmethod
     def _wrapped_key(key: SessionKeyRecord) -> WrappedDataKey:
@@ -737,6 +778,8 @@ class CoreSQLContentStore:
         data_key = memo.data_keys.get(binding) if memo is not None else None
         if data_key is None:
             data_key = self._unwrap(tenant_id, session_id, key)
+            if key.key_id.startswith(_EXACT_KEY_ID_PREFIX) and self._check_object_write is not None:
+                self._check_object_write()
             if memo is not None:
                 memo.data_keys[binding] = data_key
         return data_key
@@ -756,7 +799,14 @@ class CoreSQLContentStore:
         except ContentUnavailable:
             pass
 
-        wrapped = self._key_provider.generate_data_key(tenant_id, session_id)
+        if self._object_content is None:
+            wrapped = self._key_provider.generate_data_key(tenant_id, session_id)
+        else:
+            if self._check_object_write is None:
+                raise KeyUnavailable("external content requires a verified SQLite write transaction")
+            wrapped = self._object_content.allocate(
+                self._key_provider, tenant_id, session_id, check_fence=self._check_object_write
+            )
         if (wrapped.tenant_id, wrapped.session_id) != (tenant_id, session_id):
             raise ContentBindingMismatch("generated data key does not match the session binding")
         key = SessionKeyRecord(
@@ -809,7 +859,7 @@ class CoreSQLContentStore:
         tenant_id: str,
         session_id: str,
         ref: ContentRef,
-    ) -> tuple[SessionKeyRecord, tuple[Any, ...], ContentRef, ContentState, bytes, bytes]:
+    ) -> tuple[SessionKeyRecord, tuple[Any, ...], ContentRef, ContentState, bytes, bytes | None, bytes | None]:
         self._require_live(tenant_id, session_id)
         key = self._active_session_key(tenant_id, session_id)
         row = self._backend.fetchone(
@@ -823,11 +873,9 @@ class CoreSQLContentStore:
             raise ContentBindingMismatch("content key does not belong to the session binding")
         if stored != ref:
             raise ContentIntegrityError("content metadata does not match its reference")
-        if state is ContentState.GC_PENDING or locator is not None or ciphertext is None:
+        if state is ContentState.GC_PENDING:
             raise ContentUnavailable("content ciphertext is unavailable")
-        if len(nonce) != _NONCE_BYTES or len(ciphertext) < 16:
-            raise ContentIntegrityError("content metadata or ciphertext is malformed")
-        return key, row, stored, state, nonce, ciphertext
+        return key, row, stored, state, nonce, ciphertext, locator
 
     @contextmanager
     def _read_frame(
@@ -903,6 +951,7 @@ class CoreSQLContentStore:
             cipher=self._cipher,
             provider_id=self._provider_id,
             validate_each_read=validate_each_read,
+            object_content=self._object_content,
         )
         try:
             yield frame
@@ -1032,9 +1081,22 @@ class CoreSQLContentStore:
         )
         ref = ContentRef(content_id=content_id, mac=mac, size=size, key_id=wrapped.key_id, labels=labels)
         now_ms = self._backend.now_ms()
+        locator = None
+        if wrapped.key_id.startswith(_EXACT_KEY_ID_PREFIX):
+            if self._object_content is None or self._check_object_write is None:
+                raise KeyUnavailable("external content requires its bound SQLite runtime")
+            locator = self._object_content.put(
+                tenant_id,
+                session_id,
+                content_id,
+                key.key_id,
+                ciphertext,
+                plaintext_size=size,
+                check_fence=self._check_object_write,
+            )
         inserted = self._backend.run(
             "INSERT INTO sk_content(tenant_id,session_id,content_id,key_id,mac,size,labels,nonce,created_ms,state,"
-            "pin_until_ms,ciphertext) VALUES ({p},{p},{p},{p},{p},{p},{p},{p},{p},{p},{p},{p}) "
+            "pin_until_ms,ciphertext,object_locator) VALUES ({p},{p},{p},{p},{p},{p},{p},{p},{p},{p},{p},{p},{p}) "
             "ON CONFLICT(tenant_id,session_id,key_id,mac,labels) DO NOTHING",
             (
                 tenant_id,
@@ -1048,7 +1110,8 @@ class CoreSQLContentStore:
                 now_ms,
                 content_state.value,
                 now_ms + _STAGING_PIN_MS if content_state is ContentState.STAGED else None,
-                ciphertext,
+                ciphertext if locator is None else None,
+                locator,
             ),
         )
         if inserted:
@@ -1114,13 +1177,14 @@ class CoreSQLContentStore:
             raise TypeError("ref must be ContentRef")
         with self._read_snapshot():
             binding = self._bound_content(tenant_id, session_id, ref)
-            key, _row, stored, _state, nonce, ciphertext = binding
+            key, _row, stored, _state, nonce, ciphertext, locator = binding
 
+        encrypted = _read_ciphertext(self._object_content, tenant_id, session_id, ref, nonce, ciphertext, locator)
         data_key = self._unwrap(tenant_id, session_id, key)
         plaintext = self._cipher.decrypt(
             data_key,
             nonce,
-            ciphertext,
+            encrypted,
             _content_aad(
                 tenant_id,
                 session_id,
@@ -1549,6 +1613,8 @@ class CoreSQLContentStore:
         tenant_id = _text(tenant_id, "tenant_id")
         session_id = _text(session_id, "session_id")
         self._require_transaction()
+        if self._object_content is not None:
+            raise ContentCleanupUnavailable("external content collection is unavailable")
         self._require_live(tenant_id, session_id)
         self._discard_session_memo(tenant_id, session_id, content_only=True)
         now_ms = self._backend.now_ms()
@@ -1601,6 +1667,8 @@ class CoreSQLContentStore:
         tenant_id = _text(tenant_id, "tenant_id")
         session_id = _text(session_id, "session_id")
         self._require_transaction()
+        if self._object_content is not None:
+            raise ContentCleanupUnavailable("external content erasure is unavailable")
         self._discard_session_memo(tenant_id, session_id)
         row = self._key_row(tenant_id, session_id)
         if row is None:
@@ -1618,6 +1686,8 @@ class CoreSQLContentStore:
 
         self._assert_backend_tenant_context(tenant_id)
         key = self._session_key(tenant_id, session_id)
+        if key.key_id.startswith(_EXACT_KEY_ID_PREFIX):
+            raise ContentCleanupUnavailable("external content erasure is unavailable")
         if key.provider_id != self._provider_id:
             raise KeyUnavailable("session data key provider does not match")
         if key.state is SessionKeyState.ACTIVE:

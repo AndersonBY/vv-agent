@@ -15,7 +15,9 @@ from typing import Any, Protocol, cast
 
 from vv_agent.kernel._canonical_json import canonical_json_bytes, validate_sha256
 from vv_agent.kernel._content import (
+    _EXACT_KEY_ID_PREFIX,
     ContentBindingMismatch,
+    ContentCleanupUnavailable,
     ForgetTombstone,
     Principal,
     SessionHead,
@@ -82,6 +84,7 @@ class _RoutingCache:
 class _TransactionState:
     depth: int = 0
     epoch: int = 0
+    sqlite_write_fence: bool = False
 
 
 class InputAdmissionProofError(Conflict):
@@ -2721,6 +2724,7 @@ class SQLStore:
             raise ContentBindingMismatch("deletion actor belongs to another tenant")
         with self._transaction():
             scope = self._deletion_scope(session_id)
+            self._reject_external_erasure(tuple(entry.session_id for entry in scope))
             if not scope:
                 raise Conflict("session not found in tenant")
             if any(entry.deletion_state == "purging" for entry in scope):
@@ -2771,11 +2775,28 @@ class SQLStore:
                 )
             return tuple(entry.session_id for entry in scope)
 
+    def _reject_external_erasure(self, session_ids: tuple[str, ...]) -> None:
+        from ._content_runtime import content_runtime_binding_for
+
+        binding = content_runtime_binding_for(self)
+        if binding is not None and binding._object_content is not None:
+            raise ContentCleanupUnavailable("external content erasure is unavailable")
+        for session_id in session_ids:
+            (has_exact_key, has_locator) = self._one(
+                "SELECT EXISTS (SELECT 1 FROM sk_session_key WHERE tenant_id=%s AND session_id=%s "
+                "AND substr(key_id,1,%s)=%s), EXISTS (SELECT 1 FROM sk_content "
+                "WHERE tenant_id=%s AND session_id=%s AND object_locator IS NOT NULL)",
+                (self.tenant_id, session_id, len(_EXACT_KEY_ID_PREFIX), _EXACT_KEY_ID_PREFIX, self.tenant_id, session_id),
+            )
+            if has_exact_key or has_locator:
+                raise ContentCleanupUnavailable("external content erasure is unavailable")
+
     def complete_forget(self, session_id: str) -> None:
         """Publish the complete tombstone after content/key erasure succeeds."""
         self._require_configured_ledger("session forget completion")
         with self._transaction():
             scope = self._deletion_scope(session_id)
+            self._reject_external_erasure(tuple(entry.session_id for entry in scope))
             if not scope:
                 raise Conflict("session not found in tenant")
             if any(entry.deletion_state not in {"forgetting", "forgotten"} for entry in scope):
@@ -2817,6 +2838,7 @@ class SQLStore:
             raise ContentBindingMismatch("deletion actor belongs to another tenant")
         with self._transaction():
             scope = self._deletion_scope(session_id)
+            self._reject_external_erasure(tuple(entry.session_id for entry in scope))
             now = self._now()
             if not scope:
                 tombstones = self._rows(
@@ -2854,6 +2876,7 @@ class SQLStore:
         self._require_configured_ledger("session purge completion")
         with self._transaction():
             scope = self._deletion_scope(session_id)
+            self._reject_external_erasure(tuple(entry.session_id for entry in scope))
             if not scope:
                 rows = self._rows(
                     "SELECT session_id FROM sk_tombstone WHERE tenant_id=%s AND scope_root_session_id=%s "
@@ -2937,6 +2960,7 @@ class SQLSessionTx:
         self.batches: dict[tuple[str, str], ConsumerBatch] = {}
         self._lease_guard: Callable[[], Lease] | None = None
         self._check_persistence_deadline: Callable[[], None] | None = None
+        self._check_external_deadline: Callable[[], None] | None = None
         self._pending_lease_fence: tuple[str, Lease] | None = None
 
     def bind_lease_guard(self, guard: Callable[[], Lease]) -> None:
@@ -2945,6 +2969,10 @@ class SQLSessionTx:
     def _bind_persistence_deadline(self, check_deadline: Callable[[], None]) -> None:
         self._check_persistence_deadline = check_deadline
 
+    def _bind_external_deadline(self, check_deadline: Callable[[], None]) -> None:
+        if self._check_external_deadline is None:
+            self._check_external_deadline = check_deadline
+
     def _active(self) -> None:
         if self.store._transaction_id() != self.transaction_id:
             raise RuntimeError("SessionTx must be used within its original caller transaction")
@@ -2952,11 +2980,18 @@ class SQLSessionTx:
     def _finalize_lease_fence(self) -> None:
         pending = self._pending_lease_fence
         if pending is None:
+            if self._check_external_deadline is not None:
+                self._check_content_persistence_deadline()
             return
         self._active()
         session_id, lease = pending
         row = self.store._lock(session_id)
         self.store._check_lease(session_id, lease, row, self.store._now())
+        self._check_content_persistence_deadline()
+
+    def _check_content_persistence_deadline(self) -> None:
+        if self._check_external_deadline is not None:
+            self._check_external_deadline()
         if self._check_persistence_deadline is not None:
             self._check_persistence_deadline()
 
