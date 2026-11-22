@@ -33,6 +33,7 @@ from vv_agent.app_server.thread_store import ThreadRecord, ThreadStore
 from vv_agent.app_server.transport import ChannelTransport
 from vv_agent.kernel._requirements import SessionRequirements
 from vv_agent.kernel._sql import UnsupportedFeatureLevel
+from vv_agent.kernel._store import ObjectPublicationBusy
 from vv_agent.session.app_server import SubmissionConflict, TurnMismatch, _KernelRunAdapter, _KernelThreadStore
 from vv_agent.session.interactions import InteractionError
 from vv_agent.session.runtime import static_session_requirements
@@ -629,6 +630,9 @@ class MessageProcessor:
                 principal=principal,
                 bootstrap=bootstrap,
             )
+        except ObjectPublicationBusy:
+            self._router.send_error(connection_id, request.id, AppServerError.server_overloaded())
+            return
         except Conflict as exc:
             raise SubmissionConflict("submission_conflict") from exc
         self._run_adapter.subscribe(input_id, connection_id)
