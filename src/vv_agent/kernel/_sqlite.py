@@ -68,6 +68,10 @@ CREATE TABLE sk_commit (
 """
 
 
+DEFAULT_BUSY_TIMEOUT_MS = 5000
+DEFAULT_HEARTBEAT_BUSY_TIMEOUT_MS = 250
+
+
 class SQLiteStore(SQLStore):
     """A serialized connection per instance; BEGIN IMMEDIATE fences local writers."""
 
@@ -77,20 +81,39 @@ class SQLiteStore(SQLStore):
         return nullcontext(self) if self.path == ":memory:" else self._heartbeat_connection()
 
     def _heartbeat_connection(self):
-        return SQLiteStore.standalone(self.path, fold_factory=self.fold_factory, clock=self.clock)
+        return SQLiteStore.standalone(
+            self.path,
+            fold_factory=self.fold_factory,
+            clock=self.clock,
+            busy_timeout_ms=self.heartbeat_busy_timeout_ms,
+            heartbeat_busy_timeout_ms=self.heartbeat_busy_timeout_ms,
+        )
 
-    def __init__(self, path: str, *, fold_factory: Callable[[], Fold], clock: Clock):
+    def __init__(
+        self,
+        path: str,
+        *,
+        fold_factory: Callable[[], Fold],
+        clock: Clock,
+        busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS,
+        heartbeat_busy_timeout_ms: int = DEFAULT_HEARTBEAT_BUSY_TIMEOUT_MS,
+    ):
+        for name, value in (("busy_timeout_ms", busy_timeout_ms), ("heartbeat_busy_timeout_ms", heartbeat_busy_timeout_ms)):
+            if type(value) is not int or value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
         super().__init__(fold_factory=fold_factory)
         self.clock = clock
         self.path = path
-        self.connection = sqlite3.connect(path, isolation_level=None, timeout=5, check_same_thread=False)
+        self.busy_timeout_ms = busy_timeout_ms
+        self.heartbeat_busy_timeout_ms = heartbeat_busy_timeout_ms
+        self.connection = sqlite3.connect(path, isolation_level=None, timeout=busy_timeout_ms / 1000, check_same_thread=False)
         version = self.connection.execute("PRAGMA user_version").fetchone()[0]
         existing = self.connection.execute("SELECT 1 FROM sqlite_master WHERE name='sk_session'").fetchone()
         if version != 3 and (version != 0 or existing):
             self.connection.close()
             raise ValueError("unsupported session SQLite schema version")
         self.connection.execute("PRAGMA foreign_keys=ON")
-        self.connection.execute("PRAGMA busy_timeout=5000")
+        self.connection.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
         self.connection.execute("PRAGMA synchronous=FULL")
         if version == 0 and not existing:
             self.connection.execute("PRAGMA journal_mode=WAL")
@@ -101,8 +124,24 @@ class SQLiteStore(SQLStore):
 
     @classmethod
     @contextmanager
-    def standalone(cls, path: str, *, fold_factory: Callable[[], Fold], clock: Clock) -> Iterator[SQLiteStore]:
-        with cls._owned(cls(path, fold_factory=fold_factory, clock=clock)) as store:
+    def standalone(
+        cls,
+        path: str,
+        *,
+        fold_factory: Callable[[], Fold],
+        clock: Clock,
+        busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS,
+        heartbeat_busy_timeout_ms: int = DEFAULT_HEARTBEAT_BUSY_TIMEOUT_MS,
+    ) -> Iterator[SQLiteStore]:
+        with cls._owned(
+            cls(
+                path,
+                fold_factory=fold_factory,
+                clock=clock,
+                busy_timeout_ms=busy_timeout_ms,
+                heartbeat_busy_timeout_ms=heartbeat_busy_timeout_ms,
+            )
+        ) as store:
             yield store
 
     @staticmethod

@@ -63,6 +63,8 @@ class _LeaseHeartbeat(LeaseOwnership):
         ttl_ms: int,
         heartbeat_seconds: float,
         *,
+        sqlite_retry_budget_seconds: float = 5.0,
+        sqlite_retry_delay_seconds: float = 0.05,
         now_ms: int | None = None,
         clock: Clock | None = None,
         lease_keeper: LeaseKeeper | None = None,
@@ -70,6 +72,8 @@ class _LeaseHeartbeat(LeaseOwnership):
         self.clock = clock if clock is not None else SystemClock()
         self.lease_keeper = lease_keeper if lease_keeper is not None else ThreadLeaseKeeper()
         self.heartbeat_store = heartbeat_store
+        self.sqlite_retry_budget_seconds = sqlite_retry_budget_seconds
+        self.sqlite_retry_delay_seconds = sqlite_retry_delay_seconds
         super().__init__(
             lease,
             ttl_ms,
@@ -104,8 +108,8 @@ class _LeaseHeartbeat(LeaseOwnership):
                             store,
                             clock=self.clock,
                             stop=self.stop,
-                            retry_budget_seconds=min(self.heartbeat_seconds / 2, 0.25),
-                            retry_delay_seconds=min(self.heartbeat_seconds / 8, 0.05),
+                            retry_budget_seconds=min(self.sqlite_retry_budget_seconds, self.ttl_ms / 2000),
+                            retry_delay_seconds=min(self.sqlite_retry_delay_seconds, self.heartbeat_seconds / 8),
                         ),
                     )
                 while not self.stop.is_set():
@@ -133,6 +137,8 @@ class _Scope(_LeaseHeartbeat):
             runtime.heartbeat_store,
             runtime.ttl_ms,
             runtime.heartbeat_seconds,
+            sqlite_retry_budget_seconds=runtime.sqlite_heartbeat_retry_budget_seconds,
+            sqlite_retry_delay_seconds=runtime.sqlite_heartbeat_retry_delay_seconds,
             now_ms=now_ms,
             clock=runtime.clock,
             lease_keeper=runtime.lease_keeper,

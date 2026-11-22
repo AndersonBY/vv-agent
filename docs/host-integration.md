@@ -102,9 +102,13 @@ When you build the `Runtime`:
 - Give each driving thread its own store connection. Set `heartbeat_store` to a
   factory that opens an independent connection to the same database; the
   heartbeat thread uses it to renew the lease.
-- The lease TTL defaults to 15 seconds (`ttl_ms=15000`) and the heartbeat to
+- The runtime lease TTL defaults to 60 seconds (`ttl_ms=60000`) and the heartbeat to
   250 ms (`heartbeat_seconds=0.25`). The heartbeat must be at most 1 second
   and less than half the TTL.
+- File-backed SQLite uses a 5-second foreground busy timeout and a 250 ms
+  heartbeat busy timeout by default. The heartbeat retries write contention
+  within the runtime's `sqlite_heartbeat_retry_budget_seconds` (5 seconds
+  by default), capped at half the lease TTL.
 - Configure the model client to make one external attempt per call. The kernel
   logs and retries attempts itself, and client retries would stack on top.
 - Set `wake` to the host's enqueue function. The kernel calls it when a session

@@ -9,6 +9,7 @@ import time
 from collections import Counter
 from contextlib import contextmanager
 from itertools import pairwise
+from math import ceil
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -175,7 +176,8 @@ def run_soak(database, *, seed=42, sessions=8, assert_invariants=True):
                     transport.runtimes[sid].llm.steps.insert(0, callback)
 
             # Tick recovers drops, advances Accepted polls and finally expires abandoned leases.
-            for _ in range(20):
+            recovery_ticks = max(20, max(ceil(rt.ttl_ms / 1000) for rt in transport.runtimes.values()) + 5)
+            for _ in range(recovery_ticks):
                 transport.tick(page_size=3)
                 transport.drain()
                 for sid in expected:

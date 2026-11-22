@@ -260,7 +260,7 @@ just wrote.
 `Runtime` (`session/runtime.py`) supplies the agent, RunConfig, resolved model,
 LLM client, tool and provider bindings, and a `heartbeat_store` factory: a
 separate connection for files and PostgreSQL, the same locked instance for
-memory sessions. Defaults are a 15-second lease (`ttl_ms=15000`) and 250 ms
+memory sessions. Runtime defaults are a 60-second lease (`ttl_ms=60000`) and 250 ms
 heartbeats; the heartbeat must be at most one second and under half the TTL.
 
 For a callable runtime, `drive` uses the explicit
