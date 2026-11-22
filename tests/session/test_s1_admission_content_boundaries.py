@@ -518,6 +518,7 @@ def test_fork_reencrypts_session_identity_and_survives_one_side_forget(tmp_path,
     provider = LocalKeyProvider(MASTER_KEY)
     with SQLiteStore.standalone(str(tmp_path / f"fork-{forgotten}.sqlite")) as store:
         store.install_schema()
+        store.configure_input_admission(allow_unsigned=True)
         driver = SessionDriver(store=store, content_key_provider=provider)
         source_created = _create_fork_source(driver)
         source_identity = Principal.from_dict(source_created["principal"])
@@ -574,6 +575,7 @@ def test_fork_without_principal_uses_new_app_server_service_identity(tmp_path):
     provider = LocalKeyProvider(MASTER_KEY)
     with SQLiteStore.standalone(str(tmp_path / "fork-default-principal.sqlite")) as store:
         store.install_schema()
+        store.configure_input_admission(allow_unsigned=True)
         driver = SessionDriver(store=store, content_key_provider=provider)
         source_created = _create_fork_source(driver)
         result = fork_thread(
@@ -603,6 +605,7 @@ def test_child_result_copy_uses_destination_key_and_outlives_each_side(tmp_path,
     provider = LocalKeyProvider(MASTER_KEY)
     with SQLiteStore.standalone(str(tmp_path / "child-copy.sqlite")) as store:
         store.install_schema()
+        store.configure_input_admission(allow_unsigned=True)
         driver = SessionDriver(store=store, content_key_provider=provider)
 
         def create_session(session_id: str) -> None:
