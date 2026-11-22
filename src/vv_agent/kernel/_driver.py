@@ -8,7 +8,14 @@ from dataclasses import replace
 from typing import Any, Protocol
 
 from vv_agent.kernel._boundary_hydration import validate_logical_preflight
-from vv_agent.kernel._content import INPUT_CONTENT, SESSION_ATTRIBUTES, ContentRef, ContentSessionWriter, SessionHead
+from vv_agent.kernel._content import (
+    INPUT_CONTENT,
+    SESSION_ATTRIBUTES,
+    ContentRef,
+    ContentSessionWriter,
+    SessionHead,
+    _extend_chain_digest,
+)
 from vv_agent.kernel._content_publication import (
     has_record_content,
     has_record_content_payload,
@@ -645,8 +652,13 @@ class CoreDriver:
                         "exception_type": error or atomic_error,
                     },
                 )
-        if self._expected_head is not None:
-            self._expected_head = self.store.verify_ledger(self.sid)
+        if (expected_head := self._expected_head) is not None:
+            if not receipt.replayed:
+                chain = expected_head.chain_digest if isinstance(expected_head, SessionHead) else expected_head[1]
+                for stored in receipt.records:
+                    chain = _extend_chain_digest(chain, stored.seq, stored.record.digest)
+                expected_head = (receipt.head_seq, chain)
+            self._expected_head = self.store.verify_ledger(self.sid, expected_head=expected_head)
         self._hook("after_commit", commit_records[-1] if commit_records else None)
         if receipt.replayed:
             self.refresh()

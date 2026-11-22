@@ -117,13 +117,23 @@ def test_drive_expected_head_rejects_rehashed_rollback_before_model(tmp_path: Pa
 
 
 @pytest.mark.parametrize("entry", ["runtime", "factory"])
-def test_drive_expected_head_advances_across_cycles(tmp_path: Path, entry: str) -> None:
+def test_drive_expected_head_advances_across_cycles(tmp_path: Path, entry: str, monkeypatch: pytest.MonkeyPatch) -> None:
     with SQLiteStore.standalone(str(tmp_path / f"intact-{entry}.sqlite")) as raw:
         raw.install_schema()
         raw.configure_input_admission(allow_unsigned=True)
         store = wrap_fixture_store(raw)
         create_fixture_session(store, "s")
         trusted_head = store.verify_ledger("s")
+        verify_ledger = store.verify_ledger
+        checked_heads = []
+
+        def verify_anchored(session_id, *, expected_head=None):
+            assert expected_head is not None
+            result = verify_ledger(session_id, expected_head=expected_head)
+            checked_heads.append(result)
+            return result
+
+        monkeypatch.setattr(store, "verify_ledger", verify_anchored)
         push_fixture_input(store, "s", InboxItem("initial", "user", {"content": "go"}))
         calls: list[object] = []
         runtime = _runtime(
@@ -138,4 +148,4 @@ def test_drive_expected_head_advances_across_cycles(tmp_path: Path, entry: str) 
         state, records, _ = read_state(store, "s")
         assert state.active_turn_id is None
         assert [stored.record.kind for stored in records].count("turn_ended") == 1
-        assert store.verify_ledger("s") != trusted_head
+        assert checked_heads[-1] == verify_ledger("s") != trusted_head
