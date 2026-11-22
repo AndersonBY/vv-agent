@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,7 @@ from vv_agent.kernel._content_runtime import (
     ContentRuntimeBinding,
     SessionContentWriter,
     _provision_sqlite_object_content,
+    content_runtime_binding_for,
 )
 from vv_agent.kernel._content_runtime import (
     durable_content_store as core_durable_content_store,
@@ -33,7 +35,7 @@ from vv_agent.session.content_runtime import (
 )
 from vv_agent.session.content_store import AESGCMCipher, LocalKeyProvider
 from vv_agent.session.deletion import SessionDeletionStore
-from vv_agent.session.s3_content import S3CiphertextStore
+from vv_agent.session.s3_content import CiphertextTemporarilyUnavailable, S3CiphertextStore
 from vv_agent.session.sqlite import SQLiteContentStore, SQLiteStore
 from vv_agent.session.surfaces import SessionDriver
 from vv_agent.session.timing import SystemClock
@@ -233,6 +235,130 @@ def test_sqlite_session_driver_object_round_trip(tmp_path: Path) -> None:
             client.objects[key] = bytes(len(client.objects[key]))
             with pytest.raises(ContentIntegrityError):
                 durable_content_store(driver.store).get("default", "objects", workspace)
+
+
+@pytest.mark.parametrize("advanced_component", ["journal", "provider"])
+def test_object_restore_requires_independent_lifecycle_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, advanced_component: str
+) -> None:
+    primary, sidecar, key_path = (tmp_path / name for name in ("primary.sqlite", "allocation.sqlite", "keys.sqlite"))
+    backup = tmp_path / "backup"
+    backup.mkdir(mode=0o700)
+    tenant_id, live_sid, retired_sid = "default", "live", "retired"
+    master_key = b"k" * 32
+
+    with (
+        SQLiteStore.standalone(str(primary)) as raw,
+        closing(LocalKeyProvider(master_key, state_path=key_path)) as provider,
+    ):
+        raw.configure_input_admission(allow_unsigned=True)
+        journal = _provision_journal(raw, sidecar)
+        provider_id = provider._provision_exact_key_lifecycle()
+        client = S3Fixture(journal)
+        objects = S3CiphertextStore(client, bucket="fixture", journal=journal)
+        binding = _SQLiteObjectContent(journal, objects, provider_id)
+        _provision_sqlite_object_content(raw, key_provider=provider, objects=binding)
+        bind_content_runtime(raw, key_provider=provider, cipher=AESGCMCipher(), _object_content=binding)
+        with closing(SessionDriver(store=raw)) as driver:
+            driver.create(live_sid, "/retained-workspace")
+            driver.create(retired_sid, "/workspace-before-retirement")
+            workspace = ContentRef.from_dict(raw.read(live_sid, limit=1).records[0].record.payload["workspace"])
+            (retired_key,) = journal.scoped_key_intents(tenant_id, (retired_sid,))
+            ((key_id, envelope),) = raw._rows("SELECT key_id,wrapped_key FROM sk_session_key WHERE session_id=%s", (retired_sid,))
+            wrapped = WrappedDataKey(tenant_id, retired_sid, key_id, envelope)
+
+            def primary_rows(store: SQLiteStore):
+                return store._rows("SELECT session_id,head_seq,inbox_seq,deletion_state FROM sk_session ORDER BY session_id")
+
+            def allocation_inventory(log: SQLiteAllocationJournal):
+                return frozenset(log.scoped_allocations(tenant_id, (live_sid, retired_sid)))
+
+            expected_primary = primary_rows(raw)
+            previous_allocations = allocation_inventory(journal)
+            assert provider._verify_exact_retirement(retired_key.intent) is None
+            for source in (primary, sidecar, key_path):
+                snapshot = backup / source.name
+                snapshot.touch(mode=0o600, exist_ok=False)
+                with closing(sqlite3.connect(source)) as original, closing(sqlite3.connect(snapshot)) as copy:
+                    original.backup(copy)
+
+            if advanced_component == "journal":
+                original_put = client.put_object
+
+                def lose_ciphertext_reply(**request: Any) -> dict[str, Any]:
+                    reply = original_put(**request)
+                    if "IfMatch" in request:
+                        raise TimeoutError("fixture ciphertext acknowledgement lost")
+                    return reply
+
+                with monkeypatch.context() as patch:
+                    patch.setattr(client, "put_object", lose_ciphertext_reply)
+                    with pytest.raises(CiphertextTemporarilyUnavailable, match="upload did not confirm success"):
+                        driver.push(live_sid, InboxItem("lost", "user", {"content": "uncommitted publication"}))
+            else:
+                provider._retire_exact_key(retired_key.intent)
+
+            # These observations represent authority held outside the set of restored files.
+            expected_allocations = allocation_inventory(journal)
+            expected_retirement = provider._verify_exact_retirement(retired_key.intent)
+            assert primary_rows(raw) == expected_primary
+            if advanced_component == "journal":
+                [orphan] = expected_allocations - previous_allocations
+                assert orphan.state == "bound" and orphan.owner is not None
+                assert objects._key(orphan.allocation_id) in client.objects
+                assert not raw._rows("SELECT 1 FROM sk_content WHERE object_locator=%s", (b"\x01" + orphan.allocation_id,))
+                assert driver.store.peek_inbox(live_sid) == ()
+                assert expected_retirement is None
+            else:
+                assert expected_allocations == previous_allocations
+                assert expected_retirement is not None
+
+    @contextmanager
+    def open_candidate(directory: Path):
+        with (
+            SQLiteStore.standalone(str(directory / primary.name)) as candidate,
+            closing(LocalKeyProvider(master_key, state_path=directory / key_path.name)) as candidate_provider,
+        ):
+            candidate.configure_input_admission(allow_unsigned=True)
+            candidate_journal = SQLiteAllocationJournal(directory / sidecar.name, journal.identity)
+            candidate_client = S3Fixture(candidate_journal)
+            candidate_client.objects.update(client.objects)
+            candidate_binding = _SQLiteObjectContent(
+                candidate_journal, S3CiphertextStore(candidate_client, bucket="fixture", journal=candidate_journal), provider_id
+            )
+            yield candidate, candidate_provider, candidate_binding, candidate_client
+
+    def activate(candidate: SQLiteStore, candidate_provider: LocalKeyProvider, candidate_binding: _SQLiteObjectContent) -> None:
+        if (
+            primary_rows(candidate) != expected_primary
+            or allocation_inventory(candidate_binding.journal) != expected_allocations
+            or candidate_provider._verify_exact_retirement(retired_key.intent) != expected_retirement
+        ):
+            raise ContentUnavailable("fixture recovery evidence is stale")
+        bind_content_runtime(candidate, key_provider=candidate_provider, cipher=AESGCMCipher(), _object_content=candidate_binding)
+
+    with open_candidate(backup) as (candidate, candidate_provider, candidate_binding, candidate_client):
+        assert candidate._object_installation() == (journal.identity.database_id, binding._binding_digest())
+        assert (
+            candidate_binding.verify_installation(journal.identity.database_id, candidate_provider) == binding._binding_digest()
+        )
+        assert primary_rows(candidate) == expected_primary
+        assert allocation_inventory(candidate_binding.journal) == previous_allocations
+        assert candidate_provider._verify_exact_retirement(retired_key.intent) is None
+        with pytest.raises(ContentUnavailable, match="fixture recovery evidence is stale"):
+            activate(candidate, candidate_provider, candidate_binding)
+        assert content_runtime_binding_for(candidate) is None
+        assert candidate_client.calls == []
+
+    with open_candidate(tmp_path) as (candidate, candidate_provider, candidate_binding, _):
+        activate(candidate, candidate_provider, candidate_binding)
+        with closing(SessionDriver(store=candidate)) as driver:
+            assert driver.read_record_content(live_sid, 1, workspace, slot=SESSION_WORKSPACE) == "/retained-workspace"
+        if advanced_component == "provider":
+            with pytest.raises(KeyUnavailable):
+                candidate_provider.unwrap(tenant_id, retired_sid, wrapped)
+        else:
+            assert candidate_binding.journal.get(orphan.allocation_id) == orphan
 
 
 @pytest.mark.parametrize("dependency", ["journal", "provider"])
