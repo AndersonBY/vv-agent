@@ -1,15 +1,16 @@
 """Current lease ownership and content transaction entry contracts."""
 
 from dataclasses import replace
+from typing import cast
 
 import pytest
 
 from vv_agent.kernel._content import KeyDestroyOutcome, KeyDestroyStatus, WrappedDataKey
 from vv_agent.kernel._content_runtime import bind_content_runtime, wrap_session_content_store
 from vv_agent.kernel._lease_scope import HeartbeatStopped, LeaseOwnership
-from vv_agent.kernel._reducer import Fold
 from vv_agent.kernel._sqlite import SQLiteStore
-from vv_agent.kernel._store import ContentSessionTx, Lease, LeaseLost, LeasePoll
+from vv_agent.kernel._store import ContentSessionTx, Lease, LeaseLost, LeasePoll, SessionStore
+from vv_agent.session.reducer import Fold
 
 
 class _Clock:
@@ -88,7 +89,7 @@ def test_renewal_snapshot_is_the_commit_authority():
     receipt = LeasePoll(replace(lease, expires_at_ms=6_000), 1_100, 3, ())
     store = _Store(receipt)
 
-    assert state.poll(store) is receipt
+    assert state.poll(cast(SessionStore, store)) is receipt
     assert state.latest_poll is receipt
     with state.committing() as committed:
         assert committed is receipt.lease
@@ -101,7 +102,7 @@ def test_renewal_identity_change_loses_authority_without_a_latch_release_path():
     store = _Store(receipt, owner="replacement")
 
     with pytest.raises(LeaseLost, match="changed lease identity"):
-        state.poll(store)
+        state.poll(cast(SessionStore, store))
     assert state.lost
     with pytest.raises(LeaseLost, match="lost ownership"), state.committing():
         pass
@@ -142,8 +143,8 @@ class _Cipher:
         del key, nonce, aad
         return ciphertext
 
-    def random_bytes(self, count: int) -> bytes:
-        return b"r" * count
+    def random_bytes(self, n: int) -> bytes:
+        return b"r" * n
 
 
 def test_wrapped_store_atomic_yields_content_capable_transaction(tmp_path):
@@ -157,6 +158,6 @@ def test_wrapped_store_atomic_yields_content_capable_transaction(tmp_path):
         store = wrap_session_content_store(raw_store, binding)
         with store.atomic() as tx:
             assert isinstance(tx, ContentSessionTx)
-            writer = tx.content_writer(tenant_id=store.tenant_id, session_id="s")
-            assert writer.tenant_id == store.tenant_id
+            writer = tx.content_writer(tenant_id=raw_store.tenant_id, session_id="s")
+            assert writer.tenant_id == raw_store.tenant_id
             assert writer.session_id == "s"

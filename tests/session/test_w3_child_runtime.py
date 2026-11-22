@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from contextlib import closing, nullcontext
+from contextlib import AbstractContextManager, closing
 from dataclasses import replace
-from typing import Any
+from typing import Any, Never, cast
 
 import pytest
 
@@ -18,6 +18,7 @@ from vv_agent.session.children import ChildSession, create_child
 from vv_agent.session.environments import EnvironmentCapabilities, IsolationMode, NetworkMode
 from vv_agent.session.records import digest, make_record
 from vv_agent.session.runtime import Runtime, TrustedEnvironmentBinding
+from vv_agent.session.store import SessionStore
 from vv_agent.session.surfaces import SessionDriver
 
 from .helpers import (
@@ -34,17 +35,21 @@ from .helpers import (
 
 
 class _ToolProvider:
-    def submit(self, *args: Any, **kwargs: Any) -> None:
+    def submit(self, *args: Any, **kwargs: Any) -> Never:
         raise AssertionError(f"unexpected submit: {args!r} {kwargs!r}")
 
-    def query(self, *args: Any, **kwargs: Any) -> None:
+    def query(self, *args: Any, **kwargs: Any) -> Never:
         raise AssertionError(f"unexpected query: {args!r} {kwargs!r}")
 
-    def cancel(self, *args: Any, **kwargs: Any) -> None:
+    def cancel(self, *args: Any, **kwargs: Any) -> Never:
         raise AssertionError(f"unexpected cancel: {args!r} {kwargs!r}")
 
-    def authenticate(self, *args: Any, **kwargs: Any) -> None:
+    def authenticate(self, *args: Any, **kwargs: Any) -> Never:
         raise AssertionError(f"unexpected authenticate: {args!r} {kwargs!r}")
+
+
+def _unexpected_store() -> AbstractContextManager[SessionStore]:
+    raise AssertionError("unexpected runtime store open")
 
 
 def _binding() -> TrustedEnvironmentBinding:
@@ -127,7 +132,7 @@ def test_for_agent_drops_w3_binding_from_ordinary_child_runtime(tmp_path):
         parent_config,
         resolved,
         llm,
-        lambda: nullcontext(None),
+        _unexpected_store,
         providers={"host/provider": parent_provider},
         host_bindings={"host_state": {"tenant": "default"}},
         trusted_environment_binding=binding,
@@ -256,15 +261,18 @@ def test_level_three_worker_reads_and_discovers_level_three_work(store) -> None:
             capabilities=(),
         )
     ) as driver:
-        assert driver.store.reader_level == 3
-        assert driver.store.worker_level == 3
+        drive_store = cast(Any, driver.store)
+        assert drive_store.reader_level == 3
+        assert drive_store.worker_level == 3
         assert driver.store.read("level-three", limit=10).head_seq == 2
 
         # Reader configuration may widen read support, but it never selects or
         # narrows the declared execution level.
         store.configure_reader(level=2)
         assert store.worker_level == 3
-        with driver._drive_store_factory() as drive:
+        factory = driver._drive_store_factory
+        assert factory is not None
+        with factory() as drive:
             assert drive.reader_level == 3
             assert drive.worker_level == 3
             claimed = drive.claim_runnable(
@@ -294,7 +302,7 @@ def test_for_agent_preserves_custom_runtime_hook(tmp_path):
         parent_config,
         resolved,
         llm,
-        lambda: nullcontext(None),
+        _unexpected_store,
         hook=host_hook,
     )
     child_runtime = parent_runtime.for_agent(

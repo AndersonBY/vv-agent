@@ -96,7 +96,8 @@ def test_observer_only_starts_without_drive_thread_or_projection_claim(tmp_path:
             opens += 1
             try:
                 with _open_store(database) as worker_store:
-                    worker_store.claim_runnable = lambda *_args, **_kwargs: pytest.fail("observer-only worker must not claim")
+                    worker_store_any = cast(Any, worker_store)
+                    worker_store_any.claim_runnable = lambda *_args, **_kwargs: pytest.fail("observer-only worker must not claim")
                     yield worker_store
             finally:
                 closes += 1
@@ -184,8 +185,9 @@ def test_blocked_drive_does_not_stop_observer_or_share_its_store(tmp_path: Path)
         @contextmanager
         def open_store():
             with _open_store(database) as worker_store:
-                worker_store._test_open_thread = current_thread().ident
-                worker_store._test_open_role = (
+                worker_store_any = cast(Any, worker_store)
+                worker_store_any._test_open_thread = current_thread().ident
+                worker_store_any._test_open_role = (
                     "drive" if current_thread().name.startswith("observer-progress-drive") else "coordinator"
                 )
                 yield worker_store
@@ -683,7 +685,7 @@ def test_wake_session_remains_visible_until_its_coordinate_pass_finishes(tmp_pat
                 second_enter.set()
                 assert second_release.wait(3)
 
-        worker._periodic_scan = blocked_scan
+        cast(Any, worker)._periodic_scan = blocked_scan
         try:
             worker.start()
             assert first_enter.wait(3)

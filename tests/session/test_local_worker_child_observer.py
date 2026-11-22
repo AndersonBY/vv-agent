@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+from concurrent.futures import Future
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 import vv_agent.session.surfaces as surface_module
 from vv_agent import RunConfig
 from vv_agent.kernel._sql import SessionNotLive
-from vv_agent.session.store import Conflict
+from vv_agent.session.store import Conflict, SessionStore
 from vv_agent.session.surfaces import SessionDriver
+from vv_agent.session.worker import _DriveCompletion
 
 
 class _FakeStore:
@@ -92,31 +94,31 @@ def test_observer_wakes_known_child_only_for_new_head_or_first_discovery(monkeyp
         monkeypatch.setattr(driver, "_registration_for_cursor", lambda _sid, store=None: None)
         monkeypatch.setattr(driver._worker, "wake", wakes.append)
 
-        driver._observe_registered_handles(store)  # type: ignore[arg-type]
+        driver._observe_registered_handles(cast(SessionStore, store))
         assert wakes == ["child-one"]
         assert driver._observer_cursors["child-one"] == 4
 
-        driver._observe_registered_handles(store)  # type: ignore[arg-type]
+        driver._observe_registered_handles(cast(SessionStore, store))
         assert wakes == ["child-one"]
 
         store.runnable.add("child-one")
-        driver._worker._inflight = SimpleNamespace()  # type: ignore[assignment]
-        driver._observe_registered_handles(store)  # type: ignore[arg-type]
+        driver._worker._inflight = Future[_DriveCompletion]()
+        driver._observe_registered_handles(cast(SessionStore, store))
         assert wakes == ["child-one"]
 
         driver._worker._inflight = None
-        driver._observe_registered_handles(store)  # type: ignore[arg-type]
+        driver._observe_registered_handles(cast(SessionStore, store))
         assert wakes == ["child-one", "child-one"]
 
         store.runnable.remove("child-one")  # the scan claimed the child drive
         store.heads["child-one"] = 5
-        driver._observe_registered_handles(store)  # type: ignore[arg-type]
+        driver._observe_registered_handles(cast(SessionStore, store))
         assert wakes == ["child-one", "child-one", "child-one"]
 
         driver._observer_cursors["child-one"] = 5  # projection drained the new prefix
         store.states["root"] = _state("child-one", "child-two")
         store.heads["child-two"] = 2
-        driver._observe_registered_handles(store)  # type: ignore[arg-type]
+        driver._observe_registered_handles(cast(SessionStore, store))
         assert wakes == ["child-one", "child-one", "child-one", "child-two"]
     finally:
         driver.close()
@@ -162,7 +164,7 @@ def test_deleted_child_is_pruned_without_stopping_live_child_observation(monkeyp
         monkeypatch.setattr(driver, "_deliver_projected_events", lambda _store, sid, _runtime: observed.append(sid))
         monkeypatch.setattr(driver._worker, "wake", lambda _sid: None)
 
-        driver._observe_registered_handles(store)  # type: ignore[arg-type]
+        driver._observe_registered_handles(cast(SessionStore, store))
 
         assert observed == ["live-child"]
         assert "deleted-child" not in driver._runtimes
@@ -194,7 +196,7 @@ def test_observer_propagates_non_deletion_conflicts(monkeypatch) -> None:
         )
 
         with pytest.raises(Conflict, match="database invariant failed"):
-            driver._observe_registered_handles(store)  # type: ignore[arg-type]
+            driver._observe_registered_handles(cast(SessionStore, store))
         assert "root" in driver._runtimes
         assert driver._observer_cursors["broken-child"] == 1
         assert surface_module._DRIVERS[(driver.tenant_id, "broken-child")] is driver

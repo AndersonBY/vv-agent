@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from dataclasses import replace
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from support.s1_fixture_values import content_ref
 
 from vv_agent.kernel import _driver_outcomes as outcomes
+from vv_agent.kernel._driver import CoreDriver
 from vv_agent.kernel._hydration import IntegrityFailure, KeyUnavailable, MissingContentLink
 from vv_agent.kernel._provider_outcomes import Definitive
 from vv_agent.kernel._records import Record
@@ -63,7 +64,7 @@ class _Driver:
             number: Attempt(
                 plan if number == plan.attempt else _plan(plan.operation_id, attempt=number),
                 state=state if number == plan.attempt else "completed",
-                dispatch=SimpleNamespace(),  # type: ignore[arg-type]
+                dispatch=cast(Record, SimpleNamespace()),
                 superseded=superseded if number == plan.attempt else True,
                 wait=wait if number == plan.attempt else None,
             )
@@ -76,7 +77,7 @@ class _Driver:
             selected_attempt=plan.attempt if state == "completed" else None,
         )
         self.state.operations[plan.operation_id] = operation
-        self.state.turns[plan.turn_id] = Turn(start=SimpleNamespace())  # type: ignore[arg-type]
+        self.state.turns[plan.turn_id] = Turn(start=cast(Record, SimpleNamespace()))
         return operation
 
     def add_tool(self, plan: Record, index: int = 0) -> None:
@@ -86,7 +87,7 @@ class _Driver:
         self.state.operations[operation_id] = Operation(
             plan.turn_id,
             "tool",
-            {1: Attempt(tool_plan, state="completed", dispatch=SimpleNamespace())},  # type: ignore[arg-type]
+            {1: Attempt(tool_plan, state="completed", dispatch=cast(Record, SimpleNamespace()))},
             selected_attempt=1,
         )
 
@@ -169,7 +170,7 @@ def test_non_normal_context_returns_before_any_content_read(monkeypatch: pytest.
 
     call = {"id": "call", "name": "effect", "arguments": {}}
     for context in ("audit", "correction"):
-        assert list(outcomes.completion_effects_steps(driver, plan, _outcome(call), context)) == []
+        assert list(outcomes.completion_effects_steps(cast(CoreDriver, driver), plan, _outcome(call), context)) == []
 
     assert driver.hydrate_calls == []
     assert driver.request_content_reads == 0
@@ -203,7 +204,7 @@ def test_normal_paths_without_new_effects_do_not_hydrate(
     plan = _plan(f"turn/{name}", attempt=attempt, purpose=purpose, kind=kind, retained=True)
     driver.add_operation(plan, state=state, wait=wait, kind=kind)
 
-    assert list(outcomes.completion_effects_steps(driver, plan, _outcome(), "normal")) == []
+    assert list(outcomes.completion_effects_steps(cast(CoreDriver, driver), plan, _outcome(), "normal")) == []
     assert driver.hydrate_calls == []
     assert driver.request_content_reads == 0
     assert driver.definition_calls == 0
@@ -226,7 +227,7 @@ def test_completed_steps_reuses_hydrated_plan_and_only_plans_missing_effects(
     planned: list[tuple[str, dict[str, Any], str, list[str], dict[str, Any]]] = []
     monkeypatch.setattr(outcomes, "plan_steps", _effect_plan_steps(planned))
 
-    records = _finish(outcomes.completed_steps(driver, plan, _outcome(*calls)))
+    records = _finish(outcomes.completed_steps(cast(CoreDriver, driver), plan, _outcome(*calls)))
 
     assert driver.hydrate_calls == [plan.record_id]
     assert driver.request_content_reads == 1
@@ -255,7 +256,7 @@ def test_completed_steps_audit_uses_only_the_caller_hydration(monkeypatch: pytes
 
     records = _finish(
         outcomes.completed_steps(
-            driver,
+            cast(CoreDriver, driver),
             plan,
             _outcome({"id": "must-not-plan", "name": "effect", "arguments": {}}),
         )
@@ -276,7 +277,7 @@ def test_raw_plan_is_hydrated_once_only_when_constructing_the_effect(monkeypatch
     planned: list[tuple[str, dict[str, Any], str, list[str], dict[str, Any]]] = []
     monkeypatch.setattr(outcomes, "plan_steps", _effect_plan_steps(planned))
 
-    records = _finish(outcomes.completion_effects_steps(driver, plan, _outcome(call), "normal"))
+    records = _finish(outcomes.completion_effects_steps(cast(CoreDriver, driver), plan, _outcome(call), "normal"))
 
     assert driver.hydrate_calls == [plan.record_id]
     assert driver.request_content_reads == 1
@@ -307,7 +308,7 @@ def test_missing_effect_hydration_failure_remains_fail_closed(
     with pytest.raises(type(error)) as raised:
         list(
             outcomes.completion_effects_steps(
-                driver,
+                cast(CoreDriver, driver),
                 plan,
                 _outcome({"id": "call", "name": "effect", "arguments": {}}),
                 "normal",
