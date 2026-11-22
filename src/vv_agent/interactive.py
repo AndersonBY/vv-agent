@@ -672,14 +672,6 @@ class AgentSession:
             raise ValueError("session seed shared_state must be an object")
         return copy_json(shared_state)
 
-    def _runtime(self):
-        handle = self._active_run_handle
-        if handle is None:
-            handle = next((h for h in reversed(self.driver.handles) if h.session_id == self.session_id), None)
-        if handle is None:
-            return self.driver._runtime_view(self.session_id)
-        return handle.runtime
-
     def steer(self, prompt):
         self._queue("steer", prompt)
 
@@ -746,7 +738,7 @@ class AgentSession:
         self.driver.approve(self.session_id, None, request_id, decision, f"approval/{request_id}/answer")
 
     def archive(self, *, input_id="interactive/archive"):
-        return self.driver.control(self.session_id, "archive", input_id, runtime=self._runtime())
+        return self.driver.control(self.session_id, "archive", input_id)
 
     def close(self):
         input_id = "interactive/close"

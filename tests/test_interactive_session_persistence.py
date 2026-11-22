@@ -74,6 +74,18 @@ def test_creation_seed_hydrates_and_reuses_durable_session_without_duplicates(tm
     second_client.driver.close()
     reopened.connection.close()
 
+    archive_store = file_store(tmp_path / "sessions.sqlite", provider)
+    archiver = client(tmp_path, [], archive_store)
+    try:
+        cold = archiver.create_session(agent=Agent("assistant", "Remember context."), session_id="thread")
+        assert not archiver.driver._runtimes
+        cold.archive()
+        assert archiver.driver.store.read_state("thread")[0].archived
+        assert len(requests) == 2
+    finally:
+        archiver.driver.close()
+        archive_store.connection.close()
+
 
 @pytest.mark.parametrize("inline", [False, True])
 def test_cold_reopen_is_read_only_and_answers_the_retained_turn(tmp_path, monkeypatch, inline):
