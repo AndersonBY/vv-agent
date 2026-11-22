@@ -51,7 +51,7 @@ from ._content_sql import CoreSQLContentStore, _ContentWriteMemo
 from ._content_store import ContentCipher, DurableContentStore
 from ._postgres import CorePostgresContentStore, PostgresStore
 from ._records import SessionSpec
-from ._sql import SQLSessionTx, _TenantSQLStore
+from ._sql import SessionNotLive, SQLSessionTx, _TenantSQLStore
 from ._sqlite import CoreSQLiteContentStore, SQLiteStore
 from ._store import (
     CommitReceipt,
@@ -730,13 +730,16 @@ class SessionContentWriter:
     ) -> CreateReceipt:
         """Create session/key/content/record/links inside the current outer transaction."""
         self.tx._active()
-        existing = (
-            self._durable._backend.fetchone(
-                "SELECT 1 FROM sk_session WHERE tenant_id={p} AND session_id={p}",
-                (self.tenant_id, self.session_id),
-            )
-            is not None
+        store = self.tx.store
+        store._require_create_isolation()
+        deletion_state, tombstoned = store._one(
+            "SELECT (SELECT deletion_state FROM sk_session WHERE tenant_id=%s AND session_id=%s), "
+            "EXISTS (SELECT 1 FROM sk_tombstone WHERE tenant_id=%s AND session_id=%s)",
+            (self.tenant_id, self.session_id, self.tenant_id, self.session_id),
         )
+        if tombstoned or deletion_state not in {None, "live"}:
+            raise SessionNotLive("a deleted session identity cannot be reused")
+        existing = deletion_state == "live"
         deferred_backend: _DeferredContentBackend | None = None
         factory_writer = self
         if not existing:

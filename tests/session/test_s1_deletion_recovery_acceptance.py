@@ -220,6 +220,64 @@ def test_deletion_requires_a_committed_fence_before_destroying_key(
         provider.close()
 
 
+@pytest.mark.persistent_store
+@pytest.mark.parametrize("deletion_state", ["forgetting", "purged"])
+def test_fenced_session_creation_rejects_before_content_factory(
+    store,
+    deletion_state: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = LocalKeyProvider(MASTER_KEY, state_path=tmp_path / "keys.sqlite3")
+    signer = Signer()
+    try:
+        store.configure_input_admission(signer)
+        wrapped = wrap_fixture_store(store, provider)
+        allocations: list[tuple[str, str]] = []
+        factory_calls: list[str] = []
+        generate = provider.generate_data_key
+
+        def observed_generate(tenant_id: str, session_id: str):
+            allocations.append((tenant_id, session_id))
+            return generate(tenant_id, session_id)
+
+        def spec(content: ContentSessionWriter) -> SessionSpec:
+            factory_calls.append("session")
+            principal, _ = content.service_principal("fixture/host")
+            return SessionSpec(
+                "session",
+                principal,
+                content.put_json("/tmp").to_dict(),
+                attributes=content.put_json({}).to_dict(),
+            )
+
+        monkeypatch.setattr(provider, "generate_data_key", observed_generate)
+        with wrapped.atomic() as tx:
+            writer = SessionContentWriter.bind(tx, tenant_id=TENANT, session_id="session")
+            assert not writer.create_session(spec, consumers=("events",)).replayed
+        assert factory_calls == ["session"]
+        assert allocations == [(TENANT, "session")]
+
+        actor = _actor(store, "session")
+        if deletion_state == "forgetting":
+            store._scoped(TENANT).begin_forget(
+                "session", actor, bound_signer=signer.bind_key(), verifier=signer, allow_unsigned=False
+            )
+            assert _session_state(store, "session") == ("forgetting", "pending")
+        else:
+            deletion = SessionDeletionStore(store, durable_content_store(wrapped))
+            deletion.purge_session(TENANT, "session", actor=actor)
+            assert _session_state(store, "session") == ("purged", "complete")
+
+        with pytest.raises(SessionNotLive, match="identity cannot be reused"), wrapped.atomic() as tx:
+            writer = SessionContentWriter.bind(tx, tenant_id=TENANT, session_id="session")
+            writer.create_session(spec, consumers=("events",))
+        assert factory_calls == ["session"]
+        assert allocations == [(TENANT, "session")]
+    finally:
+        provider.close()
+
+
 @pytest.mark.sqlite_file
 def test_sqlite_deletion_order_restore_convergence_and_identity_fence(
     tmp_path: Path,
@@ -597,6 +655,9 @@ def test_postgres_create_rejects_transaction_snapshot_before_writing(
             assert not " ".join(query.split()).startswith("INSERT INTO sk_session(")
             return original_rows(query, params)
 
+        def reject_factory(_content: ContentSessionWriter) -> SessionSpec:
+            pytest.fail("a stale SQL snapshot cannot be used to prepare session content")
+
         monkeypatch.setattr(store, "_rows", check_no_insert)
         store.connection.isolation_level = IsolationLevel[isolation]
         with store.atomic() as tx:
@@ -610,6 +671,9 @@ def test_postgres_create_rejects_transaction_snapshot_before_writing(
             assert store._tombstone("session") is None
             with pytest.raises(Conflict, match="PostgreSQL session creation requires READ COMMITTED isolation"):
                 tx.create(replay_spec, consumers=("events",))
+            writer = SessionContentWriter.bind(tx, tenant_id=TENANT, session_id="session")
+            with pytest.raises(Conflict, match="PostgreSQL session creation requires READ COMMITTED isolation"):
+                writer.create_session(reject_factory, consumers=("events",))
             assert store._one("SELECT 1") == (1,)
 
         retained = store._tombstone("session")
