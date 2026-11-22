@@ -8,6 +8,7 @@ from support.kernel_runtime import start_runner
 
 from vv_agent import Agent, RunBudgetLimits, RunConfig, ScriptedModelProvider, function_tool
 from vv_agent.runtime.hooks import BaseRuntimeHook
+from vv_agent.session.projection import hydration_for_session_store
 from vv_agent.session.surfaces import SessionDriver
 from vv_agent.session.tracing import project_spans
 from vv_agent.types import LLMResponse, ToolCall
@@ -44,9 +45,11 @@ def test_real_runner_trace_matches_current_producer_fixture(tmp_path):
             ),
         )
         assert handle.result().final_output == "done"
+        records = driver.store.read_state("tools")[1]
+        hydration = hydration_for_session_store(driver.store, "tools")
         actual: list[dict[str, Any]] = [
             {"seq": seq, "method": method, "span": span.to_dict()}
-            for seq, method, span in project_spans(driver.store.read_state("tools")[1])
+            for seq, method, span in project_spans(records, hydration=hydration)
         ]
         expected = [
             json.loads(line) for line in (Path(__file__).parent / "fixtures/parity/runner_trace.jsonl").read_text().splitlines()
