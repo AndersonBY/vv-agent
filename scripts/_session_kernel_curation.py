@@ -56,6 +56,7 @@ EVENT_FILES = {
     "budget_events.jsonl",
     "configured_sub_agent_events.jsonl",
 }
+COMPACT_JSON_FILES = {"memory_local.json", "session_codec_vectors.json", "run_definition.json", "memory_lifecycle.json"}
 CONTENT_BACKED_OPTIONAL_FIELDS = {
     ("input_applied", "model_binding"),
     ("op_parked", "delegation"),
@@ -411,6 +412,10 @@ def app_server_source(app):
     return json.dumps(app, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n"
 
 
+def compact_source(value):
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n"
+
+
 def public_api_source(value):
     # Keep one catalogue field per line without repeating indentation at every nesting level.
     return json.dumps(value, ensure_ascii=True, sort_keys=True, indent=0) + "\n"
@@ -578,6 +583,8 @@ def curate(output, streams, semantics, independent, facts, logical_records):
             path.write_bytes(b"".join(raw + b"\n" for raw in independent(value)))
         elif name == "app_server_protocol.json":
             path.write_text(app_server_source(value))
+        elif name in COMPACT_JSON_FILES:
+            path.write_text(compact_source(value), encoding="utf-8")
         elif name == "app_server_observable.json" or name == "public_api.json":
             path.write_text(public_api_source(value))
         elif name == "session_projection_s1.json":

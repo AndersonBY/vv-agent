@@ -18,6 +18,7 @@ from vv_agent.session.sqlite import SQLiteStore
 
 _EXCLUDED = {"session_content_catalog.json", "session_content_capture_s1.json", "trusted_storage_s1.json"}
 _REF_FIELDS = {"content_id", "mac", "size", "key_id", "labels"}
+MAX_CAPTURE_BYTES = 512_000
 
 
 def _unique_json_members(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -175,7 +176,6 @@ def capture_content_catalog(
                     "session_id": framing["session_id"],
                     "key_id": ref.key_id,
                     "value": value,
-                    "bytes_base64": base64.b64encode(raw).decode("ascii"),
                 }
             pending = next_pending
 
@@ -188,3 +188,11 @@ def capture_content_catalog(
         ],
         "contents": dict(sorted(contents.items())),
     }
+
+
+def write_captured_content(path: Path, catalog: dict[str, Any], *, independent_bytes: Callable[[list[Any]], list[bytes]]) -> None:
+    (canonical,) = independent_bytes([catalog])
+    body = canonical + b"\n"
+    if len(body) > MAX_CAPTURE_BYTES:
+        raise ValueError(f"S1 captured content catalog is {len(body)} bytes, exceeding {MAX_CAPTURE_BYTES}")
+    path.write_bytes(body)

@@ -2675,7 +2675,7 @@ def generate(output: Path):
                     fixture_values=S1_FIXTURE_VALUES,
                 )
                 catalog_name = "session_content_capture_s1.json"
-                write_json(output, catalog_name, catalog_payload)
+                catalog.write_captured_content(output / catalog_name, catalog_payload, independent_bytes=independent_bytes)
                 content_coverage = sorted(curation.coverage_keys(catalog_name, catalog_payload))
                 curated_coverage[catalog_name] = {"before": content_coverage, "after": content_coverage}
                 replacement_report["replaced"] = {
