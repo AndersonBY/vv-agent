@@ -100,6 +100,7 @@ def test_tool_lifecycle_app_server_projection_matches_shared_fixture():
         arguments={"path": "README.md"},
     )
     assert _mapped_notifications(planned) == contract["plannedHasNoNotification"]["notifications"]
+    expected_started = contract["executed"]["startedNotifications"]
     agent = Agent("fixture", "Delegate.", sub_agents={"child": SubAgentConfig(model="m", description="Answer.")})
     with _real_turn(
         [
@@ -116,10 +117,11 @@ def test_tool_lifecycle_app_server_projection_matches_shared_fixture():
         ],
         agent=agent,
         thread_number=2,
+        captured_at=expected_started[0]["params"]["createdAt"],
     ) as (_server, messages):
         started = [m for m in messages if m.get("method") == "item/started" and m["params"]["type"] == "toolCall"]
         completed = [m for m in messages if m.get("method") == "item/completed" and m["params"]["type"] == "toolCall"]
-        assert started == contract["executed"]["startedNotifications"]
+        assert started == expected_started
         lifecycle = deepcopy(completed)
         expected_lifecycle = deepcopy(contract["executed"]["completedNotifications"][:1])
         # This case has a one-cycle "child"; the canonical producer has a two-cycle "worker".
@@ -155,10 +157,11 @@ def test_tool_lifecycle_app_server_projection_matches_shared_fixture():
 
 def test_model_lifecycle_app_server_projection_matches_shared_fixture():
     contract = _observable_contract()["modelLifecycle"]
-    with _real_turn([_usage_response()]) as (_server, messages):
+    expected_started = contract["startedNotifications"][:1]
+    with _real_turn([_usage_response()], captured_at=expected_started[0]["params"]["createdAt"]) as (_server, messages):
         started = [m for m in messages if m.get("method") == "item/started" and m["params"]["type"] == "modelCall"]
         completed = [m for m in messages if m.get("method") == "item/completed" and m["params"]["type"] == "modelCall"]
-        assert started == contract["startedNotifications"][:1]
+        assert started == expected_started
         assert completed == contract["completedNotifications"][:1]
         for notification in [*started, *completed]:
             assert not set(notification["params"]["payload"]).intersection(contract["forbiddenPayloadFields"])
@@ -735,7 +738,7 @@ def _completed(transport):
 
 
 @contextmanager
-def _real_turn(steps, *, agent=None, config=None, thread_number=1, store=None, content_key_provider=None):
+def _real_turn(steps, *, agent=None, config=None, thread_number=1, store=None, content_key_provider=None, captured_at=1041.102):
     transport = ChannelTransport(connection_id="conn_1")
     server = AppServer(
         transport=transport,
@@ -755,7 +758,7 @@ def _real_turn(steps, *, agent=None, config=None, thread_number=1, store=None, c
     assert callable(store_capability.read_state)
     # Keep wall-clock assertions deterministic without freezing lease monotonic time.
     with pytest.MonkeyPatch.context() as frozen_clock:
-        frozen_clock.setattr(SystemClock, "now_ms", lambda _self: 1041102)
+        frozen_clock.setattr(SystemClock, "now_ms", lambda _self: round(captured_at * 1000))
         try:
             server.processor.process_message(
                 "conn_1", {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"clientInfo": {"name": "producer"}}}
