@@ -7,6 +7,7 @@ from dataclasses import replace
 import pytest
 
 from vv_agent.kernel._content_publication import link_declared_input_content
+from vv_agent.kernel._content_runtime import content_runtime_binding_for
 from vv_agent.session import children
 from vv_agent.session.content_runtime import SessionContentWriter
 from vv_agent.session.kernel import drive, read_state
@@ -161,6 +162,85 @@ def test_invalid_batch_has_no_admission_effect(store, database, invalid):
     assert store.list_sessions() == ("s",)
     assert store._rows("SELECT * FROM host_child") == []
     assert rows(store, kind="op_parked") == []
+
+
+@pytest.mark.parametrize(
+    ("identity", "error", "message"),
+    [
+        ("duplicate", children.InvalidChildBatch, "duplicate child membership"),
+        ("self", children.InvalidChildBatch, "child session ID must differ from the parent session"),
+        ("invalid_id", ValueError, "identity must be nonempty text without NUL"),
+        ("tenant", ValueError, "child principal must use the parent transaction tenant"),
+        ("parent", ValueError, "child spec parent must match the admitting parent"),
+    ],
+)
+def test_invalid_child_identity_batch_has_no_key_writes_or_durable_effects(
+    store, database, monkeypatch, identity, error, message
+):
+    from vv_agent.kernel import _driver_dispatch
+
+    start(store)
+    store._rows("CREATE TABLE host_child (id INTEGER PRIMARY KEY)")
+    rt = batch_runtime(store, database)
+    callback = rt.children["child_task"]
+
+    def bad(plan):
+        store._rows("INSERT INTO host_child VALUES (1)")
+        batch = list(callback(plan))
+        if identity == "duplicate":
+            batch[2] = batch[0]
+        elif identity == "self":
+            batch[1] = replace(batch[1], spec=replace(batch[1].spec, session_id=plan.session_id))
+        elif identity == "invalid_id":
+            batch[2] = replace(batch[2], spec=replace(batch[2].spec, session_id="child\x00invalid"))
+        elif identity == "tenant":
+            principal = batch[2].spec.principal | {"tenant_id": "other"}
+            batch[2] = replace(batch[2], spec=replace(batch[2].spec, principal=principal))
+        elif identity == "parent":
+            batch[2] = replace(batch[2], spec=replace(batch[2].spec, parent_session_id="other-parent"))
+        return batch
+
+    create_calls = []
+    create = _driver_dispatch.create_child
+
+    def counted_create(tx, child, plan, generation):
+        create_calls.append(child.spec.session_id)
+        return create(tx, child, plan, generation)
+
+    binding = content_runtime_binding_for(store)
+    assert binding is not None
+    key_allocations = []
+    generate_data_key = binding.key_provider.generate_data_key
+
+    def counted_key(tenant_id, session_id):
+        key_allocations.append((tenant_id, session_id))
+        return generate_data_key(tenant_id, session_id)
+
+    monkeypatch.setattr(_driver_dispatch, "create_child", counted_create)
+    monkeypatch.setattr(binding.key_provider, "generate_data_key", counted_key)
+    rt.children["child_task"] = bad
+    with pytest.raises(error, match=message):
+        drive(store, "s", runtime=rt)
+
+    placeholders = ",".join("%s" for _ in CHILDREN)
+    params = (store.tenant_id, *CHILDREN)
+    assert create_calls == []
+    assert key_allocations == []
+    assert store._rows("SELECT * FROM host_child") == []
+    assert store.list_sessions() == ("s",)
+    assert store._rows(f"SELECT session_id FROM sk_session WHERE tenant_id=%s AND session_id IN ({placeholders})", params) == []
+    assert (
+        store._rows(f"SELECT session_id FROM sk_session_key WHERE tenant_id=%s AND session_id IN ({placeholders})", params) == []
+    )
+    assert store._rows(f"SELECT session_id FROM sk_inbox WHERE tenant_id=%s AND session_id IN ({placeholders})", params) == []
+    assert (
+        store._rows(
+            "SELECT kind,operation_id FROM sk_record WHERE tenant_id=%s AND session_id=%s "
+            "AND kind IN ('op_started','op_parked') AND operation_id LIKE %s",
+            (store.tenant_id, "s", "%/tool/%"),
+        )
+        == []
+    )
 
 
 def test_batch_host_rows_and_child_admission_roll_back_with_parent_append(store, database):
