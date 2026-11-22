@@ -679,6 +679,7 @@ class _KnownSessionOwner:
         self._hints: set[str] = set()
         self._projected: dict[str, int] = {}
         self._last_sid = ""
+        self.last_error: Exception | None = None
 
     @property
     def running(self) -> bool:
@@ -717,6 +718,7 @@ class _KnownSessionOwner:
         with ThreadPoolExecutor(max_workers=1, thread_name_prefix="session-client-drive") as executor:
             future: Future[None] | None = None
             while not self._stop.is_set():
+                hints: set[str] = set()
                 try:
                     with self._driver._open_drive_store() as store:
                         while not self._stop.is_set():
@@ -732,8 +734,12 @@ class _KnownSessionOwner:
                             if sid is not None and not self._stop.is_set():
                                 future = executor.submit(self._drive, sid)
                                 future.add_done_callback(lambda _: self._changed.set())
+                            hints = set()
                             self._changed.wait(self.scan_interval)
-                except Exception:
+                except Exception as exc:
+                    self.last_error = exc
+                    with self._lock:
+                        self._hints.update(hints)
                     # The next pass reopens the observer connection. The
                     # drive job keeps its own connection and lease lifecycle.
                     self._stop.wait(self.scan_interval)
@@ -744,33 +750,48 @@ class _KnownSessionOwner:
         driver = self._driver
         driver._configure_store_support(store)
         # Observation errors must not suppress an independently runnable drive.
-        with suppress(Exception):
+        try:
             driver._observe_registered_handles(store, discover_unobserved=True)
+        except Exception as exc:
+            self.last_error = exc
         roots = {sid for sid, registration in tuple(driver._runtimes.items()) if registration.armed}
-        candidates = roots | hints | set(driver._observer_cursors)
+        candidates = roots | hints | self._projected.keys() | driver._observer_cursors.keys()
+        selected = None
         for sid in sorted(candidates, key=lambda sid: (sid <= self._last_sid, sid)):
             try:
                 registration, chain = driver._runtime_lineage(store, sid)
+            except LedgerIntegrityError as exc:
+                driver._record_local_integrity_failure(sid, exc)
+                continue
             except (Conflict, MissingHostBinding) as exc:
                 if isinstance(exc, Conflict) and driver._is_deleted_session_conflict(exc):
                     driver._drop_deleted_session_observation(sid)
                     self._projected.pop(sid, None)
+                elif isinstance(exc, Conflict):
+                    self.last_error = exc
                 continue
             if not registration.armed:
                 continue
-            if chain:
-                with suppress(KeyUnavailable, Conflict):
+            try:
+                failure = driver._failure_after_progress(store, sid, driver._errors.get(sid))
+                if failure is not None and failure.terminal and not isinstance(failure.error, ProviderResultInvalid):
+                    continue
+                if chain:
+                    projected = self._projected.setdefault(sid, 0)
                     driver._discover_child_runtimes(store, sid)
                     head = store.read(sid, limit=1).head_seq
-                    if self._projected.get(sid, 0) < head:
+                    if projected < head:
                         through = driver._deliver_child_session(store, sid)
                         self._projected[sid] = through or head
-            if drive and self.drive_available and store.is_runnable(sid):
-                failure = driver._failure_after_progress(store, sid, driver._errors.get(sid))
-                if failure is None or not failure.terminal or isinstance(failure.error, ProviderResultInvalid):
-                    self._last_sid = sid
-                    return sid
-        return None
+                if selected is None and drive and self.drive_available and store.is_runnable(sid):
+                    selected = sid
+            except LedgerIntegrityError as exc:
+                driver._record_local_integrity_failure(sid, exc)
+            except (KeyUnavailable, Conflict) as exc:
+                self.last_error = exc
+        if selected is not None:
+            self._last_sid = selected
+        return selected
 
     def _drive(self, sid: str) -> None:
         self._drive_thread = current_thread()
@@ -788,11 +809,12 @@ class _KnownSessionOwner:
                             store.release(lease)
                         return
                     callback(store, sid, lease=lease)
-        except (SessionNotLive, KeyUnavailable, sqlite3.OperationalError):
-            pass
         except LedgerIntegrityError as exc:
-            policy = self._driver._lease_retry_policy(None, None)
-            self._driver._errors.setdefault(sid, _SessionFailure(None, exc, 1, 0, True, *policy))
+            self._driver._record_local_integrity_failure(sid, exc)
+        except (KeyUnavailable, sqlite3.OperationalError) as exc:
+            self.last_error = exc
+        except SessionNotLive:
+            pass
         finally:
             self._driver._notify_session(sid)
             self._drive_thread = None
@@ -1463,9 +1485,10 @@ class SessionDriver:
                     continue
             try:
                 child_ids = self._discover_child_runtimes(store, root)
-            except KeyUnavailable:
+            except LedgerIntegrityError as exc:
                 if not discover_unobserved:
                     raise
+                self._record_local_integrity_failure(root, exc)
                 continue
             except Conflict as exc:
                 if not self._is_deleted_session_conflict(exc):
@@ -1496,9 +1519,10 @@ class SessionDriver:
                     self._notify_session(sid)
                     continue
                 self._deliver_projected_events(store, sid, runtime)
-            except KeyUnavailable:
+            except LedgerIntegrityError as exc:
                 if not discover_unobserved:
                     raise
+                self._record_local_integrity_failure(sid, exc)
                 continue
             except Conflict as exc:
                 if not self._is_deleted_session_conflict(exc):
@@ -1772,6 +1796,12 @@ class SessionDriver:
         if not any_turn and failure.turn_id not in {None, turn_id}:
             return None
         return failure
+
+    def _record_local_integrity_failure(self, sid: str, error: LedgerIntegrityError) -> None:
+        # Integrity errors survive later worker progress.
+        policy = self._lease_retry_policy(None, None)
+        self._errors[sid] = _SessionFailure(None, error, 1, 0, True, *policy)
+        self._notify_session(sid)
 
     def _failure_after_progress(
         self,

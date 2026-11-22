@@ -5,13 +5,16 @@ from pathlib import Path
 from threading import Event
 from typing import Any
 
+import pytest
 from support import ModelMapProvider
 
 from vv_agent import Agent, RunConfig, Runner, ToolPolicy, function_tool, handoff
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.events import HandoffCompletedEvent, HandoffStartedEvent
 from vv_agent.guardrails import GuardrailResult
+from vv_agent.kernel._sql import LedgerIntegrityError
 from vv_agent.llm import ScriptedLLM
+from vv_agent.session.surfaces import SessionDriver
 from vv_agent.tools import ToolContext
 from vv_agent.types import AgentStatus, LLMResponse, ToolCall, ToolResultStatus
 
@@ -74,6 +77,33 @@ def test_handoff_transfers_control_and_finishes_with_target_output(tmp_path: Pat
     assert result.final_output == "written by target"
     assert result.agent_name == "writer"
     assert set(model_provider.resolved_models) == {"triage", "writer"}
+
+
+def test_handoff_surfaces_child_projection_integrity_failure(tmp_path: Path, monkeypatch) -> None:
+    writer = Agent(name="writer", instructions="Write the answer.", model="writer")
+    triage = Agent(name="triage", instructions="Transfer writing tasks.", model="triage", handoffs=[handoff(agent=writer)])
+    provider = _provider(
+        {
+            "triage": ScriptedLLM(
+                steps=[LLMResponse("", [ToolCall("handoff-call", "transfer_to_writer", {"input": "write this"})])]
+            ),
+            "writer": ScriptedLLM(steps=[LLMResponse("written by target")]),
+        }
+    )
+    deliver = SessionDriver._deliver_child_session
+    error = LedgerIntegrityError("child delivery cursor disagrees with the ledger")
+
+    def corrupt_delivery(driver, store, sid):
+        state, _, _ = store.read_state(sid)
+        if any(turn.ended for turn in state.turns.values()):
+            raise error
+        return deliver(driver, store, sid)
+
+    monkeypatch.setattr(SessionDriver, "_deliver_child_session", corrupt_delivery)
+    with Runner.start(triage, "please write", run_config=RunConfig(workspace=tmp_path, model_provider=provider)) as handle:
+        with pytest.raises(LedgerIntegrityError) as caught:
+            handle.result(timeout=5)
+        assert caught.value is error
 
 
 def test_handoff_run_emits_lifecycle_events(tmp_path: Path) -> None:
