@@ -91,7 +91,7 @@ def _record_has_retained_content(record: Record) -> bool:
 
 
 def _record_needs_logical_hydration(record: Record) -> bool:
-    return record.kind not in {"turn_ended", "usage_observed"} and _record_has_retained_content(record)
+    return record.kind != "turn_ended" and _record_has_retained_content(record)
 
 
 @dataclass(frozen=True, slots=True)
