@@ -2077,11 +2077,14 @@ class SQLStore:
             record = stored.record
             if record.kind != "turn_ended":
                 continue
-            dependencies = indexes.turn_dependencies.get(record.turn_id, ())
+            turn_id = record.turn_id
+            if turn_id is None:
+                raise LedgerIntegrityError("turn projection dependency has no verified start")
+            dependencies = indexes.turn_dependencies.get(turn_id, ())
             for dependency in dependencies:
                 if dependency.seq <= through:
                     found[dependency.seq] = dependency
-            start = indexes.turn_starts.get(record.turn_id)
+            start = indexes.turn_starts.get(turn_id)
             if start is None:
                 raise LedgerIntegrityError("turn projection dependency has no verified start")
             for input_id in start.record._payload["input_ids"]:
