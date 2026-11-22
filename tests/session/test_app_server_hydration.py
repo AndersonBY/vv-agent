@@ -22,6 +22,8 @@ from vv_agent.session.result import project_result
 from vv_agent.session.sqlite import SQLiteStore
 from vv_agent.session.surfaces import SessionDriver
 
+from .conftest import open_store
+
 MASTER_KEY = b"k" * 32
 THREAD = "thread"
 INPUT = "input-1"
@@ -112,7 +114,7 @@ def _populate(store: SQLiteStore, provider: LocalKeyProvider) -> SessionDriver:
 def test_s1_projection_reopens_with_hydrated_thread_context_and_result(tmp_path: Path) -> None:
     path = tmp_path / "session.sqlite"
     provider = LocalKeyProvider(MASTER_KEY)
-    with SQLiteStore.standalone(str(path)) as store:
+    with open_store(path) as store:
         sessions = _populate(store, provider)
         try:
             records = store.read_state(THREAD)[1]
@@ -127,7 +129,7 @@ def test_s1_projection_reopens_with_hydrated_thread_context_and_result(tmp_path:
         finally:
             sessions.close()
 
-    with SQLiteStore.standalone(str(path)) as reopened:
+    with open_store(path) as reopened:
         bind_content_key_provider(reopened, provider)
         transport = ChannelTransport(connection_id="hydration-test")
         server = AppServer(transport=transport, store=reopened, host=_host())
@@ -167,7 +169,7 @@ def test_s1_projection_reopens_with_hydrated_thread_context_and_result(tmp_path:
 
 
 def test_projection_rejects_cross_tenant_content_binding(tmp_path: Path) -> None:
-    with SQLiteStore.standalone(str(tmp_path / "session.sqlite")) as store:
+    with open_store(tmp_path / "session.sqlite") as store:
         sessions = _populate(store, LocalKeyProvider(MASTER_KEY))
         try:
             creation = store.read(THREAD, limit=1).records[0]
@@ -179,7 +181,7 @@ def test_projection_rejects_cross_tenant_content_binding(tmp_path: Path) -> None
 
 
 def test_projection_fails_closed_when_linked_content_is_missing(tmp_path: Path) -> None:
-    with SQLiteStore.standalone(str(tmp_path / "session.sqlite")) as store:
+    with open_store(tmp_path / "session.sqlite") as store:
         sessions = _populate(store, LocalKeyProvider(MASTER_KEY))
         try:
             records = store.read_state(THREAD)[1]

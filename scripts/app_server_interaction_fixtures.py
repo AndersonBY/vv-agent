@@ -76,6 +76,8 @@ class InteractionHost(DefaultAppServerHost):
 
 class InteractionServer:
     def __init__(self, store, host=None, *, connection="interaction-owner"):
+        with store.atomic():
+            store._rows("UPDATE sk_settings SET write_level=2 WHERE singleton=1")
         self.host = host or InteractionHost()
         self.transport = ChannelTransport(connection_id=connection, outbound_capacity=10000)
         self.content_key_provider = fixture_key_provider_for_store(store)
@@ -159,7 +161,6 @@ class InteractionServer:
         self.server.run_adapter.close()
         self.server.kernel.close()
         self.content_key_provider.close()
-        self.join()
 
 
 @deterministic_content_producer
@@ -181,6 +182,7 @@ def produce():
             SQLiteStore.standalone(f"{directory}/session.sqlite") as store,
         ):
             store.install_schema()
+            store.configure_input_admission(allow_unsigned=True)
             server = InteractionServer(store, InteractionHost(args))
             try:
                 server.start()

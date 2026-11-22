@@ -15,7 +15,7 @@ from vv_agent.session.records import InboxItem
 from vv_agent.types import LLMResponse, ToolCall
 
 from .conftest import open_store
-from .helpers import content_ref, item, principal
+from .helpers import content_ref, item
 
 AUTHOR = runpy.run_path(str(Path(__file__).parents[2] / "scripts/app_server_interaction_fixtures.py"))
 InteractionServer, InteractionHost, target_of = (AUTHOR[k] for k in ("InteractionServer", "InteractionHost", "target_of"))
@@ -223,12 +223,12 @@ def test_direct_inbox_uses_kernel_validation_and_labels_free_text(store, typed, 
             if invalid:
                 content["interaction_id"] = "wrong-id"
         before = server.host.calls
-        direct = item("direct", "user", target_turn_id=TURN, generation=0, actor=principal("direct-user"))
+        direct = item("direct", "user", target_turn_id=TURN, generation=0, actor=None)
         server.server.kernel.push(
             THREAD,
-            replace(direct, payload={"content": content_ref(f"direct/{typed}/{invalid}")}),
+            replace(direct, payload={"content": content}),
         )
-        runtime = server.server.store.runtimes[THREAD]
+        runtime = server.server.kernel._build_runtime_for_claim(store, THREAD)
         drive(store, THREAD, runtime=runtime, _one_turn=True)
         receipt = store.read_state(THREAD)[0].applied_inputs["direct"]._payload
         assert receipt["disposition"] == ("rejected" if invalid else "applied")
@@ -410,9 +410,9 @@ def test_child_message_cannot_blindly_consume_a_user_wait(store):
     try:
         server.start()
         form = server.form()
-        manager = server.server.store.runtimes[THREAD].child_tasks(store, THREAD)
+        manager = server.server.kernel._build_runtime_for_claim(store, THREAD).child_tasks(store, THREAD)
         manager.message(form["sessionId"], "steering", "not a user answer")
-        child_runtime = server.server.store.runtimes[THREAD].child_runtime(store, form["sessionId"])
+        child_runtime = server.server.kernel._build_runtime_for_claim(store, form["sessionId"])
         before = server.host.calls
         drive(store, form["sessionId"], runtime=child_runtime, _one_turn=True)
         assert server.form() == form and server.host.calls == before
@@ -425,7 +425,6 @@ def test_historical_oversize_form_remains_parked_and_reports_explicit_error(stor
     from dataclasses import replace
 
     from vv_agent.session.records import SessionSpec
-    from vv_agent.session.sqlite import SQLiteStore
 
     first = InteractionServer(store)
     try:
@@ -433,7 +432,7 @@ def test_historical_oversize_form_remains_parked_and_reports_explicit_error(stor
         original = store.read_state(THREAD)[1]
         created = original[0].record.payload
         original_calls = first.host.calls
-        with SQLiteStore.standalone(str(tmp_path / "historical.sqlite")) as historical:
+        with open_store(tmp_path / "historical.sqlite") as historical:
             historical.install_schema()
             with historical.atomic() as tx:
                 tx.create(
@@ -669,12 +668,12 @@ def test_direct_typed_inbox_cannot_bypass_envelope_or_answer_validation(store, m
         else:
             kind = "follow_up"
         before = server.host.calls
-        bad = item("bad-direct", kind, target_turn_id=tid, generation=generation, actor=principal("bad-direct-user"))
+        bad = item("bad-direct", kind, target_turn_id=tid, generation=generation, actor=None)
         server.server.kernel.push(
             THREAD,
-            replace(bad, payload={"content": content_ref(f"bad-direct/{mutation}")}),
+            replace(bad, payload={"content": content}),
         )
-        drive(store, THREAD, runtime=server.server.store.runtimes[THREAD], _one_turn=True)
+        drive(store, THREAD, runtime=server.server.kernel._build_runtime_for_claim(store, THREAD), _one_turn=True)
         assert store.read_state(THREAD)[0].applied_inputs["bad-direct"].payload["disposition"] == "rejected"
         assert server.form() == form and server.host.calls == before
     finally:

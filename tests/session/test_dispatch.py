@@ -695,6 +695,19 @@ def test_schedule_read_is_fenced_and_uses_database_time(transport, clock, loss):
         store.next_drive_delay_ms("s", lease=lease)
 
 
+def test_schedule_read_includes_drive_retry_backoff(transport, clock):
+    transport.create()
+    store = transport.store
+    with store.atomic():
+        store._rows(
+            "UPDATE sk_session SET next_drive_ms=%s,drive_retry_at_ms=%s WHERE session_id='s'",
+            (1_000_000, 1_000_500),
+        )
+    assert store.next_drive_delay_ms("s") == 500
+    clock(500)
+    assert store.next_drive_delay_ms("s") == 0
+
+
 @pytest.mark.parametrize("surface", ["one_turn", "run_handle"])
 def test_queued_turn_has_no_poll_delay(transport, clock, surface):
     starts = []
@@ -732,18 +745,21 @@ def test_queued_turn_has_no_poll_delay(transport, clock, surface):
             handle.start()
             assert handle.result(timeout=10).final_output in {"first", "second"}
 
-    run("initial")
-    if surface == "run_handle":
-        next_handle = RunHandle(kernel, "s", "s/turn/next", None, None)
-        kernel.handles.append(next_handle)
-        assert next_handle.result(timeout=10).final_output == "second"
-    else:
-        assert starts == [1_000_000]
-        assert scheduled(transport.store) == 0
-        assert transport.store.is_runnable("s")
-        run("next")
-    assert starts == [1_000_000, 1_000_000]
-    assert len(records(transport.store, kind="turn_ended")) == 2
+    try:
+        run("initial")
+        if surface == "run_handle":
+            next_handle = RunHandle(kernel, "s", "s/turn/next", None, None)
+            kernel.handles.append(next_handle)
+            assert next_handle.result(timeout=10).final_output == "second"
+        else:
+            assert starts == [1_000_000]
+            assert scheduled(transport.store) == 0
+            assert transport.store.is_runnable("s")
+            run("next")
+        assert starts == [1_000_000, 1_000_000]
+        assert len(records(transport.store, kind="turn_ended")) == 2
+    finally:
+        kernel.close()
 
 
 @pytest.mark.parametrize("loss", ["expired", "replaced", "released"])
