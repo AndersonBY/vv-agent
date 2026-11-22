@@ -40,7 +40,7 @@ from .reducer import ExecutionState
 from .result import project_result
 from .runtime import static_model_selection_requirements, static_session_requirements, static_worker_supports
 from .store import Conflict
-from .surfaces import PrincipalInput, SessionDriver, _principal_payload
+from .surfaces import PrincipalInput, SessionDriver, _principal_payload, _read_snapshot
 from .timing import Clock, SystemClock
 
 
@@ -208,6 +208,7 @@ class _NotificationPosition:
     delay: float = 0.05
     warning_at: float = 0.0
     replay_approvals: bool = False
+    child_wait_pending: bool = False
 
 
 class _KernelThreadStore:
@@ -1054,15 +1055,20 @@ class _KernelRunAdapter(RunAdapter):
         previous = position.seq
         rows = store.read(sid, after_seq=previous, through_seq=through_seq, limit=256).records
         if not rows:
-            return False
+            return through_seq is None and self._publish_child_wait(sid, store, position)
         notifications: list[tuple[int, str, dict[str, Any]]] = []
         state, all_records, _ = store.read_state(sid)
         runtime = self._store._runtime_view(sid, store=store)
+        child_wait_pending = position.child_wait_pending
         for stored in rows:
             record = stored.record
             if record.kind == "turn_started":
                 self._ensure_turn_connection(sid, record.turn_id)
                 notifications.append((stored.seq, "turn/started", {"threadId": sid, "turnId": record.turn_id}))
+            elif record.kind == "op_parked" and (
+                (handle := record._payload["handle"])["kind"] == "child" and not handle["background"]
+            ):
+                child_wait_pending = True
             elif record.kind == "op_parked" and record._payload["handle"]["kind"] in {"approval", "user"}:
                 result = project_result(store, sid, record.turn_id, runtime=runtime, snapshot=(state, all_records, 0))
                 notifications.append(
@@ -1133,6 +1139,7 @@ class _KernelRunAdapter(RunAdapter):
                 and not (method == "approval/requested" and event.metadata["session_seq"] == skip_approval_requested_seq)
             )
         position.seq = max(position.seq, rows[-1].seq)
+        position.child_wait_pending = child_wait_pending
         rank = {"turn/started": 0, "turn/completed": 2}
         for _, method, params in sorted(notifications, key=lambda entry: (entry[0], rank.get(entry[1], 1))):
             self._notify_subscribers(sid, method, params)
@@ -1141,6 +1148,43 @@ class _KernelRunAdapter(RunAdapter):
         self._settle_turn_connections(sid, state, store)
         if state.active_turn_id is not None or self._has_pending_start_input(sid, store, state):
             self.kernel._worker.wake(sid)
+        if through_seq is None:
+            self._publish_child_wait(sid, store, position)
+        return True
+
+    def _publish_child_wait(self, sid: str, store, position: _NotificationPosition) -> bool:
+        if not position.child_wait_pending:
+            return False
+        with _read_snapshot(store):
+            snapshot = store.read_state(sid)
+            state, records, _ = snapshot
+            turn_id = state.active_turn_id
+            if turn_id is None or not any(
+                state.operations[operation_id].turn_id == turn_id
+                and (handle := wait["handle"])["kind"] == "child"
+                and not handle["background"]
+                for (operation_id, _), wait in state.waits.items()
+            ):
+                position.child_wait_pending = False
+                return False
+            if position.seq < records[-1].seq or state.phase != "parked":
+                return False
+            # The child can reach its own wait without advancing the parent cursor.
+            _, quiescent, error = self.kernel._snapshot_status(store, sid, state, turn_id, captured_head=position.seq)
+            if error is not None or not quiescent:
+                return False
+            status = thread_status(self.kernel, sid, snapshot=snapshot, clock=self.clock, store=store)
+            if status["waitKind"] != "child" or status["pendingInteraction"] is None:
+                return False
+            runtime = self._store._runtime_view(sid, store=store)
+            result = project_result(store, sid, turn_id, runtime=runtime, snapshot=snapshot)
+        position.child_wait_pending = False
+        self._notify_subscribers(sid, "thread/status/changed", status)
+        self._notify_subscribers(
+            sid,
+            "turn/completed",
+            {"threadId": sid, "turnId": turn_id, "status": "interrupted", **_result_fields(result)},
+        )
         return True
 
     def _has_pending_start_input(self, thread_id: str, store, state) -> bool:

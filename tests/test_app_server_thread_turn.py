@@ -4,7 +4,7 @@ import threading
 from typing import Any, cast
 
 import pytest
-from support import FixedModelProvider
+from support import FixedModelProvider, ModelMapProvider
 from support.interactions import target_of, text_action
 
 from vv_agent import Agent, InteractionAnswer, RunConfig
@@ -14,6 +14,7 @@ from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.kernel._content import ContentRef
 from vv_agent.llm import LlmRequest, ScriptedLLM
 from vv_agent.llm.scripted import ScriptStep
+from vv_agent.session.app_server import _NotificationPosition
 from vv_agent.session.projection import hydrate_input, hydrate_record_payload, hydration_for_session_store
 from vv_agent.session.records import InboxItem
 from vv_agent.types import LLMResponse, ToolCall
@@ -504,9 +505,12 @@ def _drain_until_turn_completed(transport: ChannelTransport, *, count: int = 1) 
 
 
 @pytest.mark.capability("app-server-turns")
-def test_child_wait_user_is_exposed_and_reply_targets_child(surface):
+@pytest.mark.parametrize("background", [False, True], ids=["foreground", "background"])
+def test_child_wait_user_is_exposed_and_reply_targets_child(surface, monkeypatch, background):
     from vv_agent import function_tool
     from vv_agent.types import SubAgentConfig, ToolDirective, ToolExecutionResult
+
+    surface._ensure_static_worker_support(level=2, capabilities=())
 
     @function_tool
     def wait_child() -> ToolExecutionResult:
@@ -514,13 +518,24 @@ def test_child_wait_user_is_exposed_and_reply_targets_child(surface):
             "", "child needs answer", directive=ToolDirective.WAIT_USER, metadata={"question": "child needs answer"}
         )
 
-    llm = ScriptedLLM(
+    parent_llm = ScriptedLLM(
         [
-            LLMResponse("", [ToolCall("child", "create_sub_task", {"agent_id": "worker", "task_description": "work"})]),
-            LLMResponse("", [ToolCall("ask", "wait_child", {})]),
-            LLMResponse("child done"),
+            LLMResponse(
+                "",
+                [
+                    ToolCall(
+                        "child",
+                        "create_sub_task",
+                        {"agent_id": "worker", "task_description": "work", "wait_for_completion": not background},
+                    )
+                ],
+            ),
             LLMResponse("parent done"),
         ]
+    )
+    child_llm = ScriptedLLM([LLMResponse("", [ToolCall("ask", "wait_child", {})]), LLMResponse("child done")])
+    provider = ModelMapProvider(
+        {"parent": (parent_llm, _resolved_model("parent")), "child": (child_llm, _resolved_model("child"))}, "parent"
     )
     transport = ChannelTransport(connection_id="conn_1")
     server = AppServer(
@@ -529,11 +544,11 @@ def test_child_wait_user_is_exposed_and_reply_targets_child(surface):
             agent=Agent(
                 "assistant",
                 "Delegate.",
-                model="test-model",
+                model="parent",
                 tools=[wait_child],
-                sub_agents={"worker": SubAgentConfig(model="test-model", description="Work.")},
+                sub_agents={"worker": SubAgentConfig(model="child", description="Work.")},
             ),
-            run_config=RunConfig(model_provider=FixedModelProvider(llm, _resolved_model()), max_cycles=3),
+            run_config=RunConfig(model_provider=provider, max_cycles=3),
         ),
     )
     _send(transport, server, {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"clientInfo": {"name": "test"}}})
@@ -554,13 +569,21 @@ def test_child_wait_user_is_exposed_and_reply_targets_child(surface):
         },
     )
     first = _drain_until_turn_completed(transport)
+    if background:
+        terminal = cast(dict[str, Any], first[-1]["params"])
+        assert terminal["status"] == "completed" and terminal["finalOutput"] == "parent done"
+        rows = surface.store.read_state("thread_1")[1]
+        assert any(row.record.kind == "op_parked" and row.record.payload["handle"].get("background") is True for row in rows)
+        return
     cast(Any, server.run_adapter).join()
-    interrupted = next(
-        m
-        for m in first
-        if m.get("method") == "thread/status/changed" and cast(dict[str, Any], m["params"])["status"] == "child_running"
-    )
-    wait = cast(dict[str, Any], interrupted["params"])["pendingInteraction"]
+    assert [message.get("method") for message in first[-2:]] == ["thread/status/changed", "turn/completed"]
+    status = cast(dict[str, Any], first[-2]["params"])
+    assert status["status"] == "child_running"
+    interruption = cast(dict[str, Any], first[-1]["params"])
+    assert interruption["status"] == "interrupted"
+    assert interruption["completionReason"] == "wait_user"
+    assert interruption["waitReason"] == interruption["finalOutput"] == "child_pending"
+    wait = status["pendingInteraction"]
     assert wait["prompt"] == "child needs answer" and wait["sessionId"] != "thread_1"
     assert wait["kind"] == "user" and wait["answerSpec"]["kind"] == "text"
     parent = surface.store.read_state("thread_1")[0]
@@ -583,7 +606,9 @@ def test_child_wait_user_is_exposed_and_reply_targets_child(surface):
         },
     )
     final = _drain_until_turn_completed(transport)[-1]
-    assert cast(dict[str, Any], final["params"])["finalOutput"] == "parent done"
+    completed = cast(dict[str, Any], final["params"])
+    assert completed["turnId"] == interruption["turnId"] == parent_tid
+    assert completed["status"] == "completed" and completed["finalOutput"] == "parent done"
     cast(Any, server.run_adapter).join()
     from vv_agent.interaction import derive_controller_command_id
 
@@ -592,26 +617,32 @@ def test_child_wait_user_is_exposed_and_reply_targets_child(surface):
     applied = child_state.applied_inputs[input_id]
     stored_item = InboxItem(**applied._payload["input"])
     assert ContentRef.from_dict(stored_item.payload["content"]).content_id
-    hydrated = hydrate_input(stored_item, hydration_for_session_store(surface.store, wait["sessionId"]))
+    hydrated = hydrate_input(
+        stored_item,
+        hydration_for_session_store(surface.store, wait["sessionId"]),
+        include_actor_attributes=True,
+    )
     assert hydrated.payload["content"]["text"] == "approved child answer"
     assert input_id not in surface.store.read_state("thread_1")[0].applied_inputs
-    receipt = surface.answer(
+    receipt = server.kernel.answer(
         "thread_1",
         server.kernel._runtime_view("thread_1"),
         target_of(wait),
         InteractionAnswer("text", text="approved child answer"),
         input_id,
+        actor=hydrated.actor,
     )
     assert receipt.replayed
     from vv_agent.session.store import Conflict
 
     with pytest.raises(Conflict):
-        surface.answer(
+        server.kernel.answer(
             "thread_1",
             server.kernel._runtime_view("thread_1"),
             target_of(wait),
             InteractionAnswer("text", text="different answer"),
             input_id,
+            actor=hydrated.actor,
         )
     retained_head = surface.store.read_state("thread_1")[1][-1].seq
     retained_handles = len(surface.handles)
@@ -632,7 +663,26 @@ def test_child_wait_user_is_exposed_and_reply_targets_child(surface):
             connection_id="conn_1", thread_id="thread_1", turn_id=parent_tid, action_id="reply-child", action={"kind": "cancel"}
         )
     assert surface.store.read_state("thread_1")[1][-1].seq == retained_head and len(surface.handles) == retained_handles
-    assert not llm.steps
+    # A delayed observer sees the committed child park and the terminal in one page.
+    # It must deliver a single terminal result, even though the page contains a park.
+    start_seq = next(row.seq for row in surface.store.read_state("thread_1")[1] if row.record.kind == "turn_started")
+    late_notices = []
+    replay_verified = []
+
+    def drain_delayed_observer(store):
+        with monkeypatch.context() as patch:
+            patch.setattr(adapter, "_notify_subscribers", lambda _sid, method, params: late_notices.append((method, params)))
+            patch.setattr(adapter, "_notification_positions", {"thread_1": _NotificationPosition(start_seq - 1)})
+            replay_verified.extend(
+                (adapter._publish_turns("thread_1", store=store), adapter._publish_turns("thread_1", store=store))
+            )
+
+    worker = server.kernel._worker
+    worker.post_observation(drain_delayed_observer)
+    worker.wait_idle(timeout=5)
+    assert replay_verified == [True, False]
+    assert [params["status"] for method, params in late_notices if method == "turn/completed"] == ["completed"]
+    assert not parent_llm.steps and not child_llm.steps
 
 
 def _active_turn_id(server):
