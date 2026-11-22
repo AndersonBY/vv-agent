@@ -13,13 +13,22 @@ from dataclasses import astuple, dataclass
 from pathlib import Path
 from typing import Literal
 
-from ._content import ContentCleanupUnavailable, ContentUnavailable
+from ._content import (
+    _EXACT_KEY_ID_PREFIX,
+    ContentCleanupUnavailable,
+    ContentUnavailable,
+    KeyDestroyOutcome,
+    KeyDestroyStatus,
+    _ExactKeyIntent,
+)
 
-_VERSION = 1
+_VERSION = 2
 _OWNER_COLUMNS = """
     tenant_id, session_id, content_id, admission_session_id, admission_id, provider_instance_id, key_id
 """
 _ALLOCATION_COLUMNS = f"allocation_id,state,pin_until_ms,reservation_etag,{_OWNER_COLUMNS}"
+_KEY_OWNER_COLUMNS = "key_id,provider_instance_id,tenant_id,session_id,admission_root_id,admission_id"
+_KEY_INTENT_COLUMNS = f"{_KEY_OWNER_COLUMNS},state,pin_until_ms,evidence_id"
 _NOW_MS = "(CAST(strftime('%s','now') AS INTEGER)*1000 + CAST(substr(strftime('%f','now'),4) AS INTEGER))"
 _SCHEMA = (
     """CREATE TABLE journal_identity (
@@ -53,6 +62,27 @@ _SCHEMA = (
     "CREATE INDEX allocation_expiry ON allocation(pin_until_ms, allocation_id) WHERE tenant_id IS NULL",
     "CREATE INDEX allocation_owner ON allocation(tenant_id, session_id)",
     "CREATE INDEX allocation_admission ON allocation(tenant_id, admission_session_id)",
+    "CREATE INDEX allocation_key ON allocation(provider_instance_id, key_id) WHERE key_id IS NOT NULL",
+    """CREATE TABLE key_intent (
+        key_id TEXT NOT NULL CHECK (
+            substr(key_id,1,13) = 's1-exact-key-' AND length(key_id) = 77
+            AND substr(key_id,14) NOT GLOB '*[^0-9a-f]*'
+        ),
+        provider_instance_id TEXT NOT NULL CHECK (length(provider_instance_id) > 0),
+        tenant_id TEXT NOT NULL CHECK (length(tenant_id) > 0),
+        session_id TEXT NOT NULL CHECK (length(session_id) > 0),
+        admission_root_id TEXT NOT NULL CHECK (length(admission_root_id) > 0),
+        admission_id TEXT NOT NULL CHECK (length(admission_id) > 0),
+        state TEXT NOT NULL CHECK (state IN ('reserved','allocating','reaping','retired')),
+        pin_until_ms INTEGER NOT NULL CHECK (pin_until_ms > 0),
+        evidence_id TEXT CHECK (length(evidence_id) > 0),
+        PRIMARY KEY (provider_instance_id, key_id),
+        CHECK ((state = 'retired') = (evidence_id IS NOT NULL))
+    ) STRICT""",
+    "CREATE UNIQUE INDEX key_intent_admission ON key_intent(tenant_id, session_id, admission_root_id, admission_id) "
+    "WHERE state <> 'retired'",
+    "CREATE INDEX key_intent_owner ON key_intent(tenant_id, session_id)",
+    "CREATE INDEX key_intent_admission_root ON key_intent(tenant_id, admission_root_id)",
 )
 _EXPECTED_SCHEMA = frozenset(_SCHEMA)
 
@@ -91,6 +121,15 @@ class Allocation:
     reservation_etag: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class KeyIntent:
+    journal_id: str
+    intent: _ExactKeyIntent
+    state: Literal["reserved", "allocating", "reaping", "retired"]
+    pin_until_ms: int
+    evidence_id: str | None = None
+
+
 def _require_text(*values: str) -> None:
     if any(not isinstance(value, str) or not value for value in values):
         raise ValueError("journal identifiers and ETags must be non-empty text")
@@ -99,6 +138,11 @@ def _require_text(*values: str) -> None:
 def _require_id(allocation_id: bytes) -> None:
     if not isinstance(allocation_id, bytes) or len(allocation_id) != 32:
         raise ValueError("allocation ID must be 32 bytes")
+
+
+def _require_pin(pin_until_ms: int) -> None:
+    if type(pin_until_ms) is not int or not 0 < pin_until_ms < 2**63:
+        raise ValueError("allocation pin must be a positive SQLite millisecond timestamp")
 
 
 def _check_owner_only(path: Path, *, directory: bool = False) -> None:
@@ -189,8 +233,7 @@ class SQLiteAllocationJournal:
     def reserve(self, allocation_id: bytes, *, pin_until_ms: int) -> bool:
         """Commit a newly generated random ID before dispatching its first PUT."""
         _require_id(allocation_id)
-        if type(pin_until_ms) is not int or not 0 < pin_until_ms < 2**63:
-            raise ValueError("allocation pin must be a positive SQLite millisecond timestamp")
+        _require_pin(pin_until_ms)
         with self._transaction(write=True) as connection:
             return (
                 connection.execute(
@@ -206,6 +249,14 @@ class SQLiteAllocationJournal:
         _require_id(allocation_id)
         _require_text(reservation_etag)
         with self._transaction(write=True) as connection:
+            if owner.key_id.startswith(_EXACT_KEY_ID_PREFIX):
+                key = self._get_key_intent(connection, owner.provider_instance_id, owner.key_id)
+                if (
+                    key is None
+                    or key.state != "allocating"
+                    or (key.intent.tenant_id, key.intent.session_id) != (owner.tenant_id, owner.session_id)
+                ):
+                    return False
             return (
                 connection.execute(
                     f"UPDATE allocation SET state='bound', ({_OWNER_COLUMNS},reservation_etag)=(?,?,?,?,?,?,?,?) "
@@ -278,3 +329,134 @@ class SQLiteAllocationJournal:
                 return False
             connection.execute("DELETE FROM allocation WHERE allocation_id=?", (claim.allocation_id,))
             return True
+
+    def _key_intent(self, row: tuple) -> KeyIntent:
+        *binding, state, pin_until_ms, evidence_id = row
+        return KeyIntent(self._identity.journal_id, _ExactKeyIntent(*binding), state, pin_until_ms, evidence_id)
+
+    def _get_key_intent(self, connection: sqlite3.Connection, provider_instance_id: str, key_id: str) -> KeyIntent | None:
+        row = connection.execute(
+            f"SELECT {_KEY_INTENT_COLUMNS} FROM key_intent WHERE provider_instance_id=? AND key_id=?",
+            (provider_instance_id, key_id),
+        ).fetchone()
+        return self._key_intent(row) if row is not None else None
+
+    def get_key_intent(self, provider_instance_id: str, key_id: str) -> KeyIntent | None:
+        _require_text(provider_instance_id, key_id)
+        with self._transaction() as connection:
+            return self._get_key_intent(connection, provider_instance_id, key_id)
+
+    def reserve_key_intent(self, intent: _ExactKeyIntent, *, pin_until_ms: int) -> KeyIntent | None:
+        """Commit a fresh exact key ID and its scope while holding the primary fence."""
+        _require_pin(pin_until_ms)
+        with self._transaction(write=True) as connection:
+            row = connection.execute(
+                f"INSERT INTO key_intent({_KEY_OWNER_COLUMNS},state,pin_until_ms) "
+                f"SELECT ?,?,?,?,?,?,'reserved',? WHERE ?>{_NOW_MS} "
+                f"ON CONFLICT DO NOTHING RETURNING {_KEY_INTENT_COLUMNS}",
+                (*astuple(intent), pin_until_ms, pin_until_ms),
+            ).fetchone()
+            return self._key_intent(row) if row is not None else None
+
+    def key_intents_for_admission(
+        self, tenant_id: str, session_id: str, admission_root_id: str, admission_id: str
+    ) -> tuple[KeyIntent, ...]:
+        _require_text(tenant_id, session_id, admission_root_id, admission_id)
+        with self._transaction() as connection:
+            rows = connection.execute(
+                f"SELECT {_KEY_INTENT_COLUMNS} FROM key_intent "
+                "WHERE tenant_id=? AND session_id=? AND admission_root_id=? AND admission_id=? "
+                "ORDER BY provider_instance_id,key_id",
+                (tenant_id, session_id, admission_root_id, admission_id),
+            )
+            return tuple(self._key_intent(row) for row in rows)
+
+    def scoped_key_intents(self, tenant_id: str, session_ids: tuple[str, ...]) -> tuple[KeyIntent, ...]:
+        _require_text(tenant_id, *session_ids)
+        with self._transaction() as connection:
+            rows = connection.execute(
+                f"SELECT {_KEY_INTENT_COLUMNS} FROM key_intent "
+                "WHERE tenant_id=?1 AND (session_id IN (SELECT value FROM json_each(?2)) OR "
+                "admission_root_id IN (SELECT value FROM json_each(?2))) ORDER BY provider_instance_id,key_id",
+                (tenant_id, json.dumps(session_ids)),
+            )
+            return tuple(self._key_intent(row) for row in rows)
+
+    def claim_key_allocation(self, expected: KeyIntent) -> KeyIntent | None:
+        """Grant a single acknowledged dispatch. A read of allocating cannot authorize retry."""
+        if expected.journal_id != self._identity.journal_id or expected.state != "reserved":
+            return None
+        intent = expected.intent
+        with self._transaction(write=True) as connection:
+            if self._get_key_intent(connection, intent.provider_instance_id, intent.key_id) != expected:
+                return None
+            row = connection.execute(
+                f"UPDATE key_intent SET state='allocating' WHERE provider_instance_id=? AND key_id=? "
+                f"AND pin_until_ms>{_NOW_MS} RETURNING {_KEY_INTENT_COLUMNS}",
+                (intent.provider_instance_id, intent.key_id),
+            ).fetchone()
+            return self._key_intent(row) if row is not None else None
+
+    def claim_key_intent(self, expected: KeyIntent, *, require_expired_pin: bool = True) -> KeyIntent | None:
+        """Claim under the primary fence after verifying exact SQL disposition.
+
+        A committed erasure fence may bypass the orphan pin check. The journal
+        cannot establish scope authority or prove absence from primary SQL.
+        """
+        if expected.journal_id != self._identity.journal_id or expected.state == "retired":
+            return None
+        intent = expected.intent
+        with self._transaction(write=True) as connection:
+            if self._get_key_intent(connection, intent.provider_instance_id, intent.key_id) != expected:
+                return None
+            if expected.state == "reaping":
+                return expected
+            row = connection.execute(
+                f"UPDATE key_intent SET state='reaping' WHERE provider_instance_id=? AND key_id=? "
+                f"AND (NOT ? OR pin_until_ms<={_NOW_MS}) RETURNING {_KEY_INTENT_COLUMNS}",
+                (intent.provider_instance_id, intent.key_id, require_expired_pin),
+            ).fetchone()
+            return self._key_intent(row) if row is not None else None
+
+    def record_key_retirement(self, claim: KeyIntent, outcome: KeyDestroyOutcome) -> KeyIntent | None:
+        """Record terminal provider evidence obtained for this exact claim."""
+        if outcome.status not in {KeyDestroyStatus.DESTROYED, KeyDestroyStatus.ALREADY_DESTROYED} or not outcome.evidence_id:
+            raise ContentCleanupUnavailable("exact key retirement has no terminal provider evidence")
+        if claim.journal_id != self._identity.journal_id or claim.state != "reaping":
+            return None
+        intent = claim.intent
+        with self._transaction(write=True) as connection:
+            current = self._get_key_intent(connection, intent.provider_instance_id, intent.key_id)
+            if current is not None and current.state == "retired":
+                if (
+                    current.intent == intent
+                    and current.pin_until_ms == claim.pin_until_ms
+                    and current.evidence_id == outcome.evidence_id
+                ):
+                    return current
+                return None
+            if current != claim:
+                return None
+            row = connection.execute(
+                f"UPDATE key_intent SET state='retired',evidence_id=? WHERE provider_instance_id=? AND key_id=? "
+                f"RETURNING {_KEY_INTENT_COLUMNS}",
+                (outcome.evidence_id, intent.provider_instance_id, intent.key_id),
+            ).fetchone()
+            return self._key_intent(row) if row is not None else None
+
+    def finish_key_intent(self, retired: KeyIntent) -> bool:
+        """Release scope metadata only after the exact key and all its objects are gone."""
+        if retired.journal_id != self._identity.journal_id or retired.state != "retired":
+            return False
+        intent = retired.intent
+        with self._transaction(write=True) as connection:
+            if self._get_key_intent(connection, intent.provider_instance_id, intent.key_id) != retired:
+                return False
+            return (
+                connection.execute(
+                    "DELETE FROM key_intent WHERE provider_instance_id=?1 AND key_id=?2 "
+                    "AND NOT EXISTS (SELECT 1 FROM allocation WHERE provider_instance_id=?1 AND key_id=?2)",
+                    (intent.provider_instance_id, intent.key_id),
+                ).rowcount
+                == 1
+            )
