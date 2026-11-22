@@ -2961,13 +2961,16 @@ class SQLSessionTx:
         self._lease_guard: Callable[[], Lease] | None = None
         self._check_persistence_deadline: Callable[[], None] | None = None
         self._check_external_deadline: Callable[[], None] | None = None
+        self._freeze_persistence_deadline: Callable[[], None] | None = None
         self._pending_lease_fence: tuple[str, Lease] | None = None
 
     def bind_lease_guard(self, guard: Callable[[], Lease]) -> None:
         self._lease_guard = guard
 
-    def _bind_persistence_deadline(self, check_deadline: Callable[[], None]) -> None:
+    def _bind_persistence_deadline(self, check_deadline: Callable[[], None], freeze_deadline: Callable[[], None]) -> bool:
         self._check_persistence_deadline = check_deadline
+        self._freeze_persistence_deadline = freeze_deadline
+        return bool(self.store.lock_clause)
 
     def _bind_external_deadline(self, check_deadline: Callable[[], None]) -> None:
         if self._check_external_deadline is None:
@@ -3131,6 +3134,8 @@ class SQLSessionTx:
 
     def lock_session(self, session_id: str) -> None:
         self._active()
+        if self._freeze_persistence_deadline is not None:
+            self._freeze_persistence_deadline()
         self.store._require_live_row(self.store._lock(session_id))
 
     def preflight_create(self, session_id: str) -> bool:
@@ -3170,6 +3175,8 @@ class SQLSessionTx:
             s._require_create_isolation()
             ceiling = s._write_ceiling()
             if spec.parent_session_id is not None:
+                if self._freeze_persistence_deadline is not None:
+                    self._freeze_persistence_deadline()
                 parent = s._rows(
                     f"SELECT deletion_state FROM sk_session WHERE tenant_id=%s AND session_id=%s{s.lock_clause}",
                     (tenant_id, spec.parent_session_id),
@@ -3279,6 +3286,8 @@ class SQLSessionTx:
             raise InputAdmissionProofError("signed input admission signer is unavailable")
         with s._transaction():
             ceiling = s._write_ceiling()
+            if self._freeze_persistence_deadline is not None:
+                self._freeze_persistence_deadline()
             row = s._lock(session_id)
             s._require_live_row(row)
             old = s._rows(

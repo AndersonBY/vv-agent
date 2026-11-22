@@ -847,8 +847,8 @@ class _ContentSessionTxAdapter:
     def bind_lease_guard(self, guard: Callable[[], Lease]) -> None:
         self._tx.bind_lease_guard(guard)
 
-    def _bind_persistence_deadline(self, check_deadline: Callable[[], None]) -> None:
-        self._tx._bind_persistence_deadline(check_deadline)
+    def _bind_persistence_deadline(self, check_deadline: Callable[[], None], freeze_deadline: Callable[[], None]) -> bool:
+        return self._tx._bind_persistence_deadline(check_deadline, freeze_deadline)
 
     def create(self, spec: SessionSpec, *, consumers: tuple[str, ...]) -> CreateReceipt:
         return self._tx.create(spec, consumers=consumers)
