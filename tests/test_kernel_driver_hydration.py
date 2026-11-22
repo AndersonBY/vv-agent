@@ -19,6 +19,7 @@ from vv_agent.kernel._message_values import Message
 from vv_agent.kernel._prompt_values import PromptBundle, PromptSection
 from vv_agent.kernel._record_codec import RecordError
 from vv_agent.kernel._records import Record, record_identity
+from vv_agent.kernel._state import Attempt
 from vv_agent.kernel._store import StoredRecord
 from vv_agent.session.kernel import _Driver
 
@@ -313,7 +314,7 @@ def test_plan_uses_prepared_record_as_owner_for_every_prepared_slot() -> None:
             },
         },
     )
-    attempt = SimpleNamespace(plan=plan.record, prepared=prepared.record)
+    attempt = Attempt(plan=plan.record, prepared=prepared.record)
     state = SimpleNamespace(operations={"o": SimpleNamespace(attempts={1: attempt})})
     driver, reader = _driver((plan, prepared), state)
     session_driver = object.__new__(_Driver)
@@ -321,6 +322,7 @@ def test_plan_uses_prepared_record_as_owner_for_every_prepared_slot() -> None:
     session_driver.store = driver.store
     session_driver.content_reader = driver.content_reader
     session_driver._hydrators = driver._hydrators
+    session_driver._logical_scope_depth = 0
     session_driver.records = driver.records
     session_driver._stored_by_id = driver._stored_by_id
     session_driver.state = driver.state
@@ -388,7 +390,7 @@ def test_prepared_overlay_rejects_canonical_plan_owner_for_logical_ref() -> None
             "policy_decision": None,
         },
     )
-    attempt = SimpleNamespace(plan=plan.record, prepared=prepared.record)
+    attempt = Attempt(plan=plan.record, prepared=prepared.record)
     state = SimpleNamespace(operations={"o": SimpleNamespace(attempts={1: attempt})})
     driver, reader = _driver((plan, prepared), state)
     session_driver = object.__new__(_Driver)
@@ -473,7 +475,7 @@ def test_canonical_plan_hydrates_prepared_hook_nested_children_overlay() -> None
             "policy_decision": None,
         },
     )
-    attempt = SimpleNamespace(plan=plan.record, prepared=prepared.record)
+    attempt = Attempt(plan=plan.record, prepared=prepared.record)
     state = SimpleNamespace(operations={"o": SimpleNamespace(attempts={1: attempt})})
     driver, reader = _driver((plan, prepared), state)
     for owner, slot, ref, value in (

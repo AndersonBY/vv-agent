@@ -1433,7 +1433,11 @@ class Author:
         d = self.outputs["configured_sub_agent.json"]
         parent = "children"
         _, rows, _ = self.f.kernel.store.read_state(parent)
-        admitted = [r.record for r in rows if r.record.kind == "op_parked" and r.record.payload["handle"]["kind"] == "child"]
+        admitted_rows = [
+            row for row in rows if row.record.kind == "op_parked" and row.record.payload["handle"]["kind"] == "child"
+        ]
+        admitted = [row.record for row in admitted_rows]
+        parent_hydration = hydration_for_session_store(self.f.kernel.store, parent)
         child_sid = admitted[0].payload["handle"]["session_id"]
         child_state, child_rows, _ = self.f.kernel.store.read_state(child_sid)
         child_turn = next(iter(child_state.turns.values())).start
@@ -1457,9 +1461,7 @@ class Author:
         d["continuation"] = {"same_turn_reply": True, "terminal_only_parent_adoption": True, "full_history_from_records": True}
         d["lifecycle"] = {
             "event_sequence": [
-                e.type
-                for e in project_records(rows, hydration=hydration_for_session_store(self.f.kernel.store, parent))
-                if e.type.startswith("sub_run_")
+                e.type for e in project_records(rows, hydration=parent_hydration) if e.type.startswith("sub_run_")
             ],
             "parent_owned": True,
         }
@@ -1469,7 +1471,12 @@ class Author:
             "terminal_delivery": "authenticated_inbox_and_cursor_transaction",
         }
         d["producer_cases"] = [
-            {"name": "configured_children", "admission": r.payload, "record_id": r.record_id} for r in admitted
+            {
+                "name": "configured_children",
+                "admission": hydrate_record_payload(row, parent_hydration),
+                "record_id": row.record.record_id,
+            }
+            for row in admitted_rows
         ]
         public = self.outputs["public_configured_sub_agent.json"]
         normalization = public["normalization"]
@@ -1557,9 +1564,9 @@ class Author:
         }
         manager["admission"] = admitted[0].payload["handle"]
         manager["terminal_results"] = [
-            r.record.payload["input"]["payload"]
-            for r in rows
-            if r.record.kind == "input_applied" and r.record.payload["input"]["kind"] == "child_result"
+            hydrate_record_payload(row, parent_hydration)["input"]["payload"]
+            for row in rows
+            if row.record.kind == "input_applied" and row.record.payload["input"]["kind"] == "child_result"
         ]
         handoff = self.outputs["handoff_contract.json"]
         handoff_rows = self.f.kernel.store.read_state("handoff")[1]
@@ -1628,11 +1635,14 @@ class Author:
                 {"name": case["name"], "definition": definition, "definition_digest": sha256(raw).hexdigest(), **self.facts(raw)}
             )
         for sid in ("tools", "multimodal", "bindings", "handoff", "children"):
-            state, _, _ = self.f.kernel.store.read_state(sid)
+            store = self.f.kernel.store
+            state, stored, _ = store.read_state(sid)
             turn = next(iter(state.turns.values())).start
-            definition = turn.payload["definition"]
+            start = next(row for row in stored if row.record.record_id == turn.record_id)
+            definition = hydrate_record_payload(start, hydration_for_session_store(store, sid))["definition"]
             raw = self.independent([definition])[0]
-            assert sha256(raw).hexdigest() == turn.payload["definition_digest"]
+            retained = self.independent([turn.payload["definition"]])[0]
+            assert sha256(retained).hexdigest() == turn.payload["definition_digest"]
             rows.append(
                 {
                     "name": "kernel_" + sid,
