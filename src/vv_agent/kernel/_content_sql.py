@@ -55,6 +55,10 @@ _COMMAND_POLICY_FIELDS = frozenset({"network_policy_digest", "isolation_policy_d
 ObjectLocatorCleaner = Callable[[str, str, bytes], None]
 
 
+class _SessionKeyMissing(ContentUnavailable):
+    """An authoritative SQL lookup found no session key row."""
+
+
 @dataclass(slots=True)
 class _ContentWriteMemo:
     """Secrets and immutable content identities retained only by one SQL transaction."""
@@ -707,7 +711,7 @@ class CoreSQLContentStore:
     def _session_key(self, tenant_id: str, session_id: str, *, for_update: bool = False) -> SessionKeyRecord:
         row = self._key_row(tenant_id, session_id, for_update=for_update)
         if row is None:
-            raise ContentUnavailable("content session is unavailable")
+            raise _SessionKeyMissing("content session is unavailable")
         return _key_from_row(tenant_id, session_id, row)
 
     def _active_session_key(self, tenant_id: str, session_id: str, *, for_update: bool = False) -> SessionKeyRecord:
@@ -796,7 +800,7 @@ class CoreSQLContentStore:
     def _ensure_write_session_key(self, tenant_id: str, session_id: str) -> SessionKeyRecord:
         try:
             return self._write_session_key(tenant_id, session_id)
-        except ContentUnavailable:
+        except _SessionKeyMissing:
             pass
 
         if self._object_content is None:

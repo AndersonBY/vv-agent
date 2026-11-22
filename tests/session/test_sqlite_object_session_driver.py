@@ -234,6 +234,58 @@ def test_sqlite_session_driver_object_round_trip(tmp_path: Path) -> None:
                 durable_content_store(driver.store).get("default", "objects", workspace)
 
 
+@pytest.mark.parametrize("dependency", ["journal", "provider"])
+def test_existing_object_key_outage_preserves_unapplied_input(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dependency: str
+) -> None:
+    with (
+        SQLiteStore.standalone(str(tmp_path / "primary.sqlite")) as raw,
+        closing(LocalKeyProvider(b"x" * 32, state_path=tmp_path / "keys.sqlite")) as provider,
+    ):
+        raw.configure_input_admission(allow_unsigned=True)
+        journal = _provision_journal(raw, tmp_path / "allocation.sqlite")
+        client = S3Fixture(journal)
+        objects = S3CiphertextStore(client, bucket="fixture", journal=journal)
+        external = _SQLiteObjectContent(journal, objects, provider._provision_exact_key_lifecycle())
+        _provision_sqlite_object_content(raw, key_provider=provider, objects=external)
+        bind_content_runtime(raw, key_provider=provider, cipher=AESGCMCipher(), _object_content=external)
+
+        with closing(SessionDriver(store=raw)) as driver:
+            driver.create("objects", "/external")
+            item = InboxItem("input", "user", {"content": "retry this input"})
+            tables = ("sk_session", "sk_session_key", "sk_inbox", "sk_content", "sk_content_link")
+            before = {table: raw._rows(f"SELECT * FROM {table}") for table in tables}
+            intents = journal.scoped_key_intents("default", ("objects",))
+            allocations = journal.scoped_allocations("default", ("objects",))
+            writes = len(client.calls)
+            outage = ContentUnavailable(f"{dependency} key lookup failed")
+
+            def unavailable(*_args: Any) -> None:
+                raise outage
+
+            def unexpected_allocate(*_args: Any, **_kwargs: Any) -> None:
+                pytest.fail("an existing SQL key reached replacement allocation")
+
+            with monkeypatch.context() as patch:
+                if dependency == "journal":
+                    patch.setattr(journal, "get_key_intent", unavailable)
+                else:
+                    patch.setattr(provider, "restore_data_key", unavailable)
+                patch.setattr(_SQLiteObjectContent, "allocate", unexpected_allocate)
+                with pytest.raises(ContentUnavailable) as error:
+                    driver.push("objects", item)
+                assert error.value is outage
+
+            assert {table: raw._rows(f"SELECT * FROM {table}") for table in tables} == before
+            assert journal.scoped_key_intents("default", ("objects",)) == intents
+            assert journal.scoped_allocations("default", ("objects",)) == allocations
+            assert len(client.calls) == writes
+
+            assert not driver.push("objects", item).replayed
+            assert driver.push("objects", item).replayed
+            assert raw._rows("SELECT * FROM sk_session_key") == before["sk_session_key"]
+
+
 @pytest.mark.parametrize("operation", ["forget", "purge"])
 @pytest.mark.parametrize("cut", ["provider", "delete", "object_ack", "sql_commit", "journal"])
 def test_external_root_erasure_resumes_after_restart(
