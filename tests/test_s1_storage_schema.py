@@ -510,7 +510,9 @@ def test_postgres_installs_complete_s1_schema(postgres_database):
             )
         }
         assert tables == TABLES
-        assert connection.execute("SELECT * FROM sk_settings").fetchall() == [(1, "S1", 1)]
+        assert connection.execute("SELECT singleton,storage_major,write_level FROM sk_settings").fetchall() == [(1, "S1", 1)]
+        database_id, object_binding = connection.execute("SELECT database_id,object_journal_binding FROM sk_settings").fetchone()
+        assert len(database_id) == 64 and object_binding is None
         columns = {
             row[0]: {
                 item[0]
@@ -523,7 +525,10 @@ def test_postgres_installs_complete_s1_schema(postgres_database):
                 "SELECT tablename FROM pg_tables WHERE schemaname=current_schema() AND tablename=ANY(%s)", (list(TABLES),)
             )
         }
-        assert columns == EXPECTED_COLUMNS
+        assert columns == {
+            **EXPECTED_COLUMNS,
+            "sk_settings": EXPECTED_COLUMNS["sk_settings"] | {"database_id", "object_journal_binding"},
+        }
 
         for table in SESSION_TABLES:
             assert connection.execute(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import secrets
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager, suppress
 from dataclasses import dataclass
@@ -11,7 +12,8 @@ from hashlib import sha256
 from threading import RLock
 from typing import TYPE_CHECKING, Any, Literal, LiteralString, cast
 
-from vv_agent.kernel._content import KeyProvider
+from vv_agent.kernel._canonical_json import canonical_json_bytes
+from vv_agent.kernel._content import ContentUnavailable, KeyProvider
 from vv_agent.kernel._content_sql import CoreSQLContentStore
 from vv_agent.kernel._content_store import ContentCipher
 from vv_agent.kernel._reducer import Fold
@@ -21,11 +23,13 @@ from vv_agent.kernel._store import Conflict, Lease, SessionStore
 if TYPE_CHECKING:
     from psycopg import Connection
 
+    from vv_agent.kernel._postgres_allocation_journal import PostgresObjectJournal
+
 CLOCK = "floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint"
 STORAGE_MAJOR = "S1"
-SCHEMA_FINGERPRINT_VERSION = "S1-postgres-schema-v2"
+SCHEMA_FINGERPRINT_VERSION = "S1-postgres-schema-v3"
 # Update this digest with intentional DDL or fingerprint-shape changes and contract review.
-SCHEMA_FINGERPRINT = "5518c19df3a7476dc81f476188fee796036198b7ab3316347a2a661ba41c3b20"
+SCHEMA_FINGERPRINT = "e19ae9287545c500edc810238875b1c008d8f8d4e9f4c48aa836766316aabc38"
 RLS_ISOLATION = "explicit-tenant-credentials"
 RLS_INSTALL_REASON = "The base DDL is unisolated. Runtime tenant access requires install_tenant_rls() and tenant_standalone()."
 RLS_SHARED_GATEWAY_REASON = (
@@ -97,7 +101,9 @@ DDL = """
 CREATE TABLE sk_settings (
     singleton integer PRIMARY KEY CHECK (singleton = 1),
     storage_major text NOT NULL CHECK (storage_major = 'S1'),
-    write_level integer NOT NULL CHECK (write_level >= 1)
+    write_level integer NOT NULL CHECK (write_level >= 1),
+    database_id text NOT NULL CHECK (database_id ~ '^[0-9a-f]{64}$'),
+    object_journal_binding text CHECK (object_journal_binding ~ '^[0-9a-f]{64}$')
 );
 CREATE TABLE sk_session (
     tenant_id text NOT NULL, session_id text NOT NULL,
@@ -920,6 +926,104 @@ class PostgresStore(SQLStore):
 
         return self.connection.info.transaction_status != TransactionStatus.IDLE
 
+    @staticmethod
+    def _object_journal_digest(journal: PostgresObjectJournal) -> str:
+        identity = journal.identity
+        binding = canonical_json_bytes(
+            ["vv-agent/S1/postgres-object-journal/v1", identity.database_id, identity.journal_id, identity.namespace]
+        )
+        return sha256(binding).hexdigest()
+
+    def _provision_object_journal(self, journal: PostgresObjectJournal) -> None:
+        """Pin the authenticated journal installation on a quiesced primary."""
+
+        from psycopg import sql
+        from psycopg.rows import tuple_row
+
+        with self._connection_lock:
+            if self._transaction_in_progress() or self.runtime_mode != "unbound-internal":
+                raise ContentUnavailable("object journal provisioning requires an idle PostgreSQL schema owner")
+            with self._transaction():
+                if not _schema_is_current(self.connection):
+                    raise ContentUnavailable("object journal provisioning requires a current PostgreSQL S1 installation")
+                (schema,) = self._one("SELECT pg_catalog.current_schema()")
+                owner = self._rows(
+                    "SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace "
+                    "WHERE n.nspname=%s AND c.relname='sk_settings' AND session_user=current_user "
+                    "AND pg_catalog.pg_get_userbyid(c.relowner)=session_user "
+                    "AND pg_catalog.pg_has_role(session_user,n.nspowner,'USAGE')",
+                    (schema,),
+                )
+                if owner != [(1,)]:
+                    raise ContentUnavailable("object journal provisioning requires the PostgreSQL schema owner")
+                bind = sql.SQL(
+                    "UPDATE {}.sk_settings SET object_journal_binding=%s "
+                    "WHERE singleton=1 AND database_id=%s AND object_journal_binding IS NULL RETURNING singleton"
+                ).format(sql.Identifier(schema))
+                with self.connection.cursor(row_factory=tuple_row) as cursor:
+                    cursor.execute(bind, (self._object_journal_digest(journal), journal.identity.database_id))
+                    rows = cursor.fetchall()
+                if rows != [(1,)]:
+                    raise ContentUnavailable("object journal does not match an unbound PostgreSQL installation")
+
+    @contextmanager
+    def _object_publication_atomic(
+        self, journal: PostgresObjectJournal, *, check_deadline: Callable[[], None]
+    ) -> Iterator[tuple[SQLSessionTx, Callable[[], None]]]:
+        """Open the primary transaction that owns one tenant's publication lock."""
+
+        from psycopg import sql
+        from psycopg.rows import tuple_row
+
+        check_deadline()
+        if not self._connection_lock.acquire(blocking=False):
+            raise Conflict("object publication connection is busy")
+        try:
+            if self._transaction_in_progress():
+                raise ContentUnavailable("object publication requires a store-owned outer PostgreSQL transaction")
+            tenant_id = self.credential_tenant_id
+            if tenant_id is None or tenant_id != journal.tenant_id or self.tenant_id != tenant_id:
+                raise ContentUnavailable("object publication requires the authenticated journal tenant")
+            check_deadline()
+            with self._transaction():
+                settings = self._one(
+                    "SELECT current_setting('transaction_isolation'), current_setting('transaction_read_only'), "
+                    "current_setting('vv.tenant_id',true)"
+                )
+                if settings != ("read committed", "off", tenant_id):
+                    raise ContentUnavailable("object publication requires the authenticated READ COMMITTED write transaction")
+                self.verify_tenant_connection(self.connection, tenant_id)
+                (schema,) = self._one("SELECT pg_catalog.current_schema()")
+                pinned_settings = sql.SQL(
+                    "SELECT database_id,object_journal_binding FROM {}.sk_settings WHERE singleton=1"
+                ).format(sql.Identifier(schema))
+                with self.connection.cursor(row_factory=tuple_row) as cursor:
+                    cursor.execute(pinned_settings)
+                    pinned = cursor.fetchall()
+                if pinned != [(journal.identity.database_id, self._object_journal_digest(journal))]:
+                    raise ContentUnavailable("object journal binding does not match the PostgreSQL installation")
+                check_deadline()
+                frame = canonical_json_bytes(
+                    ["vv-agent/S1/postgres-object-publication/v1", journal.identity.namespace, tenant_id]
+                )
+                lock_id = int.from_bytes(sha256(frame).digest()[:8], "big", signed=True)
+                if self._one("SELECT pg_catalog.pg_try_advisory_xact_lock(%s::bigint)", (lock_id,)) != (True,):
+                    raise Conflict("object publication is busy for this tenant")
+                tx = SQLSessionTx(self)
+                tx._bind_external_deadline(check_deadline)
+
+                def check_fence() -> None:
+                    tx._check_content_persistence_deadline()
+                    tx._active()
+                    tx._check_content_persistence_deadline()
+
+                check_fence()
+                yield tx, check_fence
+                check_fence()
+                tx._finalize_lease_fence()
+        finally:
+            self._connection_lock.release()
+
     def _schema_tables(self) -> set[str]:
         return _schema_tables(self.connection)
 
@@ -1091,8 +1195,8 @@ class PostgresStore(SQLStore):
                 raise ValueError("unsupported PostgreSQL session schema version")
             self._rows(DDL)
             self._rows(
-                "INSERT INTO sk_settings(singleton,storage_major,write_level) VALUES (1,%s,1)",
-                (STORAGE_MAJOR,),
+                "INSERT INTO sk_settings(singleton,storage_major,write_level,database_id) VALUES (1,%s,1,%s)",
+                (STORAGE_MAJOR, secrets.token_hex(32)),
             )
             if not _schema_is_current(self.connection):
                 raise ValueError("PostgreSQL session schema fingerprint does not match this runtime")

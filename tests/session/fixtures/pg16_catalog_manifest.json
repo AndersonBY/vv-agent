@@ -1022,6 +1022,26 @@
         ""
       ],
       [
+        "sk_settings",
+        4,
+        "database_id",
+        "text",
+        true,
+        null,
+        "",
+        ""
+      ],
+      [
+        "sk_settings",
+        5,
+        "object_journal_binding",
+        "text",
+        false,
+        null,
+        "",
+        ""
+      ],
+      [
         "sk_tombstone",
         1,
         "tenant_id",
@@ -1803,6 +1823,24 @@
         "sk_session_key_tenant_id_session_id_fkey",
         "f",
         "FOREIGN KEY (tenant_id, session_id) REFERENCES sk_session(tenant_id, session_id)",
+        false,
+        false,
+        true
+      ],
+      [
+        "sk_settings",
+        "sk_settings_database_id_check",
+        "c",
+        "CHECK (database_id ~ '^[0-9a-f]{64}$'::text)",
+        false,
+        false,
+        true
+      ],
+      [
+        "sk_settings",
+        "sk_settings_object_journal_binding_check",
+        "c",
+        "CHECK (object_journal_binding ~ '^[0-9a-f]{64}$'::text)",
         false,
         false,
         true
