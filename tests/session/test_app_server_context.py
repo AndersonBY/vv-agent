@@ -49,7 +49,8 @@ def server_for(store, database, monkeypatch):
     return server, rt, trusted_store, store
 
 
-def test_compaction_receipt_cut_reuses_summary_after_restart(store, database, monkeypatch):
+@pytest.mark.parametrize("suspend", [False, True])
+def test_compaction_receipt_cut_reuses_summary_after_restart(store, database, monkeypatch, suspend):
     server, _, trusted_store, raw_store = server_for(store, database, monkeypatch)
     receipt = server.run_adapter.compact_thread(thread_id="s", action_id="compact")
 
@@ -64,6 +65,20 @@ def test_compaction_receipt_cut_reuses_summary_after_restart(store, database, mo
     with pytest.raises(Cut):
         drive(trusted_store, "s", runtime=rt)
     assert len(summary_plans(raw_store)) == 1
+    if suspend:
+        monkeypatch.setattr(server.kernel._worker, "wake", lambda *_: None)
+        tid = trusted_store.read_state("s")[0].active_turn_id
+        assert tid is not None
+        assert server.run_adapter.controller_action(
+            thread_id="s", turn_id=tid, action_id="suspend", action={"kind": "suspend"}, connection_id=None
+        )["accepted"]
+        drive(trusted_store, "s", runtime=configured(trusted_store, database, []))
+        state, _, _ = trusted_store.read_state("s")
+        assert state.active_turn_id == tid and state.turns[tid].suspended
+        assert not records_of(raw_store, "context_compacted")
+        assert server.run_adapter.controller_action(
+            thread_id="s", turn_id=tid, action_id="resume", action={"kind": "resume"}, connection_id=None
+        )["accepted"]
     # No responses remain: a second summary request would fail.
     drive(trusted_store, "s", runtime=configured(trusted_store, database, []))
     assert len(records_of(raw_store, "context_compacted")) == 1

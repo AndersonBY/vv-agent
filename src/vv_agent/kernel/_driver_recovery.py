@@ -645,6 +645,7 @@ def step(self: CoreDriver, *, one_turn: bool) -> Generator[object, Any, bool]:
         if (
             self.state.active_turn_id
             and (not self.state.cancel_requested)
+            and (not self.state.suspend_requested)
             and (not (yield Read.CANCELLED))
             and any(
                 op.turn_id == self.state.active_turn_id and op.attempts[1].plan._payload["purpose"] == "compaction"
