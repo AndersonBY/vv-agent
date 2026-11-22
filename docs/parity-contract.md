@@ -88,8 +88,10 @@ PostgreSQL.
 
 `scripts/session_kernel_fixtures.py` regenerates the session kernel fixtures
 from the real producers. `tests/session/test_session_kernel_fixtures.py`
-compares that output byte-for-byte with the vendored snapshot. The snapshot
-integrity check in `contract_snapshot.py` runs separately.
+compares the generated bodies byte-for-byte with the vendored snapshot. The
+central contract owns the record and inbox schemas. The producer gate checks the
+schema variant inventory and validates real outputs at each supported level.
+The snapshot integrity check in `contract_snapshot.py` runs separately.
 
 An implementation counts as verified only after its producer tests and the
 central gates pass. Passing fixture checks alone is not verification.

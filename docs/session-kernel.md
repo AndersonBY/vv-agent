@@ -826,12 +826,12 @@ with a bounded 1 KiB receipt history. It requires cold recovery of 5,000 and
 
 ## Fixture generation
 
-`scripts/session_kernel_fixtures.py --output /tmp/vv-agent-fixtures` generates 45
-fixture files from the real store, kernel, public surfaces and App Server, with
-scripted providers and fixed clocks. It never edits the vendored snapshot; it
-compares all 45 outputs with it byte for byte, and checks digests, record IDs
-and schemas with an independent Node RFC 8785 encoder. The corpus is limited to
-3 MB, and 512 KB per file.
+`scripts/session_kernel_fixtures.py --output /tmp/vv-agent-fixtures` generates
+fixture bodies from the real store, kernel, public surfaces and App Server with
+scripted providers and fixed clocks. Tests compare the generated bodies to the
+vendored snapshot byte for byte. The generator validates record and inbox bytes
+against the canonical S1 schemas and checks digests and identities with an
+independent Node RFC 8785 encoder. The corpus is limited to 3 MB and 512 KB per file.
 
 ## App Server fork seeds
 

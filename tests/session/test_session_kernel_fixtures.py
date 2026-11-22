@@ -1,4 +1,4 @@
-"""Real producer generation must match the published v24 snapshot byte-for-byte."""
+"""Check producer bytes and behavior against the selected canonical contract."""
 
 import base64
 import json
@@ -67,8 +67,6 @@ start_runner = REPLACEMENTS["start_runner"]
 CURATION = runpy.run_path(str(SCRIPT.with_name("_session_kernel_curation.py")))
 CHECKS = runpy.run_path(str(SCRIPT.with_name("_session_kernel_checks.py")))
 FILES = {
-    "session_record.schema.json",
-    "session_inbox.schema.json",
     "session_records.jsonl",
     "session_inbox.jsonl",
     "session_codec_vectors.json",
@@ -80,6 +78,28 @@ FILES = {
     "app_server_protocol.json",
 }
 FILES.update(REPLACEMENTS["REPLACE"])
+
+
+@pytest.fixture(scope="module")
+def session_schemas():
+    return CHECKS["session_schema_validators"](REPLACEMENTS["load"])
+
+
+@pytest.mark.parametrize(("family", "missing_variant"), [("record", 2), ("inbox", 3)])
+def test_session_schema_inventory_rejects_missing_variant(family, missing_variant):
+    def load(name):
+        schema = REPLACEMENTS["load"](name)
+        if name == f"session_{family}.schema.json":
+            schema["oneOf"] = [
+                branch
+                for branch in schema["oneOf"]
+                if CHECKS["resolve_pointer"](schema, branch["allOf"][0]["$ref"][1:])["properties"]["feature_level"]["const"]
+                != missing_variant
+            ]
+        return schema
+
+    with pytest.raises(AssertionError, match=f"session_{family}.*expected one branch"):
+        CHECKS["session_schema_validators"](load)
 
 
 def test_contract_40_trusted_storage_has_real_python_producer_capture():
@@ -407,7 +427,7 @@ def test_memory_capacity_corpus_reaches_real_turn_terminals(tmp_path):
         ("model_selection", "model_selection", "select-B"),
     ],
 )
-def test_model_selection_fixture_producers_publish_l2_requirements(producer, session_id, input_id):
+def test_model_selection_fixture_producers_publish_l2_requirements(producer, session_id, input_id, session_schemas):
     fixtures = AUTHOR["Fixtures"]()
     try:
         getattr(fixtures, producer)()
@@ -421,6 +441,12 @@ def test_model_selection_fixture_producers_publish_l2_requirements(producer, ses
         assert created.payload["bootstrap"]["level"] == 2
         assert stored.item.feature_level == 2
         assert requirements["level"] == 2
+        for family, retained in (("record", created), ("inbox", stored.item)):
+            wire = json.loads(retained.encode())
+            validator = session_schemas[family]
+            validator.validate(wire)
+            assert not validator.is_valid(wire | {"feature_level": 1})
+            assert not validator.is_valid(wire | {"unexpected": True})
         assert requirements["capabilities"]
         assert all(capability.startswith("model:") for capability in requirements["capabilities"])
         assert fixtures.kernel._runtimes[session_id].requirements.level == 2
@@ -613,7 +639,7 @@ def validate_outputs(values):
     return CHECKS["validate_outputs"](values, REPLACEMENTS["BASE"], REPLACEMENTS["KEEP"], REPLACEMENTS["REPLACE"])
 
 
-def test_session_kernel_fixtures_deterministic_and_revalidated(generated_fixtures):
+def test_session_kernel_fixtures_deterministic_and_revalidated(generated_fixtures, session_schemas):
     directories, coverage_runs, _, _ = generated_fixtures
     first, _second = directories
 
@@ -642,13 +668,12 @@ def test_session_kernel_fixtures_deterministic_and_revalidated(generated_fixture
     assert len(coverage["handle_variants"]) == 4
     assert all(coverage["optional_fields"].values())
     assert coverage["optional_fields"]["boundary.output_checked.partial_output"] > 0
-    validators = {kind: Draft202012Validator(read(f"session_{kind}.schema.json")) for kind in ("record", "inbox")}
     sessions, records, inputs = defaultdict(list), {}, {}
     independent = AUTHOR["independent_bytes"]([v["wire"] for v in corpus["vectors"]])
     for vector, expected in zip(corpus["vectors"], independent, strict=True):
         raw = checked_bytes(vector)
         assert raw == expected
-        validators[vector["type"]].validate(vector["wire"])
+        session_schemas[vector["type"]].validate(vector["wire"])
         parsed = (Record if vector["type"] == "record" else InboxItem).parse(raw)
         assert parsed.encode() == raw
         if isinstance(parsed, Record):

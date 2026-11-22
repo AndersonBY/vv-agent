@@ -7,14 +7,18 @@ import inspect
 import json
 import re
 import textwrap
+from collections import Counter
 from dataclasses import fields
 from pathlib import Path
 from urllib.parse import unquote
+
+from jsonschema import Draft202012Validator
 
 from vv_agent import events, types
 from vv_agent.app_server.schema import export_schema_bundles
 from vv_agent.interaction import CONTROLLER_COMMAND_ID_SCHEMA, HOST_OUTCOME_SCHEMA, HOST_REQUEST_SCHEMA
 from vv_agent.kernel._event_validation import _EVENT_FIELDS, _EVENT_REQUIRED_FIELDS
+from vv_agent.kernel._record_schema import INPUT_SCHEMA_LEVEL_3, RECORD_ITEM_SCHEMA
 from vv_agent.prompt import PromptSection
 from vv_agent.runtime.lifecycle import AFTER_CYCLE_CONTROL_SCHEMA
 from vv_agent.session.records import INPUT_SCHEMA, RECORD_SCHEMA
@@ -74,6 +78,37 @@ def literal_fields(decoder, variable):
         for node in ast.walk(tree)
         if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == variable for t in node.targets)
     )
+
+
+def session_schema_validators(load):
+    """Validate the canonical variant inventory before checking producer wires."""
+    record_variants = {
+        (envelope["properties"]["feature_level"]["const"], kind)
+        for envelope in RECORD_ITEM_SCHEMA["oneOf"]
+        for kind in envelope["properties"]["kind"]["enum"]
+    }
+    # Level 2 is restricted by InboxItem._validate after envelope validation.
+    inbox_variants = {
+        *((1, kind) for kind in INPUT_SCHEMA["properties"]["kind"]["enum"]),
+        *((2, kind) for kind in ("user", "follow_up", "model_selection")),
+        *((3, kind) for kind in INPUT_SCHEMA_LEVEL_3["properties"]["kind"]["enum"]),
+    }
+
+    validators = {}
+    for family, expected in (("record", record_variants), ("inbox", inbox_variants)):
+        name = f"session_{family}.schema.json"
+        schema = load(name)
+        Draft202012Validator.check_schema(schema)
+        actual = Counter()
+        for variant in schema["oneOf"]:
+            envelope_ref, discriminator = variant["allOf"]
+            envelope = resolve_pointer(schema, envelope_ref["$ref"][1:])
+            level = envelope["properties"]["feature_level"]["const"]
+            kind = discriminator["properties"]["kind"]["const"]
+            actual[level, kind] += 1
+        assert actual == Counter(expected), f"{name}: expected one branch per S1 variant, found {actual}"
+        validators[family] = Draft202012Validator(schema)
+    return validators
 
 
 def validate_outputs(values, base: Path, keep, replacements):

@@ -48,15 +48,10 @@ from vv_agent.session.projection import (
 )
 from vv_agent.session.providers import Accepted, Unknown
 from vv_agent.session.records import (
-    APP_SERVER_ATTRIBUTES,
     BOUNDARY_DATA,
-    CHILD_ADMISSION,
     INPUT_PAYLOADS,
-    INPUT_SCHEMA,
     PAYLOADS,
-    RECORD_SCHEMA,
     REQUEST_SESSION_METADATA,
-    SEED,
     TASK_SESSION_METADATA,
     InboxItem,
     Record,
@@ -2057,56 +2052,6 @@ class Fixtures:
         return streams
 
 
-def wire_schema(envelope, payloads, *, record=False):
-    variants = []
-    for kind, payload in payloads.items():
-        shape = deepcopy(envelope)
-        shape["properties"]["kind"] = {"const": kind}
-        shape["properties"]["payload"] = deepcopy(payload)
-        if not record and kind == "model_selection":
-            shape["properties"]["target_turn_id"] = {"type": "null"}
-            shape["properties"]["generation"] = {"type": "null"}
-        if record and kind == "session_created":
-            properties: dict[str, Any] = deepcopy(
-                {"seed": SEED, "app_server": APP_SERVER_ATTRIBUTES, "child_admission": CHILD_ADMISSION}
-            )
-            child_admission = properties["child_admission"]
-            assert isinstance(child_admission, dict)
-            child_properties = child_admission.get("properties")
-            assert isinstance(child_properties, dict)
-            child_properties["definition"] = {
-                "type": "object",
-                "properties": {
-                    "task": {
-                        "type": "object",
-                        "properties": {
-                            "metadata": {"type": "object", "properties": {"vv_session": deepcopy(TASK_SESSION_METADATA)}}
-                        },
-                    }
-                },
-            }
-            attributes = {"type": "object", "properties": properties}
-            shape["properties"]["payload"]["properties"]["attributes"] = attributes
-        if record and kind == "boundary_recorded":
-            shape["properties"]["payload"]["allOf"] = [
-                {"if": {"properties": {"stage": {"const": stage}}}, "then": {"properties": {"data": data}}}
-                for stage, data in BOUNDARY_DATA.items()
-            ]
-        if record:
-            payload_properties = shape["properties"]["payload"]["properties"]
-            for field, metadata_path, reserved in (
-                ("definition", ("task", "metadata"), TASK_SESSION_METADATA),
-                ("request", ("metadata",), REQUEST_SESSION_METADATA),
-            ):
-                if field in payload_properties:
-                    nested = {"type": "object", "properties": {"vv_session": deepcopy(reserved)}}
-                    for name in reversed(metadata_path):
-                        nested = {"type": "object", "properties": {name: nested}}
-                    payload_properties[field] = {"allOf": [payload_properties[field], nested]}
-        variants.append(shape)
-    return {"$schema": "https://json-schema.org/draft/2020-12/schema", "oneOf": variants}
-
-
 def fold_negatives(vectors):
     invalid = []
     by_session = {}
@@ -2525,11 +2470,20 @@ def generate(output: Path):
                 assert spec is not None and spec.loader is not None
                 replacements = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(replacements)
+                spec = importlib.util.spec_from_file_location(
+                    "_session_kernel_checks", Path(__file__).with_name("_session_kernel_checks.py")
+                )
+                assert spec is not None and spec.loader is not None
+                checks = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(checks)
+                validators = checks.session_schema_validators(replacements.load)
                 replacement_report = replacements.generate_replacements(
                     fixtures, app, output, independent_bytes, facts, write_json
                 )
                 streams = fixtures.collect()
                 vectors = valid_vectors(streams, fixtures.inbox)
+                for vector in vectors:
+                    validators[vector["type"]].validate(vector["wire"])
                 logical_records = []
                 for sid, stored in streams:
                     shallow_nested_record_ids = {
@@ -2547,8 +2501,6 @@ def generate(output: Path):
                     )
                 inventory = coverage(vectors, fixtures.semantics, logical_records)
                 invalid = invalid_vectors(vectors) + fold_negatives(vectors) + fixtures.invalid
-                write_json(output, "session_record.schema.json", wire_schema(RECORD_SCHEMA, PAYLOADS, record=True))
-                write_json(output, "session_inbox.schema.json", wire_schema(INPUT_SCHEMA, INPUT_PAYLOADS))
                 for kind, name in (("record", "session_records.jsonl"), ("inbox", "session_inbox.jsonl")):
                     (output / name).write_bytes(
                         b"".join(base64.b64decode(v["bytes_base64"]) + b"\n" for v in vectors if v["type"] == kind)
@@ -2635,12 +2587,6 @@ def generate(output: Path):
                     logical_records,
                 )
                 replacements.validate_replacements({name: values[name] for name in replacements.REPLACE}, independent_bytes)
-                spec = importlib.util.spec_from_file_location(
-                    "_session_kernel_checks", Path(__file__).with_name("_session_kernel_checks.py")
-                )
-                assert spec is not None and spec.loader is not None
-                checks = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(checks)
                 self_checks = checks.validate_outputs(values, replacements.BASE, replacements.KEEP, replacements.REPLACE)
                 replacement_report["replaced"] = {
                     name: replacements.classify(replacements.load(name), values[name]) for name in replacements.REPLACE

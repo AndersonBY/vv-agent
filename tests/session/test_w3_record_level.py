@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 from jsonschema import Draft202012Validator
+from support.contract import fixture_root
 
 from vv_agent.kernel._boundary_hydration import (
     SessionHydration,
@@ -426,7 +427,8 @@ def test_decrypted_lookup_must_name_the_session_that_owns_the_inbox(tmp_path: Pa
 
 
 def test_provider_lookup_reopens_through_original_inbox_owner_and_slot(tmp_path: Path) -> None:
-    w3 = _fixture(_contract_source(), "execution_worker_w3.json")
+    source = fixture_root()
+    w3 = json.loads((source / "execution_worker_w3.json").read_text())
     result = w3["lookup_storage_boundary"]["content"]["logical_result"]
     database = _publish_provider_lookup(tmp_path, result)
     provider = LocalKeyProvider(_MASTER_KEY, state_path=tmp_path / "provider-lookup-keys.sqlite3")
@@ -439,6 +441,11 @@ def test_provider_lookup_reopens_through_original_inbox_owner_and_slot(tmp_path:
             raw_store.configure_reader(level=3)
             inbox = driver.store.peek_inbox(_SESSION)[0]
             item = inbox.item
+            wire = json.loads(item.encode())
+            validator = Draft202012Validator(json.loads((source / "session_inbox.schema.json").read_text()))
+            validator.validate(wire)
+            assert not validator.is_valid(wire | {"feature_level": 2})
+            assert not validator.is_valid(wire | {"unexpected": True})
             assert set(item.payload) == {"operation_id", "attempt", "request_digest", "provider_lookup"}
             assert result["outcome"]["handle"]["job_id"].encode() not in database.read_bytes()
             hydration = SessionHydration.from_store(driver.store, tenant_id=_TENANT, session_id=_SESSION)

@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import base64
+import json
 from pathlib import Path
 from typing import Any
 
 import pytest
+from jsonschema import Draft202012Validator
+from support.contract import fixture_root
 
 from vv_agent import Agent, RunConfig, ScriptedModelProvider
 from vv_agent.kernel._boundary_hydration import SessionHydration, hydrate_session_records
@@ -329,6 +332,15 @@ def test_level_three_bash_is_bound_after_preparation_and_submitted_after_start(
         if record.record.kind in {"op_planned", "op_prepared"} and "/tool/" in str(record.record.operation_id)
     ]
     assert [record.feature_level for record in w3_records] == [3, 3]
+    turn = next(row.record for row in records if row.record.kind == "turn_started")
+    assert turn.feature_level == 3
+    schema = json.loads((fixture_root() / "session_record.schema.json").read_text())
+    validator = Draft202012Validator(schema)
+    for record in (turn, *w3_records):
+        wire = json.loads(record.encode())
+        validator.validate(wire)
+        assert not validator.is_valid(wire | {"feature_level": 2})
+        assert not validator.is_valid(wire | {"unexpected": True})
     assert [record.record.kind for record in records].count("op_prepared") == 1
     plan = next(
         record for record in hydrated if record.record.kind == "op_planned" and "/tool/" in str(record.record.operation_id)
