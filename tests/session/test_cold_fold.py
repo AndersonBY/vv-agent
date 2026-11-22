@@ -27,7 +27,7 @@ from .fold_history import (
     parse_logical_record,
     persist_history,
 )
-from .helpers import create_fixture_session, fixture_key_provider, wrap_fixture_store
+from .helpers import create_fixture_session, fixture_key_provider, principal, wrap_fixture_store
 from .test_content_read_frame import CountingCipher
 
 
@@ -61,18 +61,23 @@ def snapshot_value(obj):
 
 
 @pytest.mark.parametrize("steps", [1, 4])
-def test_cold_snapshot_matches_030_field_by_field(store, steps):
+def test_logical_snapshot_matches_030_field_by_field(steps):
     fixtures = Path(__file__).with_name("fixtures")
     expected = json.loads((fixtures / "fold_030_state.json").read_text())[str(steps)]
     bodies = (fixtures / "fold_030_records.jsonl").read_bytes().splitlines()[: 2 + steps * 7]
-    saved = tuple(Record(**json.loads(body)) for body in bodies)
-    for body, record in zip(bodies, saved, strict=True):
+    creation, *history = (Record(**json.loads(body)) for body in bodies)
+    creation = logical_session_record(
+        creation.session_id,
+        preferred_payload=creation.payload | {"principal": principal(creation.payload["principal"])},
+    )
+    saved = (creation, *history)
+    for body, record in zip(bodies[1:], history, strict=True):
         object.__setattr__(record, "_digest", sha256(body).hexdigest())
         if record.kind == "turn_started":
             definition = record.payload["definition"]
             object.__setattr__(record, "_task_value", AgentTask.from_dict(definition["task"]))
     fold = Fold()
-    fold.extend(saved, bodies=bodies)
+    fold.extend(saved, bodies=(creation.encode(), *bodies[1:]))
     state = fold.state
     rows = tuple(fold.history)
     for f in fields(state):

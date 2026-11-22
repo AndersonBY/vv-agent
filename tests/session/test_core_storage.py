@@ -17,6 +17,7 @@ from .helpers import content_ref, create_fixture_session, fixture_content_reader
 @pytest.mark.postgres
 def test_core_postgres_preserves_host_connection_transaction_and_heartbeat(store):
     core = CorePostgresStore(store.connection, fold_factory=Fold)
+    core.configure_input_admission(allow_unsigned=True)
     assert core.connection is store.connection
     core._rows("CREATE TABLE host_write (id integer PRIMARY KEY)")
     with pytest.raises(RuntimeError, match="rollback"), store.connection.transaction():
@@ -112,6 +113,7 @@ def test_raw_core_postgres_factory_gets_driver_heartbeat_timeouts(store, monkeyp
     from vv_agent.session._driver_scope import _LeaseHeartbeat
 
     core = CorePostgresStore(store.connection, fold_factory=Fold)
+    core.configure_input_admission(allow_unsigned=True)
     with core.atomic() as tx:
         tx.create(
             SessionSpec("s", principal("user/s"), content_ref("s/workspace"), attributes=content_ref("s/attributes")),
@@ -176,6 +178,7 @@ def unused(*a, **kw): raise AssertionError('no compaction in session creation')
 def factory(): return Fold(normalize_memory_settings=unused, count_messages=unused)
 with PostgresStore.standalone(os.environ['VV_CORE_STORAGE_TEST_DSN'], fold_factory=factory) as store:
     store.install_schema()
+    store.configure_input_admission(allow_unsigned=True)
     with store.atomic() as tx:
         tx.create(
             SessionSpec(
