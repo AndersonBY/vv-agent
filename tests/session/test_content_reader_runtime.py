@@ -88,6 +88,7 @@ def _driver(tmp_path: Path, *, reader: bool) -> Iterator[tuple[_Driver, Any, Con
     provider = LocalKeyProvider(MASTER_KEY)
     with SQLiteStore.standalone(str(tmp_path / "reader.sqlite")) as root:
         root.install_schema()
+        root.configure_input_admission(allow_unsigned=True)
         store = cast(SQLiteStore, root.for_tenant(TENANT))
         with store.atomic() as tx:
             tx.create(

@@ -146,6 +146,7 @@ def test_sqlite_sdk_round_trip_linking_and_tenant_isolation(tmp_path: Path) -> N
     plaintext = b"core-owned encrypted content"
     with SQLiteStore.standalone(str(path)) as store:
         store.install_schema()
+        store.configure_input_admission(allow_unsigned=True)
         _create_session(store)
         with store.for_tenant(TENANT).atomic():
             adapter = SQLiteContentStore(store, provider)
@@ -170,6 +171,7 @@ def test_real_aes_adapter_preserves_transport_errors_and_classifies_bad_tags(
     plaintext = b"authenticated by the real SDK cipher"
     with SQLiteStore.standalone(str(path)) as store:
         store.install_schema()
+        store.configure_input_admission(allow_unsigned=True)
         _create_session(store)
         with store.for_tenant(TENANT).atomic():
             adapter = SQLiteContentStore(store, provider)
