@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 import time
 from contextlib import closing
-from dataclasses import replace
+from dataclasses import astuple, replace
 from pathlib import Path
 
 import pytest
@@ -132,11 +132,49 @@ def test_key_reaping_fences_existing_object_reservations_and_preserves_replaceme
         assert journal.finish_reap(reaping, remote_terminal=True)
         assert journal.finish_key_intent(retired)
         assert not journal.bind(late_id, owner, reservation_etag='"marker"')
-        replacement_owner = replace(owner, key_id=replacement.key_id, admission_session_id="child", admission_id="next")
+        replacement_owner = replace(
+            owner,
+            key_id=replacement.key_id,
+            admission_session_id=replacement.admission_root_id,
+            admission_id=replacement.admission_id,
+        )
         assert journal.bind(late_id, replacement_owner, reservation_etag='"marker"')
         assert journal.scoped_allocations("tenant", ("parent",)) == ()
         assert journal.get_key_intent(provider_id, replacement.key_id) == replacement_active
         assert len(provider.unwrap("tenant", "child", current_key)) == 32
+
+
+@pytest.mark.parametrize("field", ["admission_session_id", "admission_id"])
+def test_exact_binding_rejects_mismatched_admission(journal: SQLiteAllocationJournal, field: str) -> None:
+    intent = _intent("provider")
+    reserved = journal.reserve_key_intent(intent, pin_until_ms=_PIN)
+    assert reserved is not None and journal.claim_key_allocation(reserved) is not None
+    owner = AllocationOwner("tenant", "child", "content", "parent", "child-admission", "provider", intent.key_id)
+    wrong = replace(owner, **{field: "wrong"})
+    allocation_id = bytes(32)
+    assert journal.reserve(allocation_id, pin_until_ms=_PIN)
+    assert not journal.bind(allocation_id, wrong, reservation_etag='"marker"')
+    with closing(sqlite3.connect(journal._path)) as raw:
+        with pytest.raises(sqlite3.IntegrityError, match="exact key is unavailable for binding"):
+            raw.execute(
+                "UPDATE allocation SET state='bound',tenant_id=?,session_id=?,content_id=?,"
+                "admission_session_id=?,admission_id=?,provider_instance_id=?,key_id=?,reservation_etag=? "
+                "WHERE allocation_id=?",
+                (*astuple(wrong), '"marker"', allocation_id),
+            )
+        raw.rollback()
+        with pytest.raises(sqlite3.IntegrityError, match="exact key is unavailable for binding"):
+            raw.execute(
+                "INSERT INTO allocation (allocation_id,state,pin_until_ms,tenant_id,session_id,content_id,"
+                "admission_session_id,admission_id,provider_instance_id,key_id,reservation_etag) "
+                "VALUES (?,'bound',?,?,?,?,?,?,?,?,?)",
+                (bytes([1]) * 32, _PIN, *astuple(wrong), '"marker"'),
+            )
+        raw.rollback()
+    assert journal.bind(allocation_id, owner, reservation_etag='"marker"')
+    with closing(sqlite3.connect(journal._path)) as raw, pytest.raises(sqlite3.IntegrityError, match="exact key is unavailable"):
+        raw.execute(f"UPDATE allocation SET {field}=? WHERE allocation_id=?", ("wrong", allocation_id))
+    assert journal.scoped_allocations("tenant", ("parent",))[0].owner == owner
 
 
 def test_expired_unstarted_dispatch_can_be_terminally_retired(

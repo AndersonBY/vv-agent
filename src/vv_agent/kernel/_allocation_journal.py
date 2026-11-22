@@ -22,7 +22,7 @@ from ._content import (
     _ExactKeyIntent,
 )
 
-_VERSION = 2
+_VERSION = 3
 _OWNER_COLUMNS = """
     tenant_id, session_id, content_id, admission_session_id, admission_id, provider_instance_id, key_id
 """
@@ -30,6 +30,17 @@ _ALLOCATION_COLUMNS = f"allocation_id,state,pin_until_ms,reservation_etag,{_OWNE
 _KEY_OWNER_COLUMNS = "key_id,provider_instance_id,tenant_id,session_id,admission_root_id,admission_id"
 _KEY_INTENT_COLUMNS = f"{_KEY_OWNER_COLUMNS},state,pin_until_ms,evidence_id"
 _NOW_MS = "(CAST(strftime('%s','now') AS INTEGER)*1000 + CAST(substr(strftime('%f','now'),4) AS INTEGER))"
+_CHECK_EXACT_BINDING = f"""WHEN substr(NEW.key_id,1,{len(_EXACT_KEY_ID_PREFIX)}) = '{_EXACT_KEY_ID_PREFIX}'
+        AND NOT EXISTS (
+            SELECT 1 FROM key_intent
+            WHERE provider_instance_id=NEW.provider_instance_id AND key_id=NEW.key_id
+              AND tenant_id=NEW.tenant_id AND session_id=NEW.session_id
+              AND admission_root_id=NEW.admission_session_id AND admission_id=NEW.admission_id
+              AND state='allocating'
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'exact key is unavailable for binding');
+        END"""
 _SCHEMA = (
     """CREATE TABLE journal_identity (
         singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
@@ -83,6 +94,8 @@ _SCHEMA = (
     "WHERE state <> 'retired'",
     "CREATE INDEX key_intent_owner ON key_intent(tenant_id, session_id)",
     "CREATE INDEX key_intent_admission_root ON key_intent(tenant_id, admission_root_id)",
+    f"CREATE TRIGGER validate_exact_binding_insert BEFORE INSERT ON allocation {_CHECK_EXACT_BINDING}",
+    f"CREATE TRIGGER validate_exact_binding_update BEFORE UPDATE OF {_OWNER_COLUMNS} ON allocation {_CHECK_EXACT_BINDING}",
 )
 _EXPECTED_SCHEMA = frozenset(_SCHEMA)
 
@@ -254,7 +267,8 @@ class SQLiteAllocationJournal:
                 if (
                     key is None
                     or key.state != "allocating"
-                    or (key.intent.tenant_id, key.intent.session_id) != (owner.tenant_id, owner.session_id)
+                    or (key.intent.tenant_id, key.intent.session_id, key.intent.admission_root_id, key.intent.admission_id)
+                    != (owner.tenant_id, owner.session_id, owner.admission_session_id, owner.admission_id)
                 ):
                     return False
             return (

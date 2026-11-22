@@ -31,7 +31,7 @@ _OWNER = "tenant_id,session_id,content_id,admission_session_id,admission_id,prov
 _COLUMNS = f"allocation_id,state,pin_until_ms,reservation_etag,{_OWNER}"
 _KEY_OWNER = "key_id,provider_instance_id,tenant_id,session_id,admission_root_id,admission_id"
 _KEY_COLUMNS = f"{_KEY_OWNER},state,pin_until_ms,evidence_id"
-_VERSION = 2
+_VERSION = 3
 
 _DDL = (
     f"""CREATE TABLE {_IDENTITY} (
@@ -75,7 +75,7 @@ _DDL = (
         pin_until_ms bigint NOT NULL CHECK (pin_until_ms > 0),
         evidence_id text CHECK (length(evidence_id) > 0),
         PRIMARY KEY (provider_instance_id,key_id),
-        UNIQUE (provider_instance_id,key_id,tenant_id,session_id),
+        UNIQUE (provider_instance_id,key_id,tenant_id,session_id,admission_root_id,admission_id),
         CHECK ((state='retired') = (evidence_id IS NOT NULL))
     )""",
     f"CREATE UNIQUE INDEX key_intent_admission ON {_KEY_TABLE}(tenant_id,session_id,admission_root_id,admission_id) "
@@ -84,8 +84,8 @@ _DDL = (
     f"CREATE INDEX key_intent_admission_root ON {_KEY_TABLE}(tenant_id,admission_root_id)",
     f"""ALTER TABLE {_TABLE} ADD COLUMN exact_key_id text
         GENERATED ALWAYS AS (CASE WHEN starts_with(key_id,'{_EXACT_KEY_ID_PREFIX}') THEN key_id END) STORED,
-        ADD FOREIGN KEY (provider_instance_id,exact_key_id,tenant_id,session_id)
-        REFERENCES {_KEY_TABLE}(provider_instance_id,key_id,tenant_id,session_id)""",
+        ADD FOREIGN KEY (provider_instance_id,exact_key_id,tenant_id,session_id,admission_session_id,admission_id)
+        REFERENCES {_KEY_TABLE}(provider_instance_id,key_id,tenant_id,session_id,admission_root_id,admission_id)""",
     f"""CREATE FUNCTION {_SCHEMA}.validate_key_transition() RETURNS trigger
         LANGUAGE plpgsql SET search_path=pg_catalog AS $$
         BEGIN
@@ -107,6 +107,7 @@ _DDL = (
                     SELECT 1 FROM {_KEY_TABLE}
                     WHERE provider_instance_id=NEW.provider_instance_id AND key_id=NEW.key_id
                       AND tenant_id=NEW.tenant_id AND session_id=NEW.session_id AND state='allocating'
+                      AND admission_root_id=NEW.admission_session_id AND admission_id=NEW.admission_id
                     FOR SHARE
                 ) THEN
                     RAISE EXCEPTION 'exact key is unavailable for binding' USING ERRCODE='42501';
@@ -231,7 +232,10 @@ def _install_role(connection: Connection[Any], login: str, role: JournalRole, id
             bound = tenant_scope
             install(
                 _KEY_TABLE,
-                ("SELECT(provider_instance_id,key_id,tenant_id,session_id,state)", "UPDATE(state)"),
+                (
+                    "SELECT(provider_instance_id,key_id,tenant_id,session_id,admission_root_id,admission_id,state)",
+                    "UPDATE(state)",
+                ),
                 # FOR SHARE needs an UPDATE grant. The false WITH CHECK blocks every key update.
                 (("SELECT", tenant_scope, None), ("UPDATE", tenant_scope + sql.SQL(" AND state='allocating'"), sql.SQL("false"))),
             )
@@ -409,8 +413,16 @@ class PostgresAllocationJournal:
                 or not _query_rows(
                     connection,
                     f"SELECT key_id FROM {_KEY_TABLE} WHERE provider_instance_id=%s AND key_id=%s "
-                    "AND tenant_id=%s AND session_id=%s AND state='allocating' FOR SHARE",
-                    (owner.provider_instance_id, owner.key_id, owner.tenant_id, owner.session_id),
+                    "AND tenant_id=%s AND session_id=%s AND admission_root_id=%s AND admission_id=%s "
+                    "AND state='allocating' FOR SHARE",
+                    (
+                        owner.provider_instance_id,
+                        owner.key_id,
+                        owner.tenant_id,
+                        owner.session_id,
+                        owner.admission_session_id,
+                        owner.admission_id,
+                    ),
                 )
             ):
                 return False

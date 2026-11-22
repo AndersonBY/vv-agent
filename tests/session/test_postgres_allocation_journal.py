@@ -1,5 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import replace
+from dataclasses import astuple, replace
 from secrets import token_hex
 from threading import Event
 
@@ -291,6 +291,41 @@ def test_key_allocation_pin_is_rechecked_after_waiting_for_row_lock(provisioned)
         assert future.result(timeout=5) is None
     assert keys.get_key_intent(intent.provider_instance_id, intent.key_id) == reserved
     assert keys.claim_key_intent(reserved).state == "reaping"
+
+
+@pytest.mark.parametrize("field", ["admission_session_id", "admission_id"])
+def test_exact_bind_rejects_mismatched_admission(provisioned, field):
+    import psycopg
+
+    admin, _, journals, logins, _ = provisioned
+    keys = journals[JournalRole("key-intent", "tenant-a")]
+    anonymous = journals[JournalRole("anonymous")]
+    binder_role = JournalRole("binder", "tenant-a")
+    binder = journals[binder_role]
+    scope = journals[JournalRole("scope", "tenant-a")]
+    intent = _ExactKeyIntent("s1-exact-key-" + "c" * 64, "provider", "tenant-a", "child", "parent", "admission")
+    pin = _now(admin) + 10_000
+    reserved = keys.reserve_key_intent(intent, pin_until_ms=pin)
+    assert reserved is not None and keys.claim_key_allocation(reserved) is not None
+    owner = replace(OWNER, key_id=intent.key_id)
+    wrong = replace(owner, **{field: "wrong"})
+    allocation_id = bytes(32)
+    assert anonymous.reserve(allocation_id, pin_until_ms=pin)
+    assert not binder.bind(allocation_id, wrong, reservation_etag=ETAG)
+    with (
+        psycopg.connect(logins[binder_role], autocommit=True) as raw,
+        pytest.raises(psycopg.errors.InsufficientPrivilege, match="exact key is unavailable for binding"),
+    ):
+        raw.execute(
+            f"UPDATE {TABLE} SET state='bound',tenant_id=%s,session_id=%s,content_id=%s,"
+            "admission_session_id=%s,admission_id=%s,provider_instance_id=%s,key_id=%s,reservation_etag=%s "
+            "WHERE allocation_id=%s",
+            (*astuple(wrong), ETAG, allocation_id),
+        )
+    assert binder.bind(allocation_id, owner, reservation_etag=ETAG)
+    with pytest.raises(psycopg.errors.ForeignKeyViolation):
+        admin.execute(f"UPDATE {TABLE} SET {field}=%s WHERE allocation_id=%s", ("wrong", allocation_id))
+    assert scope.scoped_allocations("tenant-a", ("parent",))[0].owner == owner
 
 
 def test_exact_bind_waits_for_key_cleanup_claim(provisioned):
