@@ -4,6 +4,7 @@ from session.app_server_s1_helpers import bind_development_content
 from vv_agent.app_server.protocol.thread import ThreadModelSelectParams
 from vv_agent.app_server.server import AppServer
 from vv_agent.kernel._content import INPUT_ACTOR_ATTRIBUTES, SESSION_PRINCIPAL_ATTRIBUTES
+from vv_agent.kernel._requirements import SessionRequirements
 from vv_agent.session.sqlite import SQLiteStore
 
 
@@ -33,9 +34,11 @@ def test_model_select_parser_returns_request_dto_without_actor():
         )
 
 
-def test_app_server_writers_use_trusted_ingress_principal(monkeypatch, tmp_path):
+def test_app_server_writers_use_trusted_ingress_principal(tmp_path):
     root_store = SQLiteStore(str(tmp_path / "app-server.sqlite"))
     root_store.install_schema()
+    root_store.configure_input_admission(allow_unsigned=True)
+    root_store._rows("UPDATE sk_settings SET write_level=2 WHERE singleton=1")
     bind_development_content(root_store)
     store = root_store.for_tenant("tenant-a")
     server = AppServer(store=store)
@@ -51,8 +54,8 @@ def test_app_server_writers_use_trusted_ingress_principal(monkeypatch, tmp_path)
             agent_key="agent",
             cwd=".",
             principal=principal,
+            bootstrap=SessionRequirements(2, server.kernel.default_handler_version, ()),
         )
-        monkeypatch.setattr(server.run_adapter._store, "read_thread", lambda thread_id: None)
 
         server.run_adapter.select_model(
             thread_id="thread",
