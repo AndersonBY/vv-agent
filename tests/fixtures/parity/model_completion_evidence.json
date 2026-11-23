@@ -20,6 +20,7 @@
                 "[DONE]"
               ]
             },
+            "requested_model_id": "scripted",
             "stream_collected": true,
             "stream_mode": true,
             "usage": {
@@ -505,6 +506,7 @@
                 "[DONE]"
               ]
             },
+            "requested_model_id": "scripted",
             "stream_collected": true,
             "stream_mode": true,
             "usage": {
@@ -1002,7 +1004,7 @@
           "cycle_index": 1,
           "agent_name": "kernel",
           "metadata": {
-            "session_seq": 6,
+            "session_seq": 9,
             "purpose": "primary",
             "model_rejection": {
               "message": "Model provider response was rejected.",
@@ -1051,7 +1053,7 @@
           "session_id": "s",
           "agent_name": "kernel",
           "metadata": {
-            "session_seq": 7
+            "session_seq": 11
           },
           "error": "model_request_rejected: HTTP 200: Model provider response was rejected.",
           "status": "failed",
@@ -1518,6 +1520,7 @@
               "stream_terminated": null,
               "termination_signals": null
             },
+            "requested_model_id": "scripted",
             "stream_collected": false,
             "stream_mode": false,
             "usage": {
@@ -1997,6 +2000,7 @@
               "stream_terminated": null,
               "termination_signals": null
             },
+            "requested_model_id": "scripted",
             "stream_collected": false,
             "stream_mode": false,
             "usage": {
@@ -2491,7 +2495,7 @@
           "cycle_index": 1,
           "agent_name": "kernel",
           "metadata": {
-            "session_seq": 6,
+            "session_seq": 9,
             "purpose": "primary",
             "model_rejection": {
               "message": "Model provider response was rejected.",
@@ -2540,7 +2544,7 @@
           "session_id": "s",
           "agent_name": "kernel",
           "metadata": {
-            "session_seq": 7
+            "session_seq": 11
           },
           "error": "model_request_rejected: HTTP 200: Model provider response was rejected.",
           "status": "failed",
@@ -3007,6 +3011,7 @@
                 "[DONE]"
               ]
             },
+            "requested_model_id": "scripted",
             "stream_collected": true,
             "stream_mode": true,
             "usage": {
@@ -3492,6 +3497,7 @@
                 "[DONE]"
               ]
             },
+            "requested_model_id": "scripted",
             "stream_collected": true,
             "stream_mode": true,
             "usage": {
@@ -3977,6 +3983,7 @@
                 "[DONE]"
               ]
             },
+            "requested_model_id": "scripted",
             "stream_collected": true,
             "stream_mode": true,
             "usage": {
@@ -4459,6 +4466,7 @@
               "stream_terminated": null,
               "termination_signals": null
             },
+            "requested_model_id": "scripted",
             "stream_collected": false,
             "stream_mode": false,
             "usage": {
@@ -4938,6 +4946,7 @@
               "stream_terminated": null,
               "termination_signals": null
             },
+            "requested_model_id": "scripted",
             "stream_collected": false,
             "stream_mode": false,
             "usage": {
@@ -5417,6 +5426,7 @@
               "stream_terminated": null,
               "termination_signals": null
             },
+            "requested_model_id": "scripted",
             "stream_collected": false,
             "stream_mode": false,
             "usage": {
@@ -5899,6 +5909,7 @@
                 "message_stop"
               ]
             },
+            "requested_model_id": "scripted",
             "stream_collected": true,
             "stream_mode": true,
             "usage": {
@@ -6355,6 +6366,7 @@
                 "message_stop"
               ]
             },
+            "requested_model_id": "scripted",
             "stream_collected": true,
             "stream_mode": true,
             "usage": {
@@ -6823,7 +6835,7 @@
           "cycle_index": 1,
           "agent_name": "kernel",
           "metadata": {
-            "session_seq": 6,
+            "session_seq": 9,
             "purpose": "primary",
             "model_rejection": {
               "message": "Model provider response was rejected.",
@@ -6872,7 +6884,7 @@
           "session_id": "s",
           "agent_name": "kernel",
           "metadata": {
-            "session_seq": 7
+            "session_seq": 11
           },
           "error": "model_request_rejected: HTTP 200: Model provider response was rejected.",
           "status": "failed",
@@ -7315,6 +7327,7 @@
               "termination_signals": null
             },
             "raw_content": [],
+            "requested_model_id": "scripted",
             "stream_collected": false,
             "stream_mode": false,
             "usage": {
@@ -7773,6 +7786,7 @@
               "termination_signals": null
             },
             "raw_content": [],
+            "requested_model_id": "scripted",
             "stream_collected": false,
             "stream_mode": false,
             "usage": {
@@ -8245,7 +8259,7 @@
           "cycle_index": 1,
           "agent_name": "kernel",
           "metadata": {
-            "session_seq": 6,
+            "session_seq": 9,
             "purpose": "primary",
             "model_rejection": {
               "message": "Model provider response was rejected.",
@@ -8298,7 +8312,7 @@
           "session_id": "s",
           "agent_name": "kernel",
           "metadata": {
-            "session_seq": 7
+            "session_seq": 11
           },
           "error": "model_request_rejected: HTTP 200: Model provider response was rejected.",
           "status": "failed",
@@ -8745,7 +8759,7 @@
           "cycle_index": 1,
           "agent_name": "kernel",
           "metadata": {
-            "session_seq": 6,
+            "session_seq": 9,
             "purpose": "primary"
           },
           "call_id": "s/turn/initial/model/primary/1/1",
@@ -8784,7 +8798,7 @@
           "cycle_index": 1,
           "agent_name": "kernel",
           "metadata": {
-            "session_seq": 9,
+            "session_seq": 15,
             "purpose": "primary"
           },
           "call_id": "s/turn/initial/model/primary/1/2",
@@ -8822,7 +8836,7 @@
           "session_id": "s",
           "agent_name": "kernel",
           "metadata": {
-            "session_seq": 10
+            "session_seq": 17
           },
           "error": "model_outcome_unknown",
           "status": "failed",
@@ -9718,7 +9732,7 @@
           "cycle_index": 1,
           "agent_name": "kernel",
           "metadata": {
-            "session_seq": 6,
+            "session_seq": 9,
             "purpose": "primary"
           },
           "call_id": "s/turn/initial/model/primary/1/1",
@@ -9757,7 +9771,7 @@
           "cycle_index": 1,
           "agent_name": "kernel",
           "metadata": {
-            "session_seq": 9,
+            "session_seq": 15,
             "purpose": "primary"
           },
           "call_id": "s/turn/initial/model/primary/1/2",
@@ -9795,7 +9809,7 @@
           "session_id": "s",
           "agent_name": "kernel",
           "metadata": {
-            "session_seq": 10
+            "session_seq": 17
           },
           "error": "model_outcome_unknown",
           "status": "failed",
@@ -10691,7 +10705,7 @@
           "cycle_index": 1,
           "agent_name": "kernel",
           "metadata": {
-            "session_seq": 6,
+            "session_seq": 9,
             "purpose": "primary"
           },
           "call_id": "s/turn/initial/model/primary/1/1",
@@ -10730,7 +10744,7 @@
           "cycle_index": 1,
           "agent_name": "kernel",
           "metadata": {
-            "session_seq": 9,
+            "session_seq": 15,
             "purpose": "primary"
           },
           "call_id": "s/turn/initial/model/primary/1/2",
@@ -10768,7 +10782,7 @@
           "session_id": "s",
           "agent_name": "kernel",
           "metadata": {
-            "session_seq": 10
+            "session_seq": 17
           },
           "error": "model_outcome_unknown",
           "status": "failed",
@@ -11661,6 +11675,7 @@
                 "[DONE]"
               ]
             },
+            "requested_model_id": "scripted",
             "stream_collected": true,
             "stream_mode": true,
             "usage": {
@@ -12145,6 +12160,7 @@
                 "[DONE]"
               ]
             },
+            "requested_model_id": "scripted",
             "stream_collected": true,
             "stream_mode": true,
             "usage": {
@@ -12629,6 +12645,7 @@
                 "[DONE]"
               ]
             },
+            "requested_model_id": "scripted",
             "stream_collected": true,
             "stream_mode": true,
             "usage": {
@@ -13113,6 +13130,7 @@
                 "finish_reason"
               ]
             },
+            "requested_model_id": "scripted",
             "stream_collected": true,
             "stream_mode": true,
             "usage": {
@@ -13597,6 +13615,7 @@
                 "finish_reason"
               ]
             },
+            "requested_model_id": "scripted",
             "stream_collected": true,
             "stream_mode": true,
             "usage": {
@@ -14081,6 +14100,7 @@
                 "finish_reason"
               ]
             },
+            "requested_model_id": "scripted",
             "stream_collected": true,
             "stream_mode": true,
             "usage": {
@@ -14566,6 +14586,7 @@
                 "[DONE]"
               ]
             },
+            "requested_model_id": "scripted",
             "stream_collected": true,
             "stream_mode": true,
             "usage": {
@@ -15051,6 +15072,7 @@
                 "[DONE]"
               ]
             },
+            "requested_model_id": "scripted",
             "stream_collected": true,
             "stream_mode": true,
             "usage": {
@@ -15536,6 +15558,7 @@
                 "[DONE]"
               ]
             },
+            "requested_model_id": "scripted",
             "stream_collected": true,
             "stream_mode": true,
             "usage": {
@@ -16020,6 +16043,7 @@
               "stream_terminated": null,
               "termination_signals": []
             },
+            "requested_model_id": "scripted",
             "stream_collected": true,
             "stream_mode": true,
             "usage": {
@@ -16504,6 +16528,7 @@
               "stream_terminated": null,
               "termination_signals": []
             },
+            "requested_model_id": "scripted",
             "stream_collected": true,
             "stream_mode": true,
             "usage": {
@@ -16988,6 +17013,7 @@
               "stream_terminated": null,
               "termination_signals": []
             },
+            "requested_model_id": "scripted",
             "stream_collected": true,
             "stream_mode": true,
             "usage": {
@@ -17473,6 +17499,7 @@
                 "[DONE]"
               ]
             },
+            "requested_model_id": "scripted",
             "stream_collected": true,
             "stream_mode": true,
             "usage": {
@@ -17958,6 +17985,7 @@
                 "[DONE]"
               ]
             },
+            "requested_model_id": "scripted",
             "stream_collected": true,
             "stream_mode": true,
             "usage": {
@@ -18443,6 +18471,7 @@
                 "[DONE]"
               ]
             },
+            "requested_model_id": "scripted",
             "stream_collected": true,
             "stream_mode": true,
             "usage": {
@@ -18928,6 +18957,7 @@
                 "[DONE]"
               ]
             },
+            "requested_model_id": "scripted",
             "stream_collected": true,
             "stream_mode": true,
             "usage": {
@@ -19413,6 +19443,7 @@
                 "[DONE]"
               ]
             },
+            "requested_model_id": "scripted",
             "stream_collected": true,
             "stream_mode": true,
             "usage": {
@@ -19898,6 +19929,7 @@
                 "[DONE]"
               ]
             },
+            "requested_model_id": "scripted",
             "stream_collected": true,
             "stream_mode": true,
             "usage": {
@@ -20380,6 +20412,7 @@
               "stream_terminated": null,
               "termination_signals": null
             },
+            "requested_model_id": "scripted",
             "stream_collected": false,
             "stream_mode": false,
             "usage": {
@@ -20859,6 +20892,7 @@
               "stream_terminated": null,
               "termination_signals": null
             },
+            "requested_model_id": "scripted",
             "stream_collected": false,
             "stream_mode": false,
             "usage": {
@@ -21338,6 +21372,7 @@
               "stream_terminated": null,
               "termination_signals": null
             },
+            "requested_model_id": "scripted",
             "stream_collected": false,
             "stream_mode": false,
             "usage": {
@@ -21820,6 +21855,7 @@
                 "[DONE]"
               ]
             },
+            "requested_model_id": "scripted",
             "stream_collected": true,
             "stream_mode": true,
             "usage": {
@@ -22301,6 +22337,7 @@
                 "[DONE]"
               ]
             },
+            "requested_model_id": "scripted",
             "stream_collected": true,
             "stream_mode": true,
             "usage": {
@@ -22794,7 +22831,7 @@
           "cycle_index": 1,
           "agent_name": "kernel",
           "metadata": {
-            "session_seq": 6,
+            "session_seq": 9,
             "purpose": "primary",
             "model_rejection": {
               "message": "Model provider response was rejected.",
@@ -22843,7 +22880,7 @@
           "session_id": "s",
           "agent_name": "kernel",
           "metadata": {
-            "session_seq": 7
+            "session_seq": 11
           },
           "error": "model_request_rejected: HTTP 200: Model provider response was rejected.",
           "status": "failed",
