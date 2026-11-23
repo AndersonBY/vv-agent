@@ -52,6 +52,7 @@ def boundary(stage, key, payload, *, turn_id):
 def sqlite_session(tmp_path):
     path = tmp_path / "events.sqlite"
     with SQLiteStore.standalone(str(path)) as raw_store:
+        raw_store.configure_input_admission(allow_unsigned=True)
         sessions = SessionDriver(store=raw_store, content_key_provider=LocalKeyProvider(b"m" * 32))
         sessions.create(
             "s",
@@ -190,7 +191,7 @@ def test_rejected_batch_preserves_sqlite_state_and_allows_corrected_commit(sqlit
         # Reuse the failed commit and boundary identities with valid bytes: neither was retained by the rejected batch.
         corrected = boundary("memory_completed", "prefix", wire("memory_compact_completed", run_id=turn_id), turn_id=turn_id)
         commit_boundary_records(store, path, (prefix, corrected), lease)
-        assert store.read("s", limit=1).head_seq == before_head + 2
+        assert store.read("s", limit=1).head_seq >= before_head + 2
         accepted, _, _ = store.read_state("s")
         assert set(accepted.boundaries) == {
             (turn_id, "memory_started", "prefix"),

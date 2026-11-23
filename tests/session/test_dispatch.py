@@ -619,7 +619,7 @@ def test_local_accepted_returns_parked_until_due_drive(
     )
     run_config = replace(rt.config, model=rt.resolved, model_provider=provider)
     kernel = SessionDriver(store=transport.store)
-    monkeypatch.setattr("vv_agent.session.surfaces.SessionDriver", lambda: kernel)
+    monkeypatch.setattr("vv_agent.session.surfaces.SessionDriver", lambda **_kwargs: kernel)
 
     def bound_runtime(agent, config, task=None, *, store, session_id, **_kwargs):
         del agent, config, task

@@ -193,6 +193,8 @@ def binding(store, session_id: str, events: list[str], clock: FixedClock, *, fac
 
 
 def create_session(store, session_id: str = "s") -> None:
+    if store._ledger_integrity_mode() == "unconfigured":
+        store.configure_input_admission(allow_unsigned=True)
     with store.atomic() as tx:
         tx.create(
             SessionSpec(session_id, principal(), content_ref("workspace"), attributes=content_ref("attributes")),
@@ -396,6 +398,7 @@ def factory(): return Fold(normalize_memory_settings=unused, count_messages=unus
 clock=Clock()
 with SQLiteStore.standalone(sys.argv[2], clock=clock, fold_factory=factory) as store:
     store.install_schema()
+    store.configure_input_admission(allow_unsigned=True)
     with store.atomic() as tx:
         tx.create(SessionSpec('s', json.loads(sys.argv[3]), json.loads(sys.argv[4]),
             attributes=json.loads(sys.argv[5])), consumers=())
