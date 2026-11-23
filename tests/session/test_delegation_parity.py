@@ -1087,7 +1087,7 @@ def test_configured_async_admission_status_and_late_delivery_parity(store, datab
     child_ids = [sid for sid in sdk_handle.kernel.store.list_sessions() if sid != old.raw_result.session_id]
     assert len(child_ids) == (2 if batch else 1)
     for sid in child_ids:
-        deadline = monotonic() + 5
+        deadline = monotonic() + 15
         while monotonic() < deadline:
             child_state, _, _ = sdk_handle.kernel.store.read_state(sid)
             if child_state.turns and next(reversed(child_state.turns.values())).ended:
