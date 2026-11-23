@@ -1118,8 +1118,8 @@ def test_configured_async_admission_status_and_late_delivery_parity(store, datab
         if stable and all(handle.done() for handle in handles):
             break
         if monotonic() >= handle_deadline:
-            assert stable, "SDK delegation handles did not reach a stable set before timeout"
             assert all(handle.done() for handle in handles), "SDK delegation handles did not finish before timeout"
+            assert stable, "SDK delegation handles did not reach a stable set before timeout"
             break
         previous_handles = handles
         Event().wait(0.01)
