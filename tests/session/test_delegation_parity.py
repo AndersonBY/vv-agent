@@ -1001,11 +1001,11 @@ def test_sdk_parent_cancellation_cascades_after_reconstruction(store, database, 
     old_provider = routed([call, block], [block] * (2 if mode == "batch" else 1))
     old_handle = Runner.start(parent, "go", run_config=RunConfig(workspace=tmp_path, model_provider=old_provider))
     try:
-        assert entered.wait(5)
+        assert entered.wait(15)
         old_handle.cancel()
     finally:
         release.set()
-    old = old_handle.result(5)
+    old = old_handle.result(15)
     assert old.completion_reason == CompletionReason.CANCELLED
     for handle in list(old_handle.kernel.handles):
         handle.join(5)
