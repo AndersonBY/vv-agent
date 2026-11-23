@@ -10,13 +10,24 @@ import pytest
 
 from vv_agent.session.postgres import PostgresStore
 from vv_agent.session.sqlite import SQLiteStore
+from vv_agent.session.timing import Clock
 
 Database = str | Path
 
 
 @contextmanager
-def open_store(database: Database, *, allow_unsigned: bool = True) -> Iterator[SQLiteStore | PostgresStore]:
-    manager = SQLiteStore.standalone(str(database)) if isinstance(database, Path) else PostgresStore.standalone(database)
+def open_store(
+    database: Database,
+    *,
+    allow_unsigned: bool = True,
+    clock: Clock | None = None,
+) -> Iterator[SQLiteStore | PostgresStore]:
+    if isinstance(database, Path):
+        manager = SQLiteStore.standalone(str(database), clock=clock)
+    else:
+        if clock is not None:
+            raise ValueError("clock is only supported for SQLite test stores")
+        manager = PostgresStore.standalone(database)
     with manager as store:
         if allow_unsigned:
             store.configure_input_admission(allow_unsigned=True)
