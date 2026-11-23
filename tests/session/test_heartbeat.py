@@ -74,7 +74,7 @@ def test_heartbeat_open_failure_reaches_public_caller(monkeypatch, tmp_path):
 
     monkeypatch.setattr(_Driver, "load_state", after_heartbeat_failure)
     monkeypatch.setattr(driver, "_build_runtime_for_claim", runtime_with_unavailable_heartbeat)
-    monkeypatch.setattr("vv_agent.session.surfaces.SessionDriver", lambda: driver)
+    monkeypatch.setattr("vv_agent.session.surfaces.SessionDriver", lambda **_kwargs: driver)
     config = RunConfig(model_provider=FixedModelProvider(ScriptedLLM([LLMResponse("unused")]), RESOLVED), workspace=tmp_path)
     try:
         with pytest.raises(LeaseRetryExhausted) as caught:
@@ -174,7 +174,7 @@ def test_runner_heartbeat_over_password_authenticated_tcp(password_postgres_dsn,
             capabilities=supports,
         )
         monkeypatch.setattr(PostgresStore, "renew", heartbeat_renew)
-        monkeypatch.setattr("vv_agent.session.surfaces.SessionDriver", lambda: driver)
+        monkeypatch.setattr("vv_agent.session.surfaces.SessionDriver", lambda **_kwargs: driver)
         try:
             result = Runner.run_sync(agent, "go", run_config=config)
             assert result.final_output == "done"

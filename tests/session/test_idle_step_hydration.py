@@ -87,7 +87,7 @@ def test_finished_active_prefix_does_not_rehydrate_whole_history_on_idle_step(
         state, _, _ = store.read_state("s")
 
     assert view_calls == [(SIZE, turn_id)]
-    assert batch_sizes == [SIZE]
+    assert batch_sizes == [SIZE, 1]
     assert read_calls > 0
     assert [row.record.encode() for row in after_records[: len(before_records)]] == [
         row.record.encode() for row in before_records

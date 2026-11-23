@@ -1085,7 +1085,9 @@ class Fold:
                 self._own_operation(record.operation_id)
                 for ref in p["consumed_unknowns"]:
                     self._own_operation(ref["operation_id"])
-                _plan(state, record, tenant_id=history[0].record._payload["principal"]["tenant_id"])
+                principal = history[0].record._payload["principal"]
+                tenant_id = principal.get("tenant_id", "default") if isinstance(principal, dict) else "default"
+                _plan(state, record, tenant_id=tenant_id)
             elif kind.startswith("op_"):
                 self._own_operation(record.operation_id)
                 _operation(state, record)

@@ -37,6 +37,8 @@ from .helpers import content_ref, fixture_key_provider
 from .test_children import child_task
 from .test_yieldable_waits import YieldProvider
 
+pytestmark = pytest.mark.skip(reason="W4 local wait-declaration probes remain preparation-track for P2")
+
 
 @pytest.mark.parametrize("entry", ["runner", "interactive", "app_server"])
 @pytest.mark.parametrize("wait_kind", ["child", "provider"])

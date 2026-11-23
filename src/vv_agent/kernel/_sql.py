@@ -648,7 +648,11 @@ class SQLStore:
 
     def _write_ceiling(self) -> int:
         """Read and lock the database-wide write ceiling inside the caller transaction."""
-        rows = self._rows(f"SELECT storage_major,write_level FROM sk_settings WHERE singleton=1{self.lock_clause}")
+        # A shared settings lock prevents a concurrent ceiling update while
+        # avoiding a lock-order cycle with content transactions that lock the
+        # session key before checking the ceiling.
+        settings_lock = " FOR SHARE" if self.lock_clause else ""
+        rows = self._rows(f"SELECT storage_major,write_level FROM sk_settings WHERE singleton=1{settings_lock}")
         if len(rows) != 1 or rows[0][0] != "S1":
             raise LedgerIntegrityError("settings do not identify an S1 store")
         return _level(rows[0][1], "write_level")

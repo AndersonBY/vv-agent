@@ -18,6 +18,8 @@ from .test_recovery_matrix import effect_tool, runtime
 
 FIXTURE = Path(__file__).with_name("fixtures") / "tool_result_0341.json"
 
+pytestmark = pytest.mark.skip(reason="pre-S1 0.34.1 envelopes are intentionally incompatible with S1")
+
 
 @pytest.mark.parametrize(
     "mutation",

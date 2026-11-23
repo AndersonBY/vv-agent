@@ -157,8 +157,8 @@ class InteractionServer:
 
     def close(self):
         self.server.router.cancel_matching_server_requests()
-        self.join()
         self.server.run_adapter.close()
+        self.join()
         self.server.kernel.close()
         self.content_key_provider.close()
 

@@ -67,6 +67,7 @@ def run_turn(server, sid, identity, expected=None):
     deadline = monotonic() + 5
     while monotonic() < deadline:
         server.kernel._worker.wake(sid)
+        server.kernel._worker.request_observation(wait=True)
         server.run_adapter.join()
         state, records, _ = server.kernel.store.read_state(sid)
         if state.active_turn_id is None and any(
