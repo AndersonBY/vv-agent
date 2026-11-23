@@ -178,6 +178,7 @@ def test_sql_driver_and_historical_rebuild_share_nondefault_ports(tmp_path):
     factory, calls, folds, normalize, count = _binding()
     path = tmp_path / "fold.sqlite"
     with SQLiteStore.standalone(str(path)) as database:
+        database.configure_input_admission(allow_unsigned=True)
         assert database.fold_factory is reducer.Fold  # A class default must not bind self.
         database.fold_factory = factory
         database.install_schema()
@@ -235,6 +236,7 @@ def test_replacing_sql_factory_discards_both_cached_prefixes(tmp_path):
     second, _, second_folds, normalize, count = _binding()
     with SQLiteStore.standalone(str(tmp_path / "fold.sqlite")) as database:
         database.install_schema()
+        database.configure_input_admission(allow_unsigned=True)
         database.fold_factory = first
         with database.atomic() as tx:
             for sid in ("parent", "child"):
@@ -259,6 +261,7 @@ def test_factory_selection_recognizes_core_sql_and_keeps_other_store_defaults(tm
     core_store = _sql.SQLStore(fold_factory=factory)
     assert reducer._fold_factory_for(core_store) is factory
     with SQLiteStore.standalone(str(tmp_path / "sdk-fold.sqlite")) as sdk_store:
+        sdk_store.configure_input_admission(allow_unsigned=True)
         sdk_store.fold_factory = factory
         assert reducer._fold_factory_for(sdk_store) is factory
     assert reducer._fold_factory_for(object()) is reducer.Fold
@@ -273,6 +276,7 @@ def test_real_app_server_fork_preserves_explicit_store_factory(monkeypatch, tmp_
     factory, _, folds, _, _ = _binding()
     with SQLiteStore.standalone(str(tmp_path / "fork.sqlite")) as database:
         database.install_schema()
+        database.configure_input_admission(allow_unsigned=True)
         database.fold_factory = factory
         host = DefaultAppServerHost(
             agent=Agent("test", "Answer."),
