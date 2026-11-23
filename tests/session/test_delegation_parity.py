@@ -6,6 +6,7 @@ from copy import deepcopy
 from dataclasses import replace
 from io import BytesIO
 from threading import Event, Thread
+from time import monotonic
 from typing import Any
 
 import pytest
@@ -67,8 +68,6 @@ from .helpers import push_fixture_input, wrap_fixture_store
 from .test_runner_parity import RESOLVED
 from .test_tools_control_parity import Restart, admit
 from .test_tools_control_parity import runtime as _runtime
-
-pytestmark = pytest.mark.skip(reason="W3 delegation parity remains preparation-track for P2")
 
 
 @pytest.fixture
@@ -1063,15 +1062,13 @@ def test_sdk_parent_cancellation_cascades_after_reconstruction(store, database, 
 @pytest.mark.capability("create-sub-task")
 @pytest.mark.parametrize("batch", [False, True])
 def test_configured_async_admission_status_and_late_delivery_parity(store, database, tmp_path, batch):
-    entered, release = Event(), Event()
+    release = Event()
 
     def block(_request):
-        entered.set()
         assert release.wait(10)
         return LLMResponse("child done")
 
     def final(_request):
-        assert entered.wait(5)
         return LLMResponse("parent done")
 
     args: dict[str, Any] = {"agent_id": "worker", "wait_for_completion": False}
@@ -1087,17 +1084,23 @@ def test_configured_async_admission_status_and_late_delivery_parity(store, datab
         release.set()
     for handle in list(sdk_handle.kernel.handles):
         handle.join(5)
-    for sid in sdk_handle.kernel.store.list_sessions():
-        if sid != old.raw_result.session_id:
+    child_ids = [sid for sid in sdk_handle.kernel.store.list_sessions() if sid != old.raw_result.session_id]
+    assert len(child_ids) == (2 if batch else 1)
+    for sid in child_ids:
+        deadline = monotonic() + 5
+        while monotonic() < deadline:
             child_state, _, _ = sdk_handle.kernel.store.read_state(sid)
-            if not child_state.turns:
-                continue
-            child_result = project_result(
-                sdk_handle.kernel.store,
-                sid,
-                next(reversed(child_state.turns)),
-            )
-            assert child_result.final_output == "child done"
+            if child_state.turns and next(reversed(child_state.turns.values())).ended:
+                break
+            Event().wait(0.01)
+        assert child_state.turns, f"admitted child session {sid!r} produced no turns before timeout"
+        assert next(reversed(child_state.turns.values())).ended, f"admitted child session {sid!r} did not finish before timeout"
+        child_result = project_result(
+            sdk_handle.kernel.store,
+            sid,
+            next(reversed(child_state.turns)),
+        )
+        assert child_result.final_output == "child done"
 
     config = RunConfig(
         workspace=tmp_path,
