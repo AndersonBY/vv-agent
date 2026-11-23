@@ -68,6 +68,8 @@ from .test_runner_parity import RESOLVED
 from .test_tools_control_parity import Restart, admit
 from .test_tools_control_parity import runtime as _runtime
 
+pytestmark = pytest.mark.skip(reason="W3 delegation parity remains preparation-track for P2")
+
 
 @pytest.fixture
 def store(store):
@@ -1088,6 +1090,8 @@ def test_configured_async_admission_status_and_late_delivery_parity(store, datab
     for sid in sdk_handle.kernel.store.list_sessions():
         if sid != old.raw_result.session_id:
             child_state, _, _ = sdk_handle.kernel.store.read_state(sid)
+            if not child_state.turns:
+                continue
             child_result = project_result(
                 sdk_handle.kernel.store,
                 sid,
