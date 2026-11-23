@@ -1105,22 +1105,23 @@ def test_configured_async_admission_status_and_late_delivery_parity(store, datab
         assert child_result.final_output == "child done"
 
     handle_deadline = monotonic() + 15
-    previous_handle_ids: set[int] = set()
+    previous_handles: tuple[object, ...] | None = None
     while True:
-        handles = list(sdk_handle.kernel.handles)
+        handles = tuple(sdk_handle.kernel.handles)
         for handle in handles:
             remaining = handle_deadline - monotonic()
             if remaining <= 0:
                 break
             handle.join(remaining)
-        handles = list(sdk_handle.kernel.handles)
-        handle_ids = {id(handle) for handle in handles}
-        if handle_ids == previous_handle_ids and all(handle.done() for handle in handles):
+        handles = tuple(sdk_handle.kernel.handles)
+        stable = previous_handles is not None and handles == previous_handles
+        if stable and all(handle.done() for handle in handles):
             break
         if monotonic() >= handle_deadline:
+            assert stable, "SDK delegation handles did not reach a stable set before timeout"
             assert all(handle.done() for handle in handles), "SDK delegation handles did not finish before timeout"
             break
-        previous_handle_ids = handle_ids
+        previous_handles = handles
         Event().wait(0.01)
 
     config = RunConfig(
