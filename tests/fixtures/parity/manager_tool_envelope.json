@@ -405,7 +405,7 @@
       "result": "first done",
       "session_id": "children/child/cd54c0761a7462c102c3263a",
       "status": "completed",
-      "terminal_digest": "455a1a2f637e3c5baec45c1e1fc59d33319567994dce6c73ad2cebe3738f4f4a",
+      "terminal_digest": "a58c65419c48342681e03b2b7500d69d736913359984a6b3dacde3a74a8b3a21",
       "terminal_seq": 11,
       "turn_id": "children/child/cd54c0761a7462c102c3263a/turn/start"
     },
@@ -415,7 +415,7 @@
       "result": "second done",
       "session_id": "children/child/6ee1165917b969608daab8e3",
       "status": "completed",
-      "terminal_digest": "1979033f4922829d808c97688f57ab7031a9a8ebdf43a440acf3da1a5b27d700",
+      "terminal_digest": "f36630c2343a31bbdca6c42e53d6ee6b63adbed4a0cf3c1a3fea97488f339a01",
       "terminal_seq": 11,
       "turn_id": "children/child/6ee1165917b969608daab8e3/turn/start"
     },
