@@ -7,9 +7,12 @@
     {
       "case": "steer",
       "creation": {
-        "attempt": null,
+        "record_id": "session/s/created",
         "kind": "session_created",
+        "session_id": "s",
+        "turn_id": null,
         "operation_id": null,
+        "attempt": null,
         "payload": {
           "attributes": {
             "seed": {
@@ -22,10 +25,7 @@
           "principal": "test",
           "workspace": "/tmp"
         },
-        "record_id": "session/s/created",
-        "schema_version": 1,
-        "session_id": "s",
-        "turn_id": null
+        "schema_version": 1
       },
       "record_digests": [
         "7e2da9756dede22d7792d6c76dcb247a9857f49962247b7bc7333fbc73f3a282",
@@ -70,29 +70,29 @@
       "last_primary_request": {
         "messages": [
           {
-            "role": "system",
             "content": "Be precise.",
             "metadata": {
               "_vv_agent_tool_policy_approval": "default",
               "_vv_agent_tool_use_behavior": "run_llm_again",
               "session_memory_enabled": false,
               "trace_id": "s/turn/initial"
-            }
+            },
+            "role": "system"
           },
           {
-            "role": "user",
             "content": "<Original User Request>\n\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"Summarized old work\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n</Persisted Artifacts>",
-            "name": "memory_summary",
             "metadata": {
               "_vv_agent_compaction": {
                 "artifacts": [],
                 "cursors": []
               }
-            }
+            },
+            "name": "memory_summary",
+            "role": "user"
           },
           {
-            "role": "user",
-            "content": "ORIGINAL-0"
+            "content": "ORIGINAL-0",
+            "role": "user"
           }
         ],
         "metadata": {
@@ -627,9 +627,12 @@
     {
       "case": "twelve_steers",
       "creation": {
-        "attempt": null,
+        "record_id": "session/s/created",
         "kind": "session_created",
+        "session_id": "s",
+        "turn_id": null,
         "operation_id": null,
+        "attempt": null,
         "payload": {
           "attributes": {
             "seed": {
@@ -642,10 +645,7 @@
           "principal": "test",
           "workspace": "/tmp"
         },
-        "record_id": "session/s/created",
-        "schema_version": 1,
-        "session_id": "s",
-        "turn_id": null
+        "schema_version": 1
       },
       "record_digests": [
         "7e2da9756dede22d7792d6c76dcb247a9857f49962247b7bc7333fbc73f3a282",
@@ -712,73 +712,73 @@
       "last_primary_request": {
         "messages": [
           {
-            "role": "system",
             "content": "Be precise.",
             "metadata": {
               "_vv_agent_tool_policy_approval": "default",
               "_vv_agent_tool_use_behavior": "run_llm_again",
               "session_memory_enabled": false,
               "trace_id": "s/turn/initial"
-            }
+            },
+            "role": "system"
           },
           {
-            "role": "user",
             "content": "<Original User Request>\n\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"Summarized old work\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n</Persisted Artifacts>",
-            "name": "memory_summary",
             "metadata": {
               "_vv_agent_compaction": {
                 "artifacts": [],
                 "cursors": []
               }
-            }
+            },
+            "name": "memory_summary",
+            "role": "user"
           },
           {
-            "role": "user",
-            "content": "ORIGINAL-0"
+            "content": "ORIGINAL-0",
+            "role": "user"
           },
           {
-            "role": "user",
-            "content": "ORIGINAL-1"
+            "content": "ORIGINAL-1",
+            "role": "user"
           },
           {
-            "role": "user",
-            "content": "ORIGINAL-2"
+            "content": "ORIGINAL-2",
+            "role": "user"
           },
           {
-            "role": "user",
-            "content": "ORIGINAL-3"
+            "content": "ORIGINAL-3",
+            "role": "user"
           },
           {
-            "role": "user",
-            "content": "ORIGINAL-4"
+            "content": "ORIGINAL-4",
+            "role": "user"
           },
           {
-            "role": "user",
-            "content": "ORIGINAL-5"
+            "content": "ORIGINAL-5",
+            "role": "user"
           },
           {
-            "role": "user",
-            "content": "ORIGINAL-6"
+            "content": "ORIGINAL-6",
+            "role": "user"
           },
           {
-            "role": "user",
-            "content": "ORIGINAL-7"
+            "content": "ORIGINAL-7",
+            "role": "user"
           },
           {
-            "role": "user",
-            "content": "ORIGINAL-8"
+            "content": "ORIGINAL-8",
+            "role": "user"
           },
           {
-            "role": "user",
-            "content": "ORIGINAL-9"
+            "content": "ORIGINAL-9",
+            "role": "user"
           },
           {
-            "role": "user",
-            "content": "ORIGINAL-10"
+            "content": "ORIGINAL-10",
+            "role": "user"
           },
           {
-            "role": "user",
-            "content": "ORIGINAL-11"
+            "content": "ORIGINAL-11",
+            "role": "user"
           }
         ],
         "metadata": {
@@ -1423,9 +1423,12 @@
     {
       "case": "user",
       "creation": {
-        "attempt": null,
+        "record_id": "session/s/created",
         "kind": "session_created",
+        "session_id": "s",
+        "turn_id": null,
         "operation_id": null,
+        "attempt": null,
         "payload": {
           "attributes": {
             "seed": {
@@ -1438,10 +1441,7 @@
           "principal": "test",
           "workspace": "/tmp"
         },
-        "record_id": "session/s/created",
-        "schema_version": 1,
-        "session_id": "s",
-        "turn_id": null
+        "schema_version": 1
       },
       "record_digests": [
         "7e2da9756dede22d7792d6c76dcb247a9857f49962247b7bc7333fbc73f3a282",
@@ -1487,29 +1487,29 @@
       "last_primary_request": {
         "messages": [
           {
-            "role": "system",
             "content": "Be precise.",
             "metadata": {
               "_vv_agent_tool_policy_approval": "default",
               "_vv_agent_tool_use_behavior": "run_llm_again",
               "session_memory_enabled": false,
               "trace_id": "s/turn/initial"
-            }
+            },
+            "role": "system"
           },
           {
-            "role": "user",
             "content": "<Original User Request>\n\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"Summarized old work\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n</Persisted Artifacts>",
-            "name": "memory_summary",
             "metadata": {
               "_vv_agent_compaction": {
                 "artifacts": [],
                 "cursors": []
               }
-            }
+            },
+            "name": "memory_summary",
+            "role": "user"
           },
           {
-            "role": "user",
-            "content": "USER-ORIGINAL"
+            "content": "USER-ORIGINAL",
+            "role": "user"
           }
         ],
         "metadata": {
@@ -2041,9 +2041,12 @@
     {
       "case": "tool_user_reply",
       "creation": {
-        "attempt": null,
+        "record_id": "session/s/created",
         "kind": "session_created",
+        "session_id": "s",
+        "turn_id": null,
         "operation_id": null,
+        "attempt": null,
         "payload": {
           "attributes": {
             "seed": {
@@ -2056,10 +2059,7 @@
           "principal": "test",
           "workspace": "/tmp"
         },
-        "record_id": "session/s/created",
-        "schema_version": 1,
-        "session_id": "s",
-        "turn_id": null
+        "schema_version": 1
       },
       "record_digests": [
         "7e2da9756dede22d7792d6c76dcb247a9857f49962247b7bc7333fbc73f3a282",
@@ -2114,43 +2114,43 @@
       "last_primary_request": {
         "messages": [
           {
-            "role": "system",
             "content": "Be precise.",
             "metadata": {
               "_vv_agent_tool_policy_approval": "default",
               "_vv_agent_tool_use_behavior": "run_llm_again",
               "session_memory_enabled": false,
               "trace_id": "s/turn/initial"
-            }
+            },
+            "role": "system"
           },
           {
-            "role": "user",
             "content": "<Original User Request>\n\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"Summarized old work\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n</Persisted Artifacts>",
-            "name": "memory_summary",
             "metadata": {
               "_vv_agent_compaction": {
                 "artifacts": [],
                 "cursors": []
               }
-            }
+            },
+            "name": "memory_summary",
+            "role": "user"
           },
           {
-            "role": "assistant",
             "content": "",
+            "role": "assistant",
             "tool_calls": [
               {
-                "id": "question",
-                "type": "function",
                 "function": {
-                  "name": "ask_user",
-                  "arguments": "{\"question\":\"Choose\"}"
-                }
+                  "arguments": "{\"question\":\"Choose\"}",
+                  "name": "ask_user"
+                },
+                "id": "question",
+                "type": "function"
               }
             ]
           },
           {
-            "role": "tool",
             "content": "{\"reply_mode\":\"free_text\",\"text\":\"TOOL-ORIGINAL\"}",
+            "role": "tool",
             "tool_call_id": "question"
           }
         ],
@@ -2717,9 +2717,12 @@
     {
       "case": "child",
       "creation": {
-        "attempt": null,
+        "record_id": "session/s/created",
         "kind": "session_created",
+        "session_id": "s",
+        "turn_id": null,
         "operation_id": null,
+        "attempt": null,
         "payload": {
           "attributes": {
             "seed": {
@@ -2732,10 +2735,7 @@
           "principal": "test",
           "workspace": "/tmp"
         },
-        "record_id": "session/s/created",
-        "schema_version": 1,
-        "session_id": "s",
-        "turn_id": null
+        "schema_version": 1
       },
       "record_digests": [
         "7e2da9756dede22d7792d6c76dcb247a9857f49962247b7bc7333fbc73f3a282",
@@ -2784,29 +2784,29 @@
       "last_primary_request": {
         "messages": [
           {
-            "role": "system",
             "content": "Be precise.",
             "metadata": {
               "_vv_agent_tool_policy_approval": "default",
               "_vv_agent_tool_use_behavior": "run_llm_again",
               "session_memory_enabled": false,
               "trace_id": "s/turn/initial"
-            }
+            },
+            "role": "system"
           },
           {
-            "role": "user",
             "content": "<Original User Request>\n\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"Summarized old work\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n</Persisted Artifacts>",
-            "name": "memory_summary",
             "metadata": {
               "_vv_agent_compaction": {
                 "artifacts": [],
                 "cursors": []
               }
-            }
+            },
+            "name": "memory_summary",
+            "role": "user"
           },
           {
-            "role": "user",
-            "content": "Child completed: {\"attempt\": 1, \"operation_id\": \"s/turn/initial/model/primary/1/attempt/1/tool/0\", \"result\": \"child-0 ORIGINAL\", \"session_id\": \"child-0\", \"status\": \"completed\", \"terminal_digest\": \"5f4d4b25bb0ee7e5c3b4d76a1cddbe5e10627378e3b3de754e6769663a9c6a3c\", \"terminal_seq\": 11, \"turn_id\": \"child-0/turn/start\"}"
+            "content": "Child completed: {\"attempt\": 1, \"operation_id\": \"s/turn/initial/model/primary/1/attempt/1/tool/0\", \"result\": \"child-0 ORIGINAL\", \"session_id\": \"child-0\", \"status\": \"completed\", \"terminal_digest\": \"5f4d4b25bb0ee7e5c3b4d76a1cddbe5e10627378e3b3de754e6769663a9c6a3c\", \"terminal_seq\": 11, \"turn_id\": \"child-0/turn/start\"}",
+            "role": "user"
           }
         ],
         "metadata": {
@@ -3355,9 +3355,12 @@
     {
       "case": "twelve_children",
       "creation": {
-        "attempt": null,
+        "record_id": "session/s/created",
         "kind": "session_created",
+        "session_id": "s",
+        "turn_id": null,
         "operation_id": null,
+        "attempt": null,
         "payload": {
           "attributes": {
             "seed": {
@@ -3370,10 +3373,7 @@
           "principal": "test",
           "workspace": "/tmp"
         },
-        "record_id": "session/s/created",
-        "schema_version": 1,
-        "session_id": "s",
-        "turn_id": null
+        "schema_version": 1
       },
       "record_digests": [
         "7e2da9756dede22d7792d6c76dcb247a9857f49962247b7bc7333fbc73f3a282",
@@ -3444,73 +3444,73 @@
       "last_primary_request": {
         "messages": [
           {
-            "role": "system",
             "content": "Be precise.",
             "metadata": {
               "_vv_agent_tool_policy_approval": "default",
               "_vv_agent_tool_use_behavior": "run_llm_again",
               "session_memory_enabled": false,
               "trace_id": "s/turn/initial"
-            }
+            },
+            "role": "system"
           },
           {
-            "role": "user",
             "content": "<Original User Request>\n\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"Summarized old work\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n</Persisted Artifacts>",
-            "name": "memory_summary",
             "metadata": {
               "_vv_agent_compaction": {
                 "artifacts": [],
                 "cursors": []
               }
-            }
+            },
+            "name": "memory_summary",
+            "role": "user"
           },
           {
-            "role": "user",
-            "content": "Child completed: {\"attempt\": 1, \"operation_id\": \"s/turn/initial/model/primary/1/attempt/1/tool/0\", \"result\": \"child-0 ORIGINAL\", \"session_id\": \"child-0\", \"status\": \"completed\", \"terminal_digest\": \"5f4d4b25bb0ee7e5c3b4d76a1cddbe5e10627378e3b3de754e6769663a9c6a3c\", \"terminal_seq\": 11, \"turn_id\": \"child-0/turn/start\"}"
+            "content": "Child completed: {\"attempt\": 1, \"operation_id\": \"s/turn/initial/model/primary/1/attempt/1/tool/0\", \"result\": \"child-0 ORIGINAL\", \"session_id\": \"child-0\", \"status\": \"completed\", \"terminal_digest\": \"5f4d4b25bb0ee7e5c3b4d76a1cddbe5e10627378e3b3de754e6769663a9c6a3c\", \"terminal_seq\": 11, \"turn_id\": \"child-0/turn/start\"}",
+            "role": "user"
           },
           {
-            "role": "user",
-            "content": "Child completed: {\"attempt\": 1, \"operation_id\": \"s/turn/initial/model/primary/1/attempt/1/tool/0\", \"result\": \"child-1 ORIGINAL\", \"session_id\": \"child-1\", \"status\": \"completed\", \"terminal_digest\": \"375fa3bebf77b3607d159849d449edfbc13a471b9d9c66cfbd08141301e1e765\", \"terminal_seq\": 11, \"turn_id\": \"child-1/turn/start\"}"
+            "content": "Child completed: {\"attempt\": 1, \"operation_id\": \"s/turn/initial/model/primary/1/attempt/1/tool/0\", \"result\": \"child-1 ORIGINAL\", \"session_id\": \"child-1\", \"status\": \"completed\", \"terminal_digest\": \"375fa3bebf77b3607d159849d449edfbc13a471b9d9c66cfbd08141301e1e765\", \"terminal_seq\": 11, \"turn_id\": \"child-1/turn/start\"}",
+            "role": "user"
           },
           {
-            "role": "user",
-            "content": "Child completed: {\"attempt\": 1, \"operation_id\": \"s/turn/initial/model/primary/1/attempt/1/tool/0\", \"result\": \"child-2 ORIGINAL\", \"session_id\": \"child-2\", \"status\": \"completed\", \"terminal_digest\": \"f92cde9051fb1cc2e1acda80c2446c5cb7bffd7fff51da183dda8cd227015d51\", \"terminal_seq\": 11, \"turn_id\": \"child-2/turn/start\"}"
+            "content": "Child completed: {\"attempt\": 1, \"operation_id\": \"s/turn/initial/model/primary/1/attempt/1/tool/0\", \"result\": \"child-2 ORIGINAL\", \"session_id\": \"child-2\", \"status\": \"completed\", \"terminal_digest\": \"f92cde9051fb1cc2e1acda80c2446c5cb7bffd7fff51da183dda8cd227015d51\", \"terminal_seq\": 11, \"turn_id\": \"child-2/turn/start\"}",
+            "role": "user"
           },
           {
-            "role": "user",
-            "content": "Child completed: {\"attempt\": 1, \"operation_id\": \"s/turn/initial/model/primary/1/attempt/1/tool/0\", \"result\": \"child-3 ORIGINAL\", \"session_id\": \"child-3\", \"status\": \"completed\", \"terminal_digest\": \"6f153aa0847b0ab55780fb117c6e9d0fa3d65a4f00be7b285df063342f97a142\", \"terminal_seq\": 11, \"turn_id\": \"child-3/turn/start\"}"
+            "content": "Child completed: {\"attempt\": 1, \"operation_id\": \"s/turn/initial/model/primary/1/attempt/1/tool/0\", \"result\": \"child-3 ORIGINAL\", \"session_id\": \"child-3\", \"status\": \"completed\", \"terminal_digest\": \"6f153aa0847b0ab55780fb117c6e9d0fa3d65a4f00be7b285df063342f97a142\", \"terminal_seq\": 11, \"turn_id\": \"child-3/turn/start\"}",
+            "role": "user"
           },
           {
-            "role": "user",
-            "content": "Child completed: {\"attempt\": 1, \"operation_id\": \"s/turn/initial/model/primary/1/attempt/1/tool/0\", \"result\": \"child-4 ORIGINAL\", \"session_id\": \"child-4\", \"status\": \"completed\", \"terminal_digest\": \"2e05a841b4c267e4bf881429d17a388a9ffb6d2b8d9938ce4a25bc13c5ed20e6\", \"terminal_seq\": 11, \"turn_id\": \"child-4/turn/start\"}"
+            "content": "Child completed: {\"attempt\": 1, \"operation_id\": \"s/turn/initial/model/primary/1/attempt/1/tool/0\", \"result\": \"child-4 ORIGINAL\", \"session_id\": \"child-4\", \"status\": \"completed\", \"terminal_digest\": \"2e05a841b4c267e4bf881429d17a388a9ffb6d2b8d9938ce4a25bc13c5ed20e6\", \"terminal_seq\": 11, \"turn_id\": \"child-4/turn/start\"}",
+            "role": "user"
           },
           {
-            "role": "user",
-            "content": "Child completed: {\"attempt\": 1, \"operation_id\": \"s/turn/initial/model/primary/1/attempt/1/tool/0\", \"result\": \"child-5 ORIGINAL\", \"session_id\": \"child-5\", \"status\": \"completed\", \"terminal_digest\": \"4634962e86ec3f0dfaf3f93590225007f9bd99d55a045f38f99fb975836d9dcd\", \"terminal_seq\": 11, \"turn_id\": \"child-5/turn/start\"}"
+            "content": "Child completed: {\"attempt\": 1, \"operation_id\": \"s/turn/initial/model/primary/1/attempt/1/tool/0\", \"result\": \"child-5 ORIGINAL\", \"session_id\": \"child-5\", \"status\": \"completed\", \"terminal_digest\": \"4634962e86ec3f0dfaf3f93590225007f9bd99d55a045f38f99fb975836d9dcd\", \"terminal_seq\": 11, \"turn_id\": \"child-5/turn/start\"}",
+            "role": "user"
           },
           {
-            "role": "user",
-            "content": "Child completed: {\"attempt\": 1, \"operation_id\": \"s/turn/initial/model/primary/1/attempt/1/tool/0\", \"result\": \"child-6 ORIGINAL\", \"session_id\": \"child-6\", \"status\": \"completed\", \"terminal_digest\": \"2bb29c15427972f9eef012a8f06d8f6cf870f7456471a7f9996b900a03a0317b\", \"terminal_seq\": 11, \"turn_id\": \"child-6/turn/start\"}"
+            "content": "Child completed: {\"attempt\": 1, \"operation_id\": \"s/turn/initial/model/primary/1/attempt/1/tool/0\", \"result\": \"child-6 ORIGINAL\", \"session_id\": \"child-6\", \"status\": \"completed\", \"terminal_digest\": \"2bb29c15427972f9eef012a8f06d8f6cf870f7456471a7f9996b900a03a0317b\", \"terminal_seq\": 11, \"turn_id\": \"child-6/turn/start\"}",
+            "role": "user"
           },
           {
-            "role": "user",
-            "content": "Child completed: {\"attempt\": 1, \"operation_id\": \"s/turn/initial/model/primary/1/attempt/1/tool/0\", \"result\": \"child-7 ORIGINAL\", \"session_id\": \"child-7\", \"status\": \"completed\", \"terminal_digest\": \"8a9d3e4febf41e15f84002b350e0a892bc74b34bc66d00c57c511df8bfd847b5\", \"terminal_seq\": 11, \"turn_id\": \"child-7/turn/start\"}"
+            "content": "Child completed: {\"attempt\": 1, \"operation_id\": \"s/turn/initial/model/primary/1/attempt/1/tool/0\", \"result\": \"child-7 ORIGINAL\", \"session_id\": \"child-7\", \"status\": \"completed\", \"terminal_digest\": \"8a9d3e4febf41e15f84002b350e0a892bc74b34bc66d00c57c511df8bfd847b5\", \"terminal_seq\": 11, \"turn_id\": \"child-7/turn/start\"}",
+            "role": "user"
           },
           {
-            "role": "user",
-            "content": "Child completed: {\"attempt\": 1, \"operation_id\": \"s/turn/initial/model/primary/1/attempt/1/tool/0\", \"result\": \"child-8 ORIGINAL\", \"session_id\": \"child-8\", \"status\": \"completed\", \"terminal_digest\": \"b2d342f7013a141b5fae1c2521bebe6473705d70d80b46440f97f9ec635c1a6b\", \"terminal_seq\": 11, \"turn_id\": \"child-8/turn/start\"}"
+            "content": "Child completed: {\"attempt\": 1, \"operation_id\": \"s/turn/initial/model/primary/1/attempt/1/tool/0\", \"result\": \"child-8 ORIGINAL\", \"session_id\": \"child-8\", \"status\": \"completed\", \"terminal_digest\": \"b2d342f7013a141b5fae1c2521bebe6473705d70d80b46440f97f9ec635c1a6b\", \"terminal_seq\": 11, \"turn_id\": \"child-8/turn/start\"}",
+            "role": "user"
           },
           {
-            "role": "user",
-            "content": "Child completed: {\"attempt\": 1, \"operation_id\": \"s/turn/initial/model/primary/1/attempt/1/tool/0\", \"result\": \"child-9 ORIGINAL\", \"session_id\": \"child-9\", \"status\": \"completed\", \"terminal_digest\": \"a7922448f66d5c507ae77fcadd6eabe63ee7d76b5cf3a63717d4dd4bc6252676\", \"terminal_seq\": 11, \"turn_id\": \"child-9/turn/start\"}"
+            "content": "Child completed: {\"attempt\": 1, \"operation_id\": \"s/turn/initial/model/primary/1/attempt/1/tool/0\", \"result\": \"child-9 ORIGINAL\", \"session_id\": \"child-9\", \"status\": \"completed\", \"terminal_digest\": \"a7922448f66d5c507ae77fcadd6eabe63ee7d76b5cf3a63717d4dd4bc6252676\", \"terminal_seq\": 11, \"turn_id\": \"child-9/turn/start\"}",
+            "role": "user"
           },
           {
-            "role": "user",
-            "content": "Child completed: {\"attempt\": 1, \"operation_id\": \"s/turn/initial/model/primary/1/attempt/1/tool/0\", \"result\": \"child-10 ORIGINAL\", \"session_id\": \"child-10\", \"status\": \"completed\", \"terminal_digest\": \"6ae0b63b100acb9ecde9d575306f0bd055447ecaa3649ff4b49e7b47a0c6d9b9\", \"terminal_seq\": 11, \"turn_id\": \"child-10/turn/start\"}"
+            "content": "Child completed: {\"attempt\": 1, \"operation_id\": \"s/turn/initial/model/primary/1/attempt/1/tool/0\", \"result\": \"child-10 ORIGINAL\", \"session_id\": \"child-10\", \"status\": \"completed\", \"terminal_digest\": \"6ae0b63b100acb9ecde9d575306f0bd055447ecaa3649ff4b49e7b47a0c6d9b9\", \"terminal_seq\": 11, \"turn_id\": \"child-10/turn/start\"}",
+            "role": "user"
           },
           {
-            "role": "user",
-            "content": "Child completed: {\"attempt\": 1, \"operation_id\": \"s/turn/initial/model/primary/1/attempt/1/tool/0\", \"result\": \"child-11 ORIGINAL\", \"session_id\": \"child-11\", \"status\": \"completed\", \"terminal_digest\": \"67c8e2fd813bd7fbf9b6c2e6c27cd2549d230abd4a7606c4f7d25959468c0e59\", \"terminal_seq\": 11, \"turn_id\": \"child-11/turn/start\"}"
+            "content": "Child completed: {\"attempt\": 1, \"operation_id\": \"s/turn/initial/model/primary/1/attempt/1/tool/0\", \"result\": \"child-11 ORIGINAL\", \"session_id\": \"child-11\", \"status\": \"completed\", \"terminal_digest\": \"67c8e2fd813bd7fbf9b6c2e6c27cd2549d230abd4a7606c4f7d25959468c0e59\", \"terminal_seq\": 11, \"turn_id\": \"child-11/turn/start\"}",
+            "role": "user"
           }
         ],
         "metadata": {
@@ -4169,9 +4169,12 @@
     {
       "case": "capacity",
       "creation": {
-        "attempt": null,
+        "record_id": "session/s/created",
         "kind": "session_created",
+        "session_id": "s",
+        "turn_id": null,
         "operation_id": null,
+        "attempt": null,
         "payload": {
           "attributes": {
             "seed": {
@@ -4184,10 +4187,7 @@
           "principal": "test",
           "workspace": "/tmp"
         },
-        "record_id": "session/s/created",
-        "schema_version": 1,
-        "session_id": "s",
-        "turn_id": null
+        "schema_version": 1
       },
       "record_digests": [
         "7e2da9756dede22d7792d6c76dcb247a9857f49962247b7bc7333fbc73f3a282",
@@ -4226,9 +4226,12 @@
     {
       "case": "restart_planned",
       "creation": {
-        "attempt": null,
+        "record_id": "session/s/created",
         "kind": "session_created",
+        "session_id": "s",
+        "turn_id": null,
         "operation_id": null,
+        "attempt": null,
         "payload": {
           "attributes": {
             "seed": {
@@ -4241,10 +4244,7 @@
           "principal": "test",
           "workspace": "/tmp"
         },
-        "record_id": "session/s/created",
-        "schema_version": 1,
-        "session_id": "s",
-        "turn_id": null
+        "schema_version": 1
       },
       "record_digests": [
         "7e2da9756dede22d7792d6c76dcb247a9857f49962247b7bc7333fbc73f3a282",
@@ -4289,29 +4289,29 @@
       "last_primary_request": {
         "messages": [
           {
-            "role": "system",
             "content": "Be precise.",
             "metadata": {
               "_vv_agent_tool_policy_approval": "default",
               "_vv_agent_tool_use_behavior": "run_llm_again",
               "session_memory_enabled": false,
               "trace_id": "s/turn/initial"
-            }
+            },
+            "role": "system"
           },
           {
-            "role": "user",
             "content": "<Original User Request>\n\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"Summarized old work\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n</Persisted Artifacts>",
-            "name": "memory_summary",
             "metadata": {
               "_vv_agent_compaction": {
                 "artifacts": [],
                 "cursors": []
               }
-            }
+            },
+            "name": "memory_summary",
+            "role": "user"
           },
           {
-            "role": "user",
-            "content": "RESTART-ORIGINAL"
+            "content": "RESTART-ORIGINAL",
+            "role": "user"
           }
         ],
         "metadata": {
@@ -4846,9 +4846,12 @@
     {
       "case": "restart_receipt",
       "creation": {
-        "attempt": null,
+        "record_id": "session/s/created",
         "kind": "session_created",
+        "session_id": "s",
+        "turn_id": null,
         "operation_id": null,
+        "attempt": null,
         "payload": {
           "attributes": {
             "seed": {
@@ -4861,10 +4864,7 @@
           "principal": "test",
           "workspace": "/tmp"
         },
-        "record_id": "session/s/created",
-        "schema_version": 1,
-        "session_id": "s",
-        "turn_id": null
+        "schema_version": 1
       },
       "record_digests": [
         "7e2da9756dede22d7792d6c76dcb247a9857f49962247b7bc7333fbc73f3a282",
@@ -4909,29 +4909,29 @@
       "last_primary_request": {
         "messages": [
           {
-            "role": "system",
             "content": "Be precise.",
             "metadata": {
               "_vv_agent_tool_policy_approval": "default",
               "_vv_agent_tool_use_behavior": "run_llm_again",
               "session_memory_enabled": false,
               "trace_id": "s/turn/initial"
-            }
+            },
+            "role": "system"
           },
           {
-            "role": "user",
             "content": "<Original User Request>\n\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"Summarized old work\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n</Persisted Artifacts>",
-            "name": "memory_summary",
             "metadata": {
               "_vv_agent_compaction": {
                 "artifacts": [],
                 "cursors": []
               }
-            }
+            },
+            "name": "memory_summary",
+            "role": "user"
           },
           {
-            "role": "user",
-            "content": "RESTART-ORIGINAL"
+            "content": "RESTART-ORIGINAL",
+            "role": "user"
           }
         ],
         "metadata": {
@@ -5466,9 +5466,12 @@
     {
       "case": "restart_accepted",
       "creation": {
-        "attempt": null,
+        "record_id": "session/s/created",
         "kind": "session_created",
+        "session_id": "s",
+        "turn_id": null,
         "operation_id": null,
+        "attempt": null,
         "payload": {
           "attributes": {
             "seed": {
@@ -5481,10 +5484,7 @@
           "principal": "test",
           "workspace": "/tmp"
         },
-        "record_id": "session/s/created",
-        "schema_version": 1,
-        "session_id": "s",
-        "turn_id": null
+        "schema_version": 1
       },
       "record_digests": [
         "7e2da9756dede22d7792d6c76dcb247a9857f49962247b7bc7333fbc73f3a282",
@@ -5529,29 +5529,29 @@
       "last_primary_request": {
         "messages": [
           {
-            "role": "system",
             "content": "Be precise.",
             "metadata": {
               "_vv_agent_tool_policy_approval": "default",
               "_vv_agent_tool_use_behavior": "run_llm_again",
               "session_memory_enabled": false,
               "trace_id": "s/turn/initial"
-            }
+            },
+            "role": "system"
           },
           {
-            "role": "user",
             "content": "<Original User Request>\n\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"Summarized old work\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n</Persisted Artifacts>",
-            "name": "memory_summary",
             "metadata": {
               "_vv_agent_compaction": {
                 "artifacts": [],
                 "cursors": []
               }
-            }
+            },
+            "name": "memory_summary",
+            "role": "user"
           },
           {
-            "role": "user",
-            "content": "RESTART-ORIGINAL"
+            "content": "RESTART-ORIGINAL",
+            "role": "user"
           }
         ],
         "metadata": {
@@ -6086,9 +6086,12 @@
     {
       "case": "provider_callback",
       "creation": {
-        "attempt": null,
+        "record_id": "session/s/created",
         "kind": "session_created",
+        "session_id": "s",
+        "turn_id": null,
         "operation_id": null,
+        "attempt": null,
         "payload": {
           "attributes": {
             "seed": {
@@ -6101,10 +6104,7 @@
           "principal": "test",
           "workspace": "/tmp"
         },
-        "record_id": "session/s/created",
-        "schema_version": 1,
-        "session_id": "s",
-        "turn_id": null
+        "schema_version": 1
       },
       "record_digests": [
         "7e2da9756dede22d7792d6c76dcb247a9857f49962247b7bc7333fbc73f3a282",
@@ -6163,48 +6163,48 @@
       "last_primary_request": {
         "messages": [
           {
-            "role": "system",
             "content": "Be precise.",
             "metadata": {
               "_vv_agent_tool_policy_approval": "default",
               "_vv_agent_tool_use_behavior": "run_llm_again",
               "session_memory_enabled": false,
               "trace_id": "s/turn/initial"
-            }
+            },
+            "role": "system"
           },
           {
-            "role": "user",
             "content": "<Original User Request>\n\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"Summarized old work\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n</Persisted Artifacts>",
-            "name": "memory_summary",
             "metadata": {
               "_vv_agent_compaction": {
                 "artifacts": [],
                 "cursors": []
               }
-            }
+            },
+            "name": "memory_summary",
+            "role": "user"
           },
           {
-            "role": "assistant",
             "content": "",
+            "role": "assistant",
             "tool_calls": [
               {
-                "id": "e",
-                "type": "function",
                 "function": {
-                  "name": "effect",
-                  "arguments": "{}"
-                }
+                  "arguments": "{}",
+                  "name": "effect"
+                },
+                "id": "e",
+                "type": "function"
               }
             ]
           },
           {
-            "role": "tool",
             "content": "PROVIDER-INPUT-ORIGINAL",
+            "role": "tool",
             "tool_call_id": "e"
           },
           {
-            "role": "user",
-            "content": "STEER-ORIGINAL"
+            "content": "STEER-ORIGINAL",
+            "role": "user"
           }
         ],
         "metadata": {
@@ -6794,9 +6794,12 @@
     {
       "case": "provider_correction",
       "creation": {
-        "attempt": null,
+        "record_id": "session/s/created",
         "kind": "session_created",
+        "session_id": "s",
+        "turn_id": null,
         "operation_id": null,
+        "attempt": null,
         "payload": {
           "attributes": {
             "seed": {
@@ -6809,10 +6812,7 @@
           "principal": "test",
           "workspace": "/tmp"
         },
-        "record_id": "session/s/created",
-        "schema_version": 1,
-        "session_id": "s",
-        "turn_id": null
+        "schema_version": 1
       },
       "record_digests": [
         "7e2da9756dede22d7792d6c76dcb247a9857f49962247b7bc7333fbc73f3a282",
@@ -6850,46 +6850,46 @@
       "last_primary_request": {
         "messages": [
           {
-            "role": "system",
             "content": "Be precise.",
             "metadata": {
               "_vv_agent_tool_policy_approval": "default",
               "_vv_agent_tool_use_behavior": "run_llm_again",
               "session_memory_enabled": false,
               "trace_id": "s/turn/initial"
-            }
+            },
+            "role": "system"
           },
           {
-            "role": "user",
-            "content": "go"
+            "content": "go",
+            "role": "user"
           },
           {
-            "role": "assistant",
             "content": "seen old group",
+            "role": "assistant",
             "tool_calls": [
               {
-                "id": "e",
-                "type": "function",
                 "function": {
-                  "name": "effect",
-                  "arguments": "{}"
-                }
+                  "arguments": "{}",
+                  "name": "effect"
+                },
+                "id": "e",
+                "type": "function"
               }
             ]
           },
           {
-            "role": "tool",
             "content": "{\"error\": \"tool_outcome_unknown\", \"retryable\": false}",
             "name": "effect",
+            "role": "tool",
             "tool_call_id": "e"
           },
           {
-            "role": "assistant",
-            "content": "response to the request before the correction"
+            "content": "response to the request before the correction",
+            "role": "assistant"
           },
           {
-            "role": "user",
-            "content": "Correction for s/turn/initial/model/primary/1/attempt/1/tool/0: PROVIDER-INPUT-ORIGINAL"
+            "content": "Correction for s/turn/initial/model/primary/1/attempt/1/tool/0: PROVIDER-INPUT-ORIGINAL",
+            "role": "user"
           }
         ],
         "metadata": {
@@ -7409,9 +7409,12 @@
     {
       "case": "provider_audit",
       "creation": {
-        "attempt": null,
+        "record_id": "session/s/created",
         "kind": "session_created",
+        "session_id": "s",
+        "turn_id": null,
         "operation_id": null,
+        "attempt": null,
         "payload": {
           "attributes": {
             "seed": {
@@ -7424,10 +7427,7 @@
           "principal": "test",
           "workspace": "/tmp"
         },
-        "record_id": "session/s/created",
-        "schema_version": 1,
-        "session_id": "s",
-        "turn_id": null
+        "schema_version": 1
       },
       "record_digests": [
         "7e2da9756dede22d7792d6c76dcb247a9857f49962247b7bc7333fbc73f3a282",
@@ -7456,18 +7456,18 @@
       "last_primary_request": {
         "messages": [
           {
-            "role": "system",
             "content": "Be precise.",
             "metadata": {
               "_vv_agent_tool_policy_approval": "default",
               "_vv_agent_tool_use_behavior": "run_llm_again",
               "session_memory_enabled": false,
               "trace_id": "s/turn/initial"
-            }
+            },
+            "role": "system"
           },
           {
-            "role": "user",
-            "content": "go"
+            "content": "go",
+            "role": "user"
           }
         ],
         "metadata": {
@@ -7976,9 +7976,12 @@
     {
       "case": "cancelled_user",
       "creation": {
-        "attempt": null,
+        "record_id": "session/s/created",
         "kind": "session_created",
+        "session_id": "s",
+        "turn_id": null,
         "operation_id": null,
+        "attempt": null,
         "payload": {
           "attributes": {
             "seed": {
@@ -7991,10 +7994,7 @@
           "principal": "test",
           "workspace": "/tmp"
         },
-        "record_id": "session/s/created",
-        "schema_version": 1,
-        "session_id": "s",
-        "turn_id": null
+        "schema_version": 1
       },
       "record_digests": [
         "7e2da9756dede22d7792d6c76dcb247a9857f49962247b7bc7333fbc73f3a282",
@@ -8021,18 +8021,18 @@
       "last_primary_request": {
         "messages": [
           {
-            "role": "system",
             "content": "Be precise.",
             "metadata": {
               "_vv_agent_tool_policy_approval": "default",
               "_vv_agent_tool_use_behavior": "run_llm_again",
               "session_memory_enabled": false,
               "trace_id": "s/turn/initial"
-            }
+            },
+            "role": "system"
           },
           {
-            "role": "user",
-            "content": "go"
+            "content": "go",
+            "role": "user"
           }
         ],
         "metadata": {
@@ -8527,9 +8527,12 @@
     {
       "case": "cancelled_deny",
       "creation": {
-        "attempt": null,
+        "record_id": "session/s/created",
         "kind": "session_created",
+        "session_id": "s",
+        "turn_id": null,
         "operation_id": null,
+        "attempt": null,
         "payload": {
           "attributes": {
             "seed": {
@@ -8542,10 +8545,7 @@
           "principal": "test",
           "workspace": "/tmp"
         },
-        "record_id": "session/s/created",
-        "schema_version": 1,
-        "session_id": "s",
-        "turn_id": null
+        "schema_version": 1
       },
       "record_digests": [
         "7e2da9756dede22d7792d6c76dcb247a9857f49962247b7bc7333fbc73f3a282",
@@ -8572,18 +8572,18 @@
       "last_primary_request": {
         "messages": [
           {
-            "role": "system",
             "content": "Be precise.",
             "metadata": {
               "_vv_agent_tool_policy_approval": "default",
               "_vv_agent_tool_use_behavior": "run_llm_again",
               "session_memory_enabled": false,
               "trace_id": "s/turn/initial"
-            }
+            },
+            "role": "system"
           },
           {
-            "role": "user",
-            "content": "go"
+            "content": "go",
+            "role": "user"
           }
         ],
         "metadata": {
@@ -9092,9 +9092,12 @@
     {
       "case": "cancelled_timeout",
       "creation": {
-        "attempt": null,
+        "record_id": "session/s/created",
         "kind": "session_created",
+        "session_id": "s",
+        "turn_id": null,
         "operation_id": null,
+        "attempt": null,
         "payload": {
           "attributes": {
             "seed": {
@@ -9107,10 +9110,7 @@
           "principal": "test",
           "workspace": "/tmp"
         },
-        "record_id": "session/s/created",
-        "schema_version": 1,
-        "session_id": "s",
-        "turn_id": null
+        "schema_version": 1
       },
       "record_digests": [
         "7e2da9756dede22d7792d6c76dcb247a9857f49962247b7bc7333fbc73f3a282",
@@ -9137,18 +9137,18 @@
       "last_primary_request": {
         "messages": [
           {
-            "role": "system",
             "content": "Be precise.",
             "metadata": {
               "_vv_agent_tool_policy_approval": "default",
               "_vv_agent_tool_use_behavior": "run_llm_again",
               "session_memory_enabled": false,
               "trace_id": "s/turn/initial"
-            }
+            },
+            "role": "system"
           },
           {
-            "role": "user",
-            "content": "go"
+            "content": "go",
+            "role": "user"
           }
         ],
         "metadata": {
@@ -10091,9 +10091,12 @@
       ],
       "case": "http_normal",
       "creation": {
-        "attempt": null,
+        "record_id": "session/s/created",
         "kind": "session_created",
+        "session_id": "s",
+        "turn_id": null,
         "operation_id": null,
+        "attempt": null,
         "payload": {
           "attributes": {
             "seed": {
@@ -10106,10 +10109,7 @@
           "principal": "test",
           "workspace": "/tmp"
         },
-        "record_id": "session/s/created",
-        "schema_version": 1,
-        "session_id": "s",
-        "turn_id": null
+        "schema_version": 1
       },
       "record_digests": [
         "7e2da9756dede22d7792d6c76dcb247a9857f49962247b7bc7333fbc73f3a282",
@@ -10120,25 +10120,25 @@
         "8b5bee0eeb7e0d40e5577f1ffc3377b3ce5cfc2e5f550a054c09c3e16cde26bf",
         "9ec044a5b1fa22fecb2c8fd42068d2ede894db9133ca4ffff2316b84023ddf04",
         "3715dd8da2cbbd1e329efe697d7bcccec5734951c30e838ec90f0a75425e7784",
-        "337f39440ab9be4fc7c9ba19c4c98bfcd0efa175d6d2752aaec121f142315113",
+        "e6b2d8fda6c960ffc165b3ed1eba354416cbed8c27292b7ce593468f0cffc8f4",
         "2d2e5c743dc56fc84f6eea4def40f70187545f7c9cc4fde0d6417d273b2d64cd",
         "09175fe5943a133fa46e8109e42c1eae11b94f6d2b59707404e1aceffe0a7da2"
       ],
       "last_primary_request": {
         "messages": [
           {
-            "role": "system",
             "content": "Be precise.",
             "metadata": {
               "_vv_agent_tool_policy_approval": "default",
               "_vv_agent_tool_use_behavior": "run_llm_again",
               "session_memory_enabled": false,
               "trace_id": "s/turn/initial"
-            }
+            },
+            "role": "system"
           },
           {
-            "role": "user",
-            "content": "go"
+            "content": "go",
+            "role": "user"
           }
         ],
         "metadata": {
@@ -11956,9 +11956,12 @@
       ],
       "case": "http_ptl",
       "creation": {
-        "attempt": null,
+        "record_id": "session/s/created",
         "kind": "session_created",
+        "session_id": "s",
+        "turn_id": null,
         "operation_id": null,
+        "attempt": null,
         "payload": {
           "attributes": {
             "seed": {
@@ -11971,10 +11974,7 @@
           "principal": "test",
           "workspace": "/tmp"
         },
-        "record_id": "session/s/created",
-        "schema_version": 1,
-        "session_id": "s",
-        "turn_id": null
+        "schema_version": 1
       },
       "record_digests": [
         "7e2da9756dede22d7792d6c76dcb247a9857f49962247b7bc7333fbc73f3a282",
@@ -11985,7 +11985,7 @@
         "8b5bee0eeb7e0d40e5577f1ffc3377b3ce5cfc2e5f550a054c09c3e16cde26bf",
         "9ec044a5b1fa22fecb2c8fd42068d2ede894db9133ca4ffff2316b84023ddf04",
         "3715dd8da2cbbd1e329efe697d7bcccec5734951c30e838ec90f0a75425e7784",
-        "b2490acdbf538a32aa8acc4a574d2b45a197781bcf8d14cfaac946931f70899a",
+        "b77536de0f8449a29de543fd0a63dd3cebfffc41a7f73832965af9066fdabae4",
         "2d2e5c743dc56fc84f6eea4def40f70187545f7c9cc4fde0d6417d273b2d64cd",
         "adc2e3e217e11dc05e8056104db5c090f084e3c0a4e9f793b24d9ad9eb0ce80c",
         "b654c2111e2c9bd61aa6f5eaa1ed60b24e28d12ce4bab47a9d8268a2ac9d1a28",
@@ -12001,7 +12001,7 @@
         "fc9c03be0d675c53ebb87dca5867b6da35bee24932ab31d39552317f606cc56a",
         "db886fe526087ef435097c9fdbc93c62e6d6305abbec6e2338674a3f8cc7f709",
         "0fa680476b077fd1f7ffe8535defdecbf773593f121e3de9113ece0d10fde4d0",
-        "94ece60db13c3ae03844f8f464b3c4505372d081c4b5e1e0f699cf9241032a77",
+        "c6039c50747b8e1a785076a021d9f638bb9b83df4cdcebafa85842fc79637f80",
         "d57494bd61dc4eccefd6c8f7bb0719e0227ae05de6516aab823b0644eae7d843",
         "b6335ea155c62d2dc7244ba5b5070ba8bbb91267f2d5ad01ad7de35d491a33bf",
         "427dd6dc4a697e04f11b5ada63b7dfaedbb07ccc7a7fbfb356e99582af23069e",
@@ -12011,7 +12011,7 @@
         "6bacd99725b5ee013095f039134eeb3c1020b92a342517f33c32f688f919f4f7",
         "909aec4080dd7d129c77a7058a0c074f77924b7bdc1dd0762f8ab5f39ac63bb8",
         "939d0b15fda75d9c3dc8041c9baaaae06d068fbdd1231936fd8ddea3ed05a7fe",
-        "f151b0c3a3a6bde1f1c5594d8450a73170263487c9ab274c2f01955ef21a006d",
+        "9a0d3fab93163bf096eb064fa2d0e095c72465ad9ddad31931c2b5354d32d499",
         "17ffe07bcabcce8477fce4df8565fe9a5ed39f5e2a497d79a915e3f9448a5c16",
         "ac8a1f33912574f4ac3c9046963372cf15530000b95e5542304bbd8d7f062f40",
         "7123aa50c52069cbac2279ea3fa45c12c4aef959f8ee1ab89604095cd3b80b06"
@@ -12019,29 +12019,29 @@
       "last_primary_request": {
         "messages": [
           {
-            "role": "system",
             "content": "Be precise.",
             "metadata": {
               "_vv_agent_tool_policy_approval": "default",
               "_vv_agent_tool_use_behavior": "run_llm_again",
               "session_memory_enabled": false,
               "trace_id": "s/turn/initial"
-            }
+            },
+            "role": "system"
           },
           {
-            "role": "user",
             "content": "<Original User Request>\n\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"Summarized old work\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n</Persisted Artifacts>",
-            "name": "memory_summary",
             "metadata": {
               "_vv_agent_compaction": {
                 "artifacts": [],
                 "cursors": []
               }
-            }
+            },
+            "name": "memory_summary",
+            "role": "user"
           },
           {
-            "role": "user",
-            "content": "HTTP-ORIGINAL"
+            "content": "HTTP-ORIGINAL",
+            "role": "user"
           }
         ],
         "metadata": {
@@ -13447,9 +13447,12 @@
       ],
       "case": "http_retry",
       "creation": {
-        "attempt": null,
+        "record_id": "session/s/created",
         "kind": "session_created",
+        "session_id": "s",
+        "turn_id": null,
         "operation_id": null,
+        "attempt": null,
         "payload": {
           "attributes": {
             "seed": {
@@ -13462,10 +13465,7 @@
           "principal": "test",
           "workspace": "/tmp"
         },
-        "record_id": "session/s/created",
-        "schema_version": 1,
-        "session_id": "s",
-        "turn_id": null
+        "schema_version": 1
       },
       "record_digests": [
         "7e2da9756dede22d7792d6c76dcb247a9857f49962247b7bc7333fbc73f3a282",
@@ -13481,25 +13481,25 @@
         "2d2e5c743dc56fc84f6eea4def40f70187545f7c9cc4fde0d6417d273b2d64cd",
         "fb25a89d6e5eabf5103fd223ca3b9a85f9114c05ced6627d5c180b8e5ba7923e",
         "b654c2111e2c9bd61aa6f5eaa1ed60b24e28d12ce4bab47a9d8268a2ac9d1a28",
-        "ea34e458e3fb1630809888a7e4acfd5d14617753003a80d6b69a38f3cbe21a11",
+        "1cc0afcf6aa673cca012b4b928510aa2743e5053edad3d2ef262e63e46a7887a",
         "e139346609b25154a427f548fde548adf33bbe9e46ebcb6d7cbe57cd050273e6",
         "4a3d351386cdc9181135b022883d70c2afda6635f72ac7e2edd5d9fec9dc34fe"
       ],
       "last_primary_request": {
         "messages": [
           {
-            "role": "system",
             "content": "Be precise.",
             "metadata": {
               "_vv_agent_tool_policy_approval": "default",
               "_vv_agent_tool_use_behavior": "run_llm_again",
               "session_memory_enabled": false,
               "trace_id": "s/turn/initial"
-            }
+            },
+            "role": "system"
           },
           {
-            "role": "user",
-            "content": "go"
+            "content": "go",
+            "role": "user"
           }
         ],
         "metadata": {
@@ -16543,9 +16543,12 @@
       ],
       "case": "http_unknown",
       "creation": {
-        "attempt": null,
+        "record_id": "session/s/created",
         "kind": "session_created",
+        "session_id": "s",
+        "turn_id": null,
         "operation_id": null,
+        "attempt": null,
         "payload": {
           "attributes": {
             "seed": {
@@ -16558,10 +16561,7 @@
           "principal": "test",
           "workspace": "/tmp"
         },
-        "record_id": "session/s/created",
-        "schema_version": 1,
-        "session_id": "s",
-        "turn_id": null
+        "schema_version": 1
       },
       "record_digests": [
         "7e2da9756dede22d7792d6c76dcb247a9857f49962247b7bc7333fbc73f3a282",
@@ -16586,18 +16586,18 @@
       "last_primary_request": {
         "messages": [
           {
-            "role": "system",
             "content": "Be precise.",
             "metadata": {
               "_vv_agent_tool_policy_approval": "default",
               "_vv_agent_tool_use_behavior": "run_llm_again",
               "session_memory_enabled": false,
               "trace_id": "s/turn/initial"
-            }
+            },
+            "role": "system"
           },
           {
-            "role": "user",
-            "content": "go"
+            "content": "go",
+            "role": "user"
           }
         ],
         "metadata": {
@@ -17077,9 +17077,12 @@
     {
       "case": "approval_deny",
       "creation": {
-        "attempt": null,
+        "record_id": "session/s/created",
         "kind": "session_created",
+        "session_id": "s",
+        "turn_id": null,
         "operation_id": null,
+        "attempt": null,
         "payload": {
           "attributes": {
             "seed": {
@@ -17092,10 +17095,7 @@
           "principal": "test",
           "workspace": "/tmp"
         },
-        "record_id": "session/s/created",
-        "schema_version": 1,
-        "session_id": "s",
-        "turn_id": null
+        "schema_version": 1
       },
       "record_digests": [
         "7e2da9756dede22d7792d6c76dcb247a9857f49962247b7bc7333fbc73f3a282",
@@ -17153,48 +17153,48 @@
       "last_primary_request": {
         "messages": [
           {
-            "role": "system",
             "content": "Be precise.",
             "metadata": {
               "_vv_agent_tool_policy_approval": "default",
               "_vv_agent_tool_use_behavior": "run_llm_again",
               "session_memory_enabled": false,
               "trace_id": "s/turn/initial"
-            }
+            },
+            "role": "system"
           },
           {
-            "role": "user",
             "content": "<Original User Request>\n\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"Summarized old work\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n</Persisted Artifacts>",
-            "name": "memory_summary",
             "metadata": {
               "_vv_agent_compaction": {
                 "artifacts": [],
                 "cursors": []
               }
-            }
+            },
+            "name": "memory_summary",
+            "role": "user"
           },
           {
-            "role": "assistant",
             "content": "",
+            "role": "assistant",
             "tool_calls": [
               {
-                "id": "gate",
-                "type": "function",
                 "function": {
-                  "name": "gated",
-                  "arguments": "{}"
-                }
+                  "arguments": "{}",
+                  "name": "gated"
+                },
+                "id": "gate",
+                "type": "function"
               }
             ]
           },
           {
-            "role": "tool",
             "content": "{\"ok\": false, \"error\": \"APPROVAL-ORIGINAL\", \"error_code\": \"tool_approval_denied\", \"tool_name\": \"gated\"}",
+            "role": "tool",
             "tool_call_id": "gate"
           },
           {
-            "role": "user",
-            "content": "LATE-STEER"
+            "content": "LATE-STEER",
+            "role": "user"
           }
         ],
         "metadata": {
@@ -17784,9 +17784,12 @@
     {
       "case": "approval_timeout",
       "creation": {
-        "attempt": null,
+        "record_id": "session/s/created",
         "kind": "session_created",
+        "session_id": "s",
+        "turn_id": null,
         "operation_id": null,
+        "attempt": null,
         "payload": {
           "attributes": {
             "seed": {
@@ -17799,10 +17802,7 @@
           "principal": "test",
           "workspace": "/tmp"
         },
-        "record_id": "session/s/created",
-        "schema_version": 1,
-        "session_id": "s",
-        "turn_id": null
+        "schema_version": 1
       },
       "record_digests": [
         "7e2da9756dede22d7792d6c76dcb247a9857f49962247b7bc7333fbc73f3a282",
@@ -17860,48 +17860,48 @@
       "last_primary_request": {
         "messages": [
           {
-            "role": "system",
             "content": "Be precise.",
             "metadata": {
               "_vv_agent_tool_policy_approval": "default",
               "_vv_agent_tool_use_behavior": "run_llm_again",
               "session_memory_enabled": false,
               "trace_id": "s/turn/initial"
-            }
+            },
+            "role": "system"
           },
           {
-            "role": "user",
             "content": "<Original User Request>\n\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"Summarized old work\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n</Persisted Artifacts>",
-            "name": "memory_summary",
             "metadata": {
               "_vv_agent_compaction": {
                 "artifacts": [],
                 "cursors": []
               }
-            }
+            },
+            "name": "memory_summary",
+            "role": "user"
           },
           {
-            "role": "assistant",
             "content": "",
+            "role": "assistant",
             "tool_calls": [
               {
-                "id": "gate",
-                "type": "function",
                 "function": {
-                  "name": "gated",
-                  "arguments": "{}"
-                }
+                  "arguments": "{}",
+                  "name": "gated"
+                },
+                "id": "gate",
+                "type": "function"
               }
             ]
           },
           {
-            "role": "tool",
             "content": "{\"ok\": false, \"error\": \"APPROVAL-ORIGINAL\", \"error_code\": \"tool_approval_timeout\", \"tool_name\": \"gated\"}",
+            "role": "tool",
             "tool_call_id": "gate"
           },
           {
-            "role": "user",
-            "content": "LATE-STEER"
+            "content": "LATE-STEER",
+            "role": "user"
           }
         ],
         "metadata": {
@@ -18491,9 +18491,12 @@
     {
       "case": "snapshot_provider_False",
       "creation": {
-        "attempt": null,
+        "record_id": "session/s/created",
         "kind": "session_created",
+        "session_id": "s",
+        "turn_id": null,
         "operation_id": null,
+        "attempt": null,
         "payload": {
           "attributes": {
             "seed": {
@@ -18506,10 +18509,7 @@
           "principal": "test",
           "workspace": "/tmp"
         },
-        "record_id": "session/s/created",
-        "schema_version": 1,
-        "session_id": "s",
-        "turn_id": null
+        "schema_version": 1
       },
       "record_digests": [
         "7e2da9756dede22d7792d6c76dcb247a9857f49962247b7bc7333fbc73f3a282",
@@ -19095,9 +19095,12 @@
     {
       "case": "snapshot_provider_True",
       "creation": {
-        "attempt": null,
+        "record_id": "session/s/created",
         "kind": "session_created",
+        "session_id": "s",
+        "turn_id": null,
         "operation_id": null,
+        "attempt": null,
         "payload": {
           "attributes": {
             "seed": {
@@ -19110,10 +19113,7 @@
           "principal": "test",
           "workspace": "/tmp"
         },
-        "record_id": "session/s/created",
-        "schema_version": 1,
-        "session_id": "s",
-        "turn_id": null
+        "schema_version": 1
       },
       "record_digests": [
         "7e2da9756dede22d7792d6c76dcb247a9857f49962247b7bc7333fbc73f3a282",
@@ -19707,9 +19707,12 @@
     {
       "case": "snapshot_user_False",
       "creation": {
-        "attempt": null,
+        "record_id": "session/s/created",
         "kind": "session_created",
+        "session_id": "s",
+        "turn_id": null,
         "operation_id": null,
+        "attempt": null,
         "payload": {
           "attributes": {
             "seed": {
@@ -19722,10 +19725,7 @@
           "principal": "test",
           "workspace": "/tmp"
         },
-        "record_id": "session/s/created",
-        "schema_version": 1,
-        "session_id": "s",
-        "turn_id": null
+        "schema_version": 1
       },
       "record_digests": [
         "7e2da9756dede22d7792d6c76dcb247a9857f49962247b7bc7333fbc73f3a282",
@@ -20309,9 +20309,12 @@
     {
       "case": "snapshot_user_True",
       "creation": {
-        "attempt": null,
+        "record_id": "session/s/created",
         "kind": "session_created",
+        "session_id": "s",
+        "turn_id": null,
         "operation_id": null,
+        "attempt": null,
         "payload": {
           "attributes": {
             "seed": {
@@ -20324,10 +20327,7 @@
           "principal": "test",
           "workspace": "/tmp"
         },
-        "record_id": "session/s/created",
-        "schema_version": 1,
-        "session_id": "s",
-        "turn_id": null
+        "schema_version": 1
       },
       "record_digests": [
         "7e2da9756dede22d7792d6c76dcb247a9857f49962247b7bc7333fbc73f3a282",
@@ -20919,9 +20919,12 @@
     {
       "case": "snapshot_deny_False",
       "creation": {
-        "attempt": null,
+        "record_id": "session/s/created",
         "kind": "session_created",
+        "session_id": "s",
+        "turn_id": null,
         "operation_id": null,
+        "attempt": null,
         "payload": {
           "attributes": {
             "seed": {
@@ -20934,10 +20937,7 @@
           "principal": "test",
           "workspace": "/tmp"
         },
-        "record_id": "session/s/created",
-        "schema_version": 1,
-        "session_id": "s",
-        "turn_id": null
+        "schema_version": 1
       },
       "record_digests": [
         "7e2da9756dede22d7792d6c76dcb247a9857f49962247b7bc7333fbc73f3a282",
@@ -21522,9 +21522,12 @@
     {
       "case": "snapshot_deny_True",
       "creation": {
-        "attempt": null,
+        "record_id": "session/s/created",
         "kind": "session_created",
+        "session_id": "s",
+        "turn_id": null,
         "operation_id": null,
+        "attempt": null,
         "payload": {
           "attributes": {
             "seed": {
@@ -21537,10 +21540,7 @@
           "principal": "test",
           "workspace": "/tmp"
         },
-        "record_id": "session/s/created",
-        "schema_version": 1,
-        "session_id": "s",
-        "turn_id": null
+        "schema_version": 1
       },
       "record_digests": [
         "7e2da9756dede22d7792d6c76dcb247a9857f49962247b7bc7333fbc73f3a282",
@@ -22133,9 +22133,12 @@
     {
       "case": "snapshot_timeout_False",
       "creation": {
-        "attempt": null,
+        "record_id": "session/s/created",
         "kind": "session_created",
+        "session_id": "s",
+        "turn_id": null,
         "operation_id": null,
+        "attempt": null,
         "payload": {
           "attributes": {
             "seed": {
@@ -22148,10 +22151,7 @@
           "principal": "test",
           "workspace": "/tmp"
         },
-        "record_id": "session/s/created",
-        "schema_version": 1,
-        "session_id": "s",
-        "turn_id": null
+        "schema_version": 1
       },
       "record_digests": [
         "7e2da9756dede22d7792d6c76dcb247a9857f49962247b7bc7333fbc73f3a282",
@@ -22736,9 +22736,12 @@
     {
       "case": "snapshot_timeout_True",
       "creation": {
-        "attempt": null,
+        "record_id": "session/s/created",
         "kind": "session_created",
+        "session_id": "s",
+        "turn_id": null,
         "operation_id": null,
+        "attempt": null,
         "payload": {
           "attributes": {
             "seed": {
@@ -22751,10 +22754,7 @@
           "principal": "test",
           "workspace": "/tmp"
         },
-        "record_id": "session/s/created",
-        "schema_version": 1,
-        "session_id": "s",
-        "turn_id": null
+        "schema_version": 1
       },
       "record_digests": [
         "7e2da9756dede22d7792d6c76dcb247a9857f49962247b7bc7333fbc73f3a282",
