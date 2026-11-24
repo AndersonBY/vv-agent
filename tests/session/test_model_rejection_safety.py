@@ -10,11 +10,17 @@ from test_model_rejection_safety import LEAKS, ambiguous
 from vv_agent.llm.errors import ModelRequestRejected
 from vv_agent.output_validation import OutputValidationResult
 from vv_agent.session.kernel import drive, read_state
-from vv_agent.session.projection import project_records
+from vv_agent.session.projection import hydrate_records, hydration_for_session_store, project_records
 from vv_agent.types import LLMResponse
 
+from .helpers import fixture_content_reader, wrap_fixture_store
 from .test_model_rejection import fail, http_error
 from .test_recovery_matrix import records_of, runtime, start
+
+
+def runtime_for_store(store, database, steps, tools=(), **kwargs):
+    kwargs.setdefault("content_reader", fixture_content_reader(wrap_fixture_store(store), "s"))
+    return runtime(database, steps, tools, **kwargs)
 
 
 @pytest.mark.parametrize("kind", ["timeout", "transport", "408", "500", "stream"])
@@ -41,7 +47,7 @@ def test_mixed_exception_kernel_keeps_unknown(store, database, kind, explicit, r
 @pytest.mark.parametrize("repair", [False, True])
 def test_diagnostics_are_safe_in_receipts_terminal_and_events(store, database, message, repair):
     if repair:
-        rt = runtime(database, [LLMResponse("invalid")])
+        rt = runtime_for_store(store, database, [LLMResponse("invalid")])
         rt.agent.output_validation_enabled = True
         rt.agent.output_validator = lambda value, context: OutputValidationResult.reject("invalid")
         # Use a raw exception to prove the repair callback does not copy its text.
@@ -49,12 +55,17 @@ def test_diagnostics_are_safe_in_receipts_terminal_and_events(store, database, m
     else:
         raw_error = http_error(400, message)
         raw_error.body["error"].update(code="api_key:SYNTHETIC_IDENTIFIER_SECRET", type="secret:private")
-        rt = runtime(database, [fail(raw_error, [])])
+        rt = runtime_for_store(store, database, [fail(raw_error, [])])
     start(store)
     drive(store, "s", runtime=rt)
     terminal = records_of(store, "turn_ended")[-1].payload
     rows = read_state(store, "s")[1]
-    for value in ([r.record.payload for r in rows], terminal, [e.to_dict() for e in project_records(rows)]):
+    hydration = hydration_for_session_store(wrap_fixture_store(store), "s")
+    for value in (
+        [r.record.payload for r in rows],
+        terminal,
+        [e.to_dict() for e in project_records(rows, hydration=hydration)],
+    ):
         saved = json.dumps(value)
         assert "SYNTHETIC" not in saved and "provided: SY" not in saved
     assert terminal["reason"] == ("output_validation_failed" if repair else "model_request_rejected")
@@ -99,12 +110,15 @@ def test_rollback_precheck_reads_all_history_without_writes(store, database, mon
         with suppress(WorkerDeath):
             drive(store, "s", runtime=runtime(database, [step, step], hook=cut))
 
+    hydration = hydration_for_session_store(wrap_fixture_store(store), "s")
+
     class ReadOnly:
         def list_sessions(self, **kwargs):
             return store.list_sessions(**kwargs)
 
         def read(self, session_id, **kwargs):
             page = store.read(session_id, **kwargs)
+            page = replace(page, records=hydrate_records(page.records, hydration))
             if case == "ordinary_result":
                 page = replace(
                     page,
