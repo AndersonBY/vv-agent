@@ -1595,11 +1595,33 @@ def test_app_server_selection_uses_trusted_host_resolver_for_requirements(store,
 
         deadline = monotonic() + 10
         while monotonic() < deadline:
-            if server.kernel.store.read_state("thread")[0].model_selection is not None:
-                break
+            state, records, _ = server.kernel.store.read_state("thread")
+            applied = next(
+                (
+                    row
+                    for row in records
+                    if row.record.kind == "input_applied" and row.record.payload["input"]["input_id"] == "select"
+                ),
+                None,
+            )
+            if state.model_selection is not None and applied is not None:
+                payload = hydrate_record_payload(applied, hydration_for_session_store(server.kernel.store, "thread"))
+                if payload["disposition"] == "applied":
+                    break
             server.run_adapter.join()
             sleep(0.05)
-        assert server.kernel.store.read_state("thread")[0].model_selection is not None
+        state, records, _ = server.kernel.store.read_state("thread")
+        assert state.model_selection is not None
+        applied = next(
+            row
+            for row in records
+            if row.record.kind == "input_applied" and row.record.payload["input"]["input_id"] == "select"
+        )
+        assert (
+            hydrate_record_payload(applied, hydration_for_session_store(server.kernel.store, "thread"))["disposition"]
+            == "applied"
+        )
+        server.kernel._worker.wait_idle(timeout=10)
 
         second = send(
             3,
