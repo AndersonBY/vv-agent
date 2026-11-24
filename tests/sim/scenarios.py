@@ -70,8 +70,16 @@ class Provider:
     def __init__(self, world):
         self.world = world
         self.store = world.connection("provider")
-        with self.store.atomic():
-            self.store._rows("CREATE TABLE sim_effect (key text PRIMARY KEY, handle text, result text, usage text)")
+        if isinstance(world.database, Path):
+            with self.store.atomic():
+                self.store._rows("CREATE TABLE sim_effect (key text PRIMARY KEY, handle text, result text, usage text)")
+        else:
+            self.store._rows("SELECT set_config('statement_timeout','5s',false)")
+            try:
+                with self.store.atomic():
+                    self.store._rows("CREATE TABLE sim_effect (key text PRIMARY KEY, handle text, result text, usage text)")
+            finally:
+                self.store._rows("SELECT set_config('statement_timeout','100ms',false)")
         self.ready = False
         self.queries = []
 
