@@ -1758,7 +1758,14 @@ class SQLStore:
         self._verify_head_bounds(session_id)
         return stored_rows, tuple(chains)
 
-    def _prefix(self, session_id: str, row: tuple[Any, ...], *, require_worker: bool = True) -> _Prefix:
+    def _prefix(
+        self,
+        session_id: str,
+        row: tuple[Any, ...],
+        *,
+        require_worker: bool = True,
+        reuse_cached_inputs: bool = False,
+    ) -> _Prefix:
         head, epoch = row[0], row[2]
         cached_level = row[6] if len(row) >= 10 else row[3]
         if require_worker:
@@ -1780,10 +1787,13 @@ class SQLStore:
         ):
             self._verify_level_cache(snapshot_prefix.records, snapshot_prefix.stored_inputs, cached_level)
             return snapshot_prefix
+        cached = self._cached_prefix(session_id)
         parsed_records: dict[int, Record] = {}
         stored_rows, chains = self._verified_records(session_id, head, parsed_records=parsed_records)
-        stored_inputs = self._stored_inputs(session_id, row[1])
-        cached = self._cached_prefix(session_id)
+        if reuse_cached_inputs and cached is not None and cached.inbox_seq == row[1]:
+            stored_inputs = cached.stored_inputs
+        else:
+            stored_inputs = self._stored_inputs(session_id, row[1])
         retained_records: tuple[StoredRecord, ...] = ()
         if cached is not None:
             valid = (
@@ -1936,6 +1946,7 @@ class SQLStore:
         through_seq: int | None = None,
         limit: int = 1024,
         expected_head: SessionHead | tuple[int, str] | None = None,
+        reuse_cached_inputs: bool = False,
     ) -> ReadPage:
         _positive(limit, "limit")
         _natural(after_seq, "after_seq")
@@ -1958,7 +1969,7 @@ class SQLStore:
         if head == 0:
             self._stored_inputs(session_id, inbox)
             return ReadPage(head, inbox, ())
-        prefix = self._prefix(session_id, row, require_worker=False)
+        prefix = self._prefix(session_id, row, require_worker=False, reuse_cached_inputs=reuse_cached_inputs)
         return ReadPage(head, inbox, prefix.records[after_seq:boundary][:limit])
 
     def verify_ledger(
@@ -2166,7 +2177,13 @@ class SQLStore:
         return tuple(found[seq] for seq in sorted(found))
 
     def peek_inbox(
-        self, session_id: str, *, through_input_seq: int | None = None, limit: int = 256, ready_only: bool = True
+        self,
+        session_id: str,
+        *,
+        through_input_seq: int | None = None,
+        limit: int = 256,
+        ready_only: bool = True,
+        reuse_cached_inputs: bool = False,
     ) -> tuple[StoredInput, ...]:
         _positive(limit, "limit")
         if through_input_seq is not None:
@@ -2174,7 +2191,9 @@ class SQLStore:
         row = self._require_live(session_id)
         self._require_reader_row(row)
         self._require_input_integrity_gate()
-        self._stored_inputs(session_id, row[1])
+        cached = self._cached_prefix(session_id) if reuse_cached_inputs else None
+        if cached is None or cached.inbox_seq != row[1]:
+            self._stored_inputs(session_id, row[1])
         through = row[1] if through_input_seq is None else min(through_input_seq, row[1])
         readiness = f"AND available_ms<={self.clock_sql} " if ready_only else ""
         rows = self._rows(
@@ -3617,7 +3636,7 @@ class SQLSessionTx:
                     self._pending_lease_fence = (session_id, lease)
                 return CommitReceipt(commit_id, stored_sequences, old[0][2], True)
             s._require_worker_accepts_row(row)
-            prefix = s._prefix(session_id, row, require_worker=False)
+            prefix = s._prefix(session_id, row, require_worker=False, reuse_cached_inputs=True)
             reducer = prefix.reducer.fork()
             routing_before = s._require_routing_cache(session_id, row, prefix=prefix)
             s._require_worker_supports(
@@ -3721,7 +3740,17 @@ class SQLSessionTx:
                     "UPDATE sk_inbox SET consumed_seq=%s WHERE tenant_id=%s AND session_id=%s AND input_id=%s",
                     (seq, s.tenant_id, session_id, input_id),
                 )
-            stored_inputs = s._stored_inputs(session_id, row[1]) if applications else prefix.stored_inputs
+            if applications:
+                consumed_sequences = {input_id: seq for input_id, (_, seq) in applications.items()}
+                stored_inputs = tuple(
+                    replace(
+                        stored,
+                        consumed_seq=consumed_sequences.get(stored.item.input_id, stored.consumed_seq),
+                    )
+                    for stored in prefix.stored_inputs
+                )
+            else:
+                stored_inputs = prefix.stored_inputs
             added = tuple(StoredRecord(record, seq, commit_id, lease.epoch, now) for _, record, seq in new)
             if new:
                 routing_prefix = _Prefix(

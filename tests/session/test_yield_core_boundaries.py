@@ -148,8 +148,14 @@ def test_terminal_beyond_first_inbox_page_precedes_steer(store, database):
     kernel.drive(store, "s", runtime=rt)
     complete(store, database, "yield-child-0")
     steer(store)
+    actor = store.read_input("s", "initial").item.actor
     for index in range(255):
-        push_fixture_input(store, "s", InboxItem(f"stale-{index}", "steer", {"content": "old"}, "s/turn/initial", 99))
+        push_fixture_input(
+            store,
+            "s",
+            InboxItem(f"stale-{index}", "steer", {"content": "old"}, "s/turn/initial", 99, actor=actor),
+            preserve_actor=True,
+        )
     deliver(store, "yield-child-0")
     kernel.drive(store, "s", runtime=rt)
     assert len(observed) == 1

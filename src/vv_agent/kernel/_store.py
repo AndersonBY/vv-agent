@@ -287,6 +287,7 @@ class SessionStore(Protocol):
         through_seq: int | None = None,
         limit: int = 1024,
         expected_head: SessionHead | tuple[int, str] | None = None,
+        reuse_cached_inputs: bool = False,
     ) -> ReadPage: ...
     def verify_ledger(
         self,
@@ -295,7 +296,13 @@ class SessionStore(Protocol):
         expected_head: SessionHead | tuple[int, str] | None = None,
     ) -> tuple[int, str]: ...
     def peek_inbox(
-        self, session_id: str, *, through_input_seq: int | None = None, limit: int = 256, ready_only: bool = True
+        self,
+        session_id: str,
+        *,
+        through_input_seq: int | None = None,
+        limit: int = 256,
+        ready_only: bool = True,
+        reuse_cached_inputs: bool = False,
     ) -> tuple[StoredInput, ...]: ...
     def acquire(self, session_id: str, *, owner: str, ttl_ms: int) -> Lease | None: ...
     def renew(self, lease: Lease, *, ttl_ms: int) -> LeasePoll: ...

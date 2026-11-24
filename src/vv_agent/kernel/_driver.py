@@ -159,7 +159,7 @@ class CoreDriver:
         self.fold.consumed = {key: InboxItem(**r._payload["input"]) for key, r in self.state.applied_inputs.items()}
 
     def refresh(self) -> None:
-        page = self.store.read(self.sid, after_seq=self.records[-1].seq)
+        page = self.store.read(self.sid, after_seq=self.records[-1].seq, reuse_cached_inputs=True)
         head = page.head_seq
         if head < self.records[-1].seq:
             self.load_state()
@@ -169,7 +169,12 @@ class CoreDriver:
             while self.records[-1].seq < head:
                 if not page.records:
                     raise Conflict("log sequence gap")
-                page = self.store.read(self.sid, after_seq=self.records[-1].seq, through_seq=head)
+                page = self.store.read(
+                    self.sid,
+                    after_seq=self.records[-1].seq,
+                    through_seq=head,
+                    reuse_cached_inputs=True,
+                )
                 self.extend(page.records)
         self.bind_turn()
 

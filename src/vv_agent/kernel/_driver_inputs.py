@@ -672,12 +672,17 @@ def _apply_child_steer_batch(
 
 
 def apply_input(self: CoreDriver, *, one_turn: bool) -> Generator[object, Any, bool]:
-    inputs = self.store.peek_inbox(self.sid, through_input_seq=self.watermark)
+    inputs = self.store.peek_inbox(self.sid, through_input_seq=self.watermark, reuse_cached_inputs=True)
     # At one captured watermark, authenticated child terminals win over steering.
     declared_wait = not one_turn and bool(inputs) and _declared_wait_in_state(self.state)
     if declared_wait:
         if len(inputs) == 256 and self.watermark > 256:
-            inputs = self.store.peek_inbox(self.sid, through_input_seq=self.watermark, limit=self.watermark)
+            inputs = self.store.peek_inbox(
+                self.sid,
+                through_input_seq=self.watermark,
+                limit=self.watermark,
+                reuse_cached_inputs=True,
+            )
         inputs = sorted(inputs, key=lambda stored: stored.item.kind != "child_result")
         steer_index = _steer_batch_index(self, inputs, one_turn)
         if steer_index is not None:
