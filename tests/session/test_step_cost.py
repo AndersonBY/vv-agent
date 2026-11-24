@@ -283,8 +283,8 @@ def test_tool_completion_does_not_copy_frozen_history_for_a_read_only_policy(sto
     rt = runtime(database, [LLMResponse("inspect", [ToolCall("a", "more", {})]), LLMResponse("done")], tools=[more])
     rt.config = replace(rt.config, initial_messages=[Message("user", "large 中文 " * 100)])
     kernel.drive(store, "s", runtime=rt)
-    # The tool's context gets one detached task. Internal policy/close reads borrow it.
-    assert len(copied) == 1
+    # The tool's context reuses the frozen task without copying its record.
+    assert copied == []
 
 
 def test_recorded_steps_tokenize_only_the_new_model_and_tool_messages(store, database, monkeypatch, tmp_path):
