@@ -165,6 +165,7 @@ def test_consumer_commit_boundary_host_atomicity_and_forged_ack(store, database)
     with psycopg.connect(database, autocommit=True) as conn:
         with pytest.raises(RuntimeError), conn.transaction():
             tx = join_transaction(conn)
+            tx.store.configure_input_admission(allow_unsigned=True)
             first = tx.consumer_batch("s", "host", limit=1)
             assert first is not None and first.through_seq == 1
             tx.ack(first)
@@ -177,6 +178,7 @@ def test_consumer_commit_boundary_host_atomicity_and_forged_ack(store, database)
         assert conn.execute("SELECT count(*) FROM host_effect").fetchone()[0] == 0
         with conn.transaction():
             tx = join_transaction(conn)
+            tx.store.configure_input_admission(allow_unsigned=True)
             batch = tx.consumer_batch("s", "host", limit=100)
             assert batch is not None
             with pytest.raises(Conflict):
