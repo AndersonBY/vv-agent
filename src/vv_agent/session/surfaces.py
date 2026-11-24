@@ -3341,8 +3341,9 @@ class SessionDriver:
         ):
             raise ContentRuntimeUnavailable("PostgreSQL object sessions support root user input only")
         with self._root_publication_atomic() as tx:
-            if pg_objects:
+            if getattr(self.store, "lock_clause", ""):
                 tx.lock_session(sid)
+            if pg_objects:
                 cast(Any, self.store)._require_object_root_session(sid)
             receipt = self._push_in_transaction(
                 tx,
