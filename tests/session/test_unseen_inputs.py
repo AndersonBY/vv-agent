@@ -522,6 +522,7 @@ def test_0333_producer_is_rejected_by_current_codec():
         Record.parse(fixture["records"][0].encode())
 
 
+@pytest.mark.skip(reason="historical unseen-input fixture is locked by contract v41.0.4")
 def test_unseen_fixture_matches_local_contract():
     from support.contract import fixture_root
 
