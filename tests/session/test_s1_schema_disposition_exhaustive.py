@@ -1340,9 +1340,16 @@ def _record_fixtures(wrapped: Any) -> tuple[Any, ...]:
 def _build_storage(tmp_path: Path) -> Iterator[BuiltStorage]:
     with SQLiteStore.standalone(str(tmp_path / "s1-dispositions.sqlite")) as raw:
         raw.install_schema()
+        raw.configure_input_admission(allow_unsigned=True)
         wrapped = wrap_fixture_store(raw, fixture_key_provider())
         _create_session(wrapped)
-        create_fixture_session(wrapped, "child/fixture", consumers=())
+        create_fixture_session(
+            wrapped,
+            "child/fixture",
+            consumers=(),
+            parent_session_id=SESSION_ID,
+            parent_operation_id="op/opaque",
+        )
         for kind in INPUT_PAYLOADS:
             _push_input(wrapped, kind)
         records = _record_fixtures(wrapped)

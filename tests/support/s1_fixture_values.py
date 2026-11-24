@@ -68,6 +68,8 @@ def create_fixture_session(
     workspace: str = "/tmp",
     consumers: tuple[str, ...] = ("events",),
     subject_id: str = "fixture/host",
+    parent_session_id: str | None = None,
+    parent_operation_id: str | None = None,
 ):
     if store._ledger_integrity_mode() == "unconfigured":
         store.configure_input_admission(allow_unsigned=True)
@@ -94,12 +96,16 @@ def create_fixture_session(
                     session_id,
                     created.principal,
                     created.workspace.to_dict(),
+                    parent_session_id=parent_session_id,
+                    parent_operation_id=parent_operation_id,
                     attributes=created.attributes.to_dict(),
                 )
             return SessionSpec(
                 session_id,
                 actor,
                 content.put_json(workspace).to_dict(),
+                parent_session_id=parent_session_id,
+                parent_operation_id=parent_operation_id,
                 attributes=attributes,
             )
 
