@@ -13,6 +13,7 @@ from vv_agent import Agent, RunConfig, ScriptedModelProvider, function_tool
 from vv_agent.app_server import AppServer, AppServerHost, ChannelTransport, DefaultAppServerHost
 from vv_agent.app_server.processor import CLIENT_METHODS
 from vv_agent.app_server.protocol import ModelListResponse
+from vv_agent.kernel._sql import SQLStore
 from vv_agent.types import LLMResponse, ToolCall
 
 
@@ -84,7 +85,7 @@ def test_default_runtime_uses_custom_host_resolver(tmp_path, monkeypatch):
         server.kernel.close()
 
 
-def test_nonholder_acquires_once_and_both_nodes_observe_each_durable_turn(tmp_path, monkeypatch):
+def test_nonholder_avoids_remote_lease_polling_and_both_nodes_observe_each_durable_turn(tmp_path, monkeypatch):
     entered, release = Event(), Event()
     calls = []
 
@@ -101,17 +102,24 @@ def test_nonholder_acquires_once_and_both_nodes_observe_each_durable_turn(tmp_pa
         stack.callback(release.set)
         outputs = [record_output(s, monkeypatch) for s in (a, b)]
         acquisitions = []
-        acquire = b.kernel.store.acquire
-        monkeypatch.setattr(b.kernel.store, "acquire", lambda *args, **kw: acquisitions.append(kw) or acquire(*args, **kw))
+        claim_drive = SQLStore._claim_drive
+
+        def observed_claim(store, session_id, *, owner, ttl_ms):
+            lease = claim_drive(store, session_id, owner=owner, ttl_ms=ttl_ms)
+            if lease is None and session_id == "thread":
+                acquisitions.append({"owner": owner, "ttl_ms": ttl_ms})
+            return lease
+
+        monkeypatch.setattr(SQLStore, "_claim_drive", observed_claim)
         request(a, 1, "thread/start", {"inputId": "thread"})
         tid = request(a, 2, "turn/start", submission())["result"]["turnId"]
         assert entered.wait(5)
         request(b, 3, "thread/resume", {"threadId": "thread"})
         b.run_adapter.join()
-        assert len(acquisitions) == 1
+        assert len(acquisitions) == 0
         request(b, 4, "turn/followUp", submission(identity="next", expected=tid))
         b.run_adapter.join()
-        assert len(acquisitions) == 2  # One attempt for each explicit wake, no lease polling.
+        assert len(acquisitions) == 0  # Explicit wakes do not poll a live remote lease.
         release.set()
         a.run_adapter.join()
         b.run_adapter.join()
