@@ -546,13 +546,27 @@ class SimWorld:
         self.stack.enter_context(patch.object(SQLSessionTx, "_write", write))
 
     def create(self, sid="s", *, feature_level=1, bootstrap=None):
-        create_fixture_session(
-            self.connection("host"),
-            sid,
-            consumers=(),
-            feature_level=feature_level,
-            bootstrap=bootstrap,
-        )
+        store = self.connection("host")
+        if isinstance(self.database, Path):
+            create_fixture_session(
+                store,
+                sid,
+                consumers=(),
+                feature_level=feature_level,
+                bootstrap=bootstrap,
+            )
+        else:
+            store._rows("SELECT set_config('statement_timeout','5s',false)")
+            try:
+                create_fixture_session(
+                    store,
+                    sid,
+                    consumers=(),
+                    feature_level=feature_level,
+                    bootstrap=bootstrap,
+                )
+            finally:
+                self._set_postgres_runtime_timeouts(store)
         self.push(sid, InboxItem("initial", "user", {"content": "go"}))
 
     def child_spec(self, parent_session_id, session_id):
