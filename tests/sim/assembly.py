@@ -14,6 +14,7 @@ import threading
 from collections.abc import Callable, Generator, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Any, Protocol, cast
 
 from vv_agent._jsonschema import schema_issues
@@ -810,6 +811,10 @@ class SimDriver(CoreDriver):
             return list(prepare(tx)) if prepare is not None else []
 
         try:
+            postgres = not isinstance(self.runtime.world.database, Path)
+            root_store = getattr(self.store, "_root", self.store)
+            if postgres:
+                root_store._rows("SELECT set_config('statement_timeout','5s',false)")
             return super().commit(
                 records,
                 consumed,
@@ -825,6 +830,8 @@ class SimDriver(CoreDriver):
                 raise LeaseLost("stale worker replayed a superseded commit identity") from exc
             raise
         finally:
+            if not isinstance(self.runtime.world.database, Path):
+                self.runtime.world._set_postgres_runtime_timeouts(root_store)
             if logical_state is not None:
                 self.state = logical_state if len(self.records) == record_count else self._logical_state()
 
