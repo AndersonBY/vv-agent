@@ -71,6 +71,7 @@ class Crash(BaseException): pass
 path = sys.argv[2]
 with SQLiteStore.standalone(path, clock=clock, fold_factory=factory) as store:
     store.install_schema()
+    store.configure_input_admission(allow_unsigned=True)
     assert store.connection.execute('PRAGMA journal_mode').fetchone()[0] == 'wal'
     assert store.connection.execute('PRAGMA synchronous').fetchone()[0] == 2
     with store.atomic() as tx:
@@ -111,6 +112,7 @@ with SQLiteStore.standalone(path, clock=clock, fold_factory=factory) as store:
     else: raise AssertionError('old lease admitted')
     assert store.release(replacement)
 with SQLiteStore.standalone(path, clock=clock, fold_factory=factory) as cold:
+    cold.configure_input_admission(allow_unsigned=True)
     assert cold.read('s').head_seq == 2 and cold.fold_factory is factory
 try:
     SQLiteStore(':memory:', clock=clock, fold_factory=factory)

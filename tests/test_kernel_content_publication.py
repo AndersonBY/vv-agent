@@ -341,6 +341,7 @@ def test_link_failure_rolls_back_record_key_content_and_links(tmp_path, monkeypa
     provider = LocalKeyProvider(MASTER_KEY)
     with SQLiteStore.standalone(str(path)) as store:
         store.install_schema()
+        store.configure_input_admission(allow_unsigned=True)
         sessions = SessionDriver(store=store, content_key_provider=provider)
         sessions.create("s", "/workspace", {})
         agent = Agent("kernel", "Work.", model="scripted")
@@ -363,10 +364,10 @@ def test_link_failure_rolls_back_record_key_content_and_links(tmp_path, monkeypa
             for table in ("sk_record", "sk_commit", "sk_session_key", "sk_content", "sk_content_link")
         }
 
-        def fail_link(self, tenant_id, session_id, record_seq, ref, slot):
+        def fail_link(self, tenant_id, session_id, links):
             raise RuntimeError("forced link failure")
 
-        monkeypatch.setattr(CoreSQLContentStore, "link_record", fail_link)
+        monkeypatch.setattr(CoreSQLContentStore, "link_records", fail_link)
 
         def prepare(tx):
             content = publish_turn_started(
@@ -395,6 +396,7 @@ def test_op_publication_append_failure_rolls_back_refs_and_records(tmp_path, mon
     provider = LocalKeyProvider(MASTER_KEY)
     with SQLiteStore.standalone(str(path)) as store:
         store.install_schema()
+        store.configure_input_admission(allow_unsigned=True)
         sessions = SessionDriver(store=store, content_key_provider=provider)
         sessions.create("s", "/workspace", {})
         with store.atomic() as tx:
@@ -470,6 +472,7 @@ def test_op_publication_append_failure_rolls_back_refs_and_records(tmp_path, mon
             )[0]
             for table in ("sk_record", "sk_commit", "sk_session_key", "sk_content", "sk_content_link")
         }
+        before_kinds = [row.record.kind for row in driver.records]
         monkeypatch.setattr(SQLSessionTx, "append", fail_append)
         completed = driver.record(
             "op_completed",
@@ -499,13 +502,7 @@ def test_op_publication_append_failure_rolls_back_refs_and_records(tmp_path, mon
             for table in before
         }
         assert after == before
-        assert [row.record.kind for row in driver.records] == [
-            "session_created",
-            "input_applied",
-            "turn_started",
-            "op_planned",
-            "op_started",
-        ]
+        assert [row.record.kind for row in driver.records] == before_kinds
 
 
 def test_replay_reuses_committed_refs_and_repairs_a_missing_link(tmp_path, monkeypatch) -> None:
@@ -521,6 +518,7 @@ def test_replay_reuses_committed_refs_and_repairs_a_missing_link(tmp_path, monke
     monkeypatch.setattr(CoreSessionContentWriter, "put_json", record_put)
     with SQLiteStore.standalone(str(path)) as store:
         store.install_schema()
+        store.configure_input_admission(allow_unsigned=True)
         sessions = SessionDriver(store=store, content_key_provider=provider)
         sessions.create("s", "/workspace", {})
         agent = Agent("kernel", "Work.", model="scripted")
@@ -621,6 +619,7 @@ def test_missing_transaction_capability_rejects_record_after_append(tmp_path) ->
     }
     with SQLiteStore.standalone(str(path)) as store:
         store.install_schema()
+        store.configure_input_admission(allow_unsigned=True)
         with store.atomic() as tx:
             tx.create(
                 SessionSpec(
@@ -658,6 +657,7 @@ def test_missing_reader_rejects_turn_start_before_any_record(tmp_path) -> None:
     provider = LocalKeyProvider(MASTER_KEY)
     with SQLiteStore.standalone(str(path)) as store:
         store.install_schema()
+        store.configure_input_admission(allow_unsigned=True)
         sessions = SessionDriver(store=store, content_key_provider=provider)
         sessions.create("s", "/workspace", {})
         sessions.push("s", InboxItem("i", "user", {"content": "work"}))

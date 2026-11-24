@@ -149,6 +149,7 @@ def tenant_store(request, tmp_path) -> Iterator[SQLStore]:
             clock=_Clock(),
         ) as store:
             store.install_schema()
+            store.configure_input_admission(allow_unsigned=True)
             yield store
         return
 
@@ -163,6 +164,7 @@ def tenant_store(request, tmp_path) -> Iterator[SQLStore]:
         try:
             with PostgresStore.standalone(make_conninfo(dsn, dbname=name), fold_factory=_fold_factory) as store:
                 store.install_schema()
+                store.configure_input_admission(allow_unsigned=True)
                 yield store
         finally:
             deadline = monotonic() + 10
@@ -414,6 +416,8 @@ def test_tenant_facade_survives_concurrent_and_cold_sqlite_connections(tmp_path)
         SQLiteStore.standalone(path, fold_factory=_fold_factory, clock=clock) as connection_a,
         SQLiteStore.standalone(path, fold_factory=_fold_factory, clock=clock) as connection_b,
     ):
+        connection_a.configure_input_admission(allow_unsigned=True)
+        connection_b.configure_input_admission(allow_unsigned=True)
         with ThreadPoolExecutor(max_workers=2) as executor:
             futures = (
                 executor.submit(initialize, connection_a, TENANT_A, "a-only"),
@@ -437,6 +441,7 @@ def test_tenant_facade_survives_concurrent_and_cold_sqlite_connections(tmp_path)
         assert page.records[0].record.to_dict()["payload"]["principal"]["tenant_id"] == TENANT_B
 
     with SQLiteStore.standalone(path, fold_factory=_fold_factory, clock=clock) as cold:
+        cold.configure_input_admission(allow_unsigned=True)
         for tenant_id in (TENANT_A, TENANT_B):
             facade = cold.for_tenant(tenant_id)
             page = facade.read(SHARED_SESSION)

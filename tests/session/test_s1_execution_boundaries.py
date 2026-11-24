@@ -87,6 +87,7 @@ def test_after_cycle_host_stop_code_stays_in_encrypted_content(tmp_path: Path) -
             return AfterCycleDecision.stop_non_success(code=host_code, message=detail)
 
     with SQLiteStore.standalone(str(path)) as store:
+        store.configure_input_admission(allow_unsigned=True)
         sessions = SessionDriver(store=store, content_key_provider=key_provider)
         sessions.create("s", str(WORKSPACE), {"seed": {"messages": [], "shared_state": {}}})
         sessions.push("s", InboxItem("initial", "user", {"content": "start"}))
@@ -123,6 +124,7 @@ def test_cold_s1_wait_user_projects_and_redrives_logical_question(tmp_path: Path
     reply = "deploy the approved build"
 
     with SQLiteStore.standalone(str(path)) as store:
+        store.configure_input_admission(allow_unsigned=True)
         sessions = SessionDriver(store=store, content_key_provider=key_provider)
         sessions.create("s", str(WORKSPACE), {"seed": {"messages": [], "shared_state": {}}})
         sessions.push("s", InboxItem("initial", "user", {"content": "start"}))
@@ -140,6 +142,7 @@ def test_cold_s1_wait_user_projects_and_redrives_logical_question(tmp_path: Path
         _assert_persisted_references_only(store, question)
 
     with SQLiteStore.standalone(str(path)) as reopened:
+        reopened.configure_input_admission(allow_unsigned=True)
         sessions = SessionDriver(store=reopened, content_key_provider=key_provider)
         waits = [event for event in _event_payload(reopened, RunStateChangedEvent) if event.state == "wait_user"]
         assert len(waits) == 1
@@ -184,6 +187,7 @@ def test_cold_s1_approval_reply_hydrates_scope_reason_and_metadata(tmp_path: Pat
         return "allowed"
 
     with SQLiteStore.standalone(str(path)) as store:
+        store.configure_input_admission(allow_unsigned=True)
         sessions = SessionDriver(store=store, content_key_provider=key_provider)
         sessions.create("s", str(WORKSPACE), {"seed": {"messages": [], "shared_state": {}}})
         sessions.push("s", InboxItem("initial", "user", {"content": "run guarded tool"}))
@@ -205,6 +209,7 @@ def test_cold_s1_approval_reply_hydrates_scope_reason_and_metadata(tmp_path: Pat
         assert turn_id is not None
 
     with SQLiteStore.standalone(str(path)) as reopened:
+        reopened.configure_input_admission(allow_unsigned=True)
         sessions = SessionDriver(store=reopened, content_key_provider=key_provider)
         hydration = hydration_for_session_store(reopened, "s")
         logical_wait = hydrate_record_payload(
@@ -274,6 +279,7 @@ def test_external_model_exception_records_durable_unknown(tmp_path: Path) -> Non
         raise _Crash
 
     with SQLiteStore.standalone(str(path)) as store:
+        store.configure_input_admission(allow_unsigned=True)
         sessions = SessionDriver(store=store, content_key_provider=key_provider)
         sessions.create("s", str(WORKSPACE), {"seed": {"messages": [], "shared_state": {}}})
         sessions.push("s", InboxItem("initial", "user", {"content": "continue cycles"}))
@@ -452,6 +458,7 @@ def test_cold_after_cycle_redrive_commits_retained_steering_boundary(
         return original_handle(host, request)
 
     with SQLiteStore.standalone(str(path)) as store:
+        store.configure_input_admission(allow_unsigned=True)
         sessions = SessionDriver(store=store, content_key_provider=key_provider)
         sessions.create("s", str(WORKSPACE), {"seed": {"messages": [], "shared_state": {}}})
         sessions.push("s", InboxItem("initial", "user", {"content": "continue cycles"}))
@@ -470,6 +477,7 @@ def test_cold_after_cycle_redrive_commits_retained_steering_boundary(
 
     boundary_key = ("", "after_cycle", "")
     with SQLiteStore.standalone(str(path)) as cold_store:
+        cold_store.configure_input_admission(allow_unsigned=True)
         sessions = SessionDriver(store=cold_store, content_key_provider=key_provider)
         runtime = _runtime(
             sessions,
@@ -512,6 +520,7 @@ def test_cold_after_cycle_redrive_commits_retained_steering_boundary(
         assert sessions.store.release(lease)
 
     with SQLiteStore.standalone(str(path)) as reopened:
+        reopened.configure_input_admission(allow_unsigned=True)
         raw_state, raw_records, _ = reopened.read_state("s")
         retained = raw_state.boundaries[boundary_key]
         retained_data = retained._payload["data"]
@@ -544,6 +553,7 @@ def test_cold_s1_after_cycle_projection_hydrates_primary_values_and_boundaries(
         return original_handle(host, request)
 
     with SQLiteStore.standalone(str(path)) as store:
+        store.configure_input_admission(allow_unsigned=True)
         sessions = SessionDriver(store=store, content_key_provider=key_provider)
         sessions.create("s", str(WORKSPACE), {"seed": {"messages": [], "shared_state": {}}})
         sessions.push("s", InboxItem("initial", "user", {"content": "continue cycles"}))
@@ -568,6 +578,7 @@ def test_cold_s1_after_cycle_projection_hydrates_primary_values_and_boundaries(
             return AfterCycleDecision.continue_run(disallow_tools=("write_file",))
 
     with SQLiteStore.standalone(str(path)) as reopened:
+        reopened.configure_input_admission(allow_unsigned=True)
         sessions = SessionDriver(store=reopened, content_key_provider=key_provider)
         runtime = _runtime(
             sessions,
@@ -607,6 +618,7 @@ class _RecordReader:
 @pytest.fixture
 def narrow_summary_driver(tmp_path: Path) -> Iterator[tuple[_Driver, str]]:
     with SQLiteStore.standalone(str(tmp_path / "summary-intent.sqlite")) as store:
+        store.configure_input_admission(allow_unsigned=True)
         sessions = SessionDriver(store=store, content_key_provider=LocalKeyProvider(MASTER_KEY))
         sessions.create("s", str(WORKSPACE), {"seed": {"messages": [], "shared_state": {}}})
         runtime = _runtime(

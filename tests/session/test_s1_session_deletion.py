@@ -17,6 +17,7 @@ from support.s1_fixture_values import create_fixture_session, push_fixture_input
 
 from vv_agent.kernel._content import (
     Classification,
+    ContentCleanupUnavailable,
     ContentLabels,
     ContentRef,
     ContentSessionWriter,
@@ -673,7 +674,7 @@ def test_repeated_forget_reuses_complete_tombstones_without_destroying_again(
         assert first_tombstone.signature == second_tombstone.signature
 
 
-def test_external_locator_cleanup_failure_stays_pending_and_retry_converges(
+def test_unbound_external_locator_cleanup_fails_closed_before_fencing(
     tmp_path,
     key_provider: LocalKeyProvider,
 ) -> None:
@@ -697,20 +698,18 @@ def test_external_locator_cleanup_failure_stays_pending_and_retry_converges(
         deletion = SessionDeletionStore(store, adapter, signer=signer)
 
         retention = _principal(store, "root", subject_id="service/retention")
-        with pytest.raises(RuntimeError, match="outcome unknown"):
+        with pytest.raises(ContentCleanupUnavailable, match="external content erasure is unavailable"):
             deletion.forget_session(TENANT, "root", actor=retention)
         pending = store._rows(
             "SELECT s.deletion_state,t.state FROM sk_session s JOIN sk_tombstone t "
             "ON t.tenant_id=s.tenant_id AND t.session_id=s.session_id WHERE s.tenant_id=%s",
             (TENANT,),
         )
-        assert set(pending) == {("forgetting", "pending")}
+        assert pending == []
 
-        receipt = deletion.forget_session(TENANT, "root", actor=retention)
-
-        assert set(receipt.session_ids) == {"root", "child"}
-        assert calls == [b"remote://content/child", b"remote://content/child"]
-        assert all(item.state is TombstoneState.COMPLETE for item in deletion.verify_tombstones(TENANT, "root"))
+        with pytest.raises(ContentCleanupUnavailable, match="external content erasure is unavailable"):
+            deletion.forget_session(TENANT, "root", actor=retention)
+        assert calls == []
 
 
 def test_incomplete_locked_scope_is_rejected_before_content_erasure(
