@@ -1619,7 +1619,7 @@ def test_app_server_selection_uses_trusted_host_resolver_for_requirements(store,
             hydrate_record_payload(applied, hydration_for_session_store(server.kernel.store, "thread"))["disposition"]
             == "applied"
         )
-        server.kernel._worker.wait_idle(timeout=10)
+        server.run_adapter.join()
 
         second = send(
             3,
