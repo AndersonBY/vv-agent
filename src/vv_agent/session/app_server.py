@@ -214,6 +214,7 @@ def _database_now_ms(store) -> int | None:
 @dataclass
 class _NotificationPosition:
     seq: int
+    child: bool = False
     due: float = 0.0
     delay: float = 0.05
     warning_at: float = 0.0
@@ -1108,6 +1109,12 @@ class _KernelRunAdapter(RunAdapter):
         child_wait_pending = position.child_wait_pending
         for stored in rows:
             record = stored.record
+            if position.child:
+                if record.kind == "op_parked" and (
+                    (handle := record._payload["handle"])["kind"] == "child" and not handle["background"]
+                ):
+                    child_wait_pending = True
+                continue
             if record.kind == "turn_started":
                 self._ensure_turn_connection(sid, cast(str, record.turn_id), store=store)
                 notifications.append((stored.seq, "turn/started", {"threadId": sid, "turnId": record.turn_id}))
@@ -1170,6 +1177,8 @@ class _KernelRunAdapter(RunAdapter):
                     )
                 )
         sequences = {row.seq for row in rows}
+        if position.child:
+            include_items = False
         approval_arguments: dict[str, dict[str, Any]] = {}
         for event in project_records(
             store.projection_context(sid, rows), hydration=self._hydration(sid, store), approval_arguments=approval_arguments
@@ -1339,7 +1348,7 @@ class _KernelRunAdapter(RunAdapter):
         if owner is None or not self._router.is_registered(owner):
             return
         self._turn_connections[(child_id, turn_id)] = owner
-        self._notification_positions[child_id] = _NotificationPosition(position, due=0.0)
+        self._notification_positions[child_id] = _NotificationPosition(position, child=True, due=0.0)
         self._state_manager.subscribe(child_id, owner)
 
     def _settle_turn_connections(self, thread_id: str, state, store) -> None:
