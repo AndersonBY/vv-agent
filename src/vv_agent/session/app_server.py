@@ -963,7 +963,7 @@ class _KernelRunAdapter(RunAdapter):
             self._driver_observe(store)
         for parent_id in tuple(self._notification_positions):
             for child_id in self.kernel._discover_child_runtimes(store, parent_id):
-                self._ensure_child_observation(child_id, store)
+                self._ensure_child_observation(child_id, parent_id, store)
         self._observe(store)
         active_threads = {
             active.thread_id
@@ -1322,26 +1322,11 @@ class _KernelRunAdapter(RunAdapter):
         key = (thread_id, turn_id)
         if key in self._turn_connections:
             return
-        owner = None
-        current = thread_id
-        seen: set[str] = set()
-        while owner is None and current not in seen:
-            seen.add(current)
-            owner = self._latest_turn_owner(current, exclude=turn_id if current == thread_id else None)
-            if owner is not None:
-                break
-            try:
-                page = (store or self.kernel.store).read(current, limit=1)
-            except (Conflict, KeyError):
-                break
-            if not page.records:
-                break
-            parent = page.records[0].record._payload.get("parent_session_id")
-            current = parent if isinstance(parent, str) and parent else ""
+        owner = self._latest_turn_owner(thread_id, exclude=turn_id)
         if owner is not None:
             self._turn_connections[key] = owner
 
-    def _ensure_child_observation(self, child_id: str, store) -> None:
+    def _ensure_child_observation(self, child_id: str, parent_id: str, store) -> None:
         if child_id in self._notification_positions:
             return
         state, records, _ = store.read_state(child_id)
@@ -1350,10 +1335,10 @@ class _KernelRunAdapter(RunAdapter):
         turn_id = state.active_turn_id or (next(reversed(state.turns), None) if state.turns else None)
         if turn_id is None:
             return
-        self._ensure_turn_connection(child_id, turn_id, store=store)
-        owner = self._turn_connections.get((child_id, turn_id))
+        owner = self._latest_turn_owner(parent_id)
         if owner is None or not self._router.is_registered(owner):
             return
+        self._turn_connections[(child_id, turn_id)] = owner
         self._notification_positions[child_id] = _NotificationPosition(position, due=0.0)
         self._state_manager.subscribe(child_id, owner)
 
