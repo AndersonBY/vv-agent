@@ -1634,7 +1634,10 @@ def test_app_server_selection_uses_trusted_host_resolver_for_requirements(store,
         assert "result" in second
         deadline = monotonic() + 60
         thread = server.store.read_thread("thread")
-        while thread.turns[-1].result.get("finalOutput") is None and monotonic() < deadline:
+        while (
+            (thread.turns[-1].turn_id != second["result"]["turnId"] or thread.turns[-1].result.get("finalOutput") is None)
+            and monotonic() < deadline
+        ):
             server.run_adapter.join()
             sleep(0.05)
             thread = server.store.read_thread("thread")
