@@ -1038,7 +1038,7 @@ def test_projection_identity_is_scoped_to_session(store, database):
     second = next(r for r in read_state(store, "other")[1] if r.record.kind == "turn_started")
 
     def same_identity(row):
-        return replace(row, record=replace(row.record, record_id="turn/same/started", turn_id="same-turn"))
+        return replace(row, record=replace(row.record, record_id="turn/same-turn/started", turn_id="same-turn"))
 
     a = project_records([same_identity(first)], hydration=hydration_for_session_store(store, "s"))[0]
     b = project_records([same_identity(second)], hydration=hydration_for_session_store(store, "other"))[0]
