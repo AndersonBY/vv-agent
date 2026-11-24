@@ -11,6 +11,7 @@ import pytest
 from support.token_counting import PROVIDER_MODELS, legacy_count, provider_counting_settings
 
 from vv_agent.kernel._canonical_json import canonical_json_bytes
+from vv_agent.kernel._record_schema import RECORD_SCHEMA
 from vv_agent.memory import MemoryManager, token_utils
 from vv_agent.microcompaction import MicrocompactionPolicy
 from vv_agent.session import compaction, kernel, reducer
@@ -30,6 +31,10 @@ RELEASE_HISTORIES = json.loads(Path(__file__).with_name("fixtures").joinpath("st
 
 
 @pytest.mark.parametrize("history", RELEASE_HISTORIES, ids=lambda value: value["version"])
+@pytest.mark.skipif(
+    RECORD_SCHEMA["properties"]["schema_version"]["const"] == "S1",
+    reason="pre-S1 histories require the pinned pre-S1 reader",
+)
 def test_released_histories_load_to_the_0301_state_without_byte_changes(history):
     log = [Record.parse(body.encode()) for body in history["records"]]
     state = reducer.fold(log, consumed_inputs=[InboxItem(**r._payload["input"]) for r in log if r.kind == "input_applied"])

@@ -1,6 +1,7 @@
 """Installed vendor network types veto both rejection and compaction in the kernel."""
 
 from importlib import import_module
+from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import httpx2
@@ -26,7 +27,7 @@ def assert_unknown(error):
         start(store)
         calls = []
         step = fail(error, calls)
-        drive(store, "s", runtime=runtime(store, [step, step]))
+        drive(store, "s", runtime=runtime(Path(store.path), [step, step]))
         assert len(calls) == 2
         unknowns = records_of(store, "op_unknown")
         assert len(unknowns) == 2 and all(row.payload["duplicate_cost_risk"] for row in unknowns)

@@ -79,8 +79,23 @@ def store(store):
 
 
 @contextmanager
-def open_fixture_store(database):
+def open_fixture_store(database, *, worker=None):
     with open_store(database) as raw_store:
+        if worker is not None:
+            agent, config = worker
+            static_config = config
+            if static_config.model_provider is None:
+                static_config = replace(config, model_provider=ScriptedModelProvider.new("test", "m", []))
+            raw_store.configure_worker(
+                level=_static_worker_requirement_level(
+                    agent,
+                    static_config,
+                    handler_version="1",
+                    extra_capabilities=(),
+                ),
+                handler_versions=("1",),
+                capabilities=_static_worker_supports_tree(agent, static_config, extra_capabilities=()),
+            )
         yield wrap_fixture_store(raw_store)
 
 
@@ -100,7 +115,7 @@ def runtime(store, database, agent, config, llm, **kwargs):
         capabilities=_static_worker_supports_tree(agent, static_config, extra_capabilities=()),
     )
     result = _runtime(store, database, agent, config, llm, **kwargs)
-    return replace(result, heartbeat_store=lambda: open_fixture_store(database))
+    return replace(result, heartbeat_store=lambda: open_fixture_store(database, worker=(agent, config)))
 
 
 def normalize(value):
@@ -1190,8 +1205,11 @@ def test_sub_task_status_message_continuation_and_wait_projection_parity(store, 
 
     def parent_worker():
         try:
-            with open_store(database) as raw_store:
-                drive(wrap_fixture_store(raw_store), "control", runtime=rt)
+            with open_fixture_store(database, worker=(parent, config)) as content_store:
+                for _ in range(3):
+                    drive(content_store, "control", runtime=rt)
+                    if any(item.item.kind == "follow_up" for item in content_store.peek_inbox(sid)):
+                        break
         except BaseException as exc:
             errors.append(exc)
 
@@ -1207,6 +1225,14 @@ def test_sub_task_status_message_continuation_and_wait_projection_parity(store, 
         assert rt.child_tasks(store, "control").get(sid).is_running()
         store._fold_cache = None
         drive(store, sid, runtime=rt.child_runtime(store, sid))
+        with store.atomic() as tx:
+            child_delivery(store, tx, sid)
+        deadline = monotonic() + 5
+        while monotonic() < deadline:
+            drive(store, "control", runtime=rt)
+            if read_state(store, "control")[0].active_turn_id is None:
+                break
+            Event().wait(0.05)
     finally:
         worker.join(5)
     assert not worker.is_alive() and not errors, errors
