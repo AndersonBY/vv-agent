@@ -353,4 +353,4 @@ def test_routing_is_resolved_again_after_a_committed_plan_in_the_same_drive(stor
         for r in rows
         if r.record.kind == "op_completed" and r.record._payload["result"].get("error_code") == "endpoint_unavailable"
     ]
-    assert len(unavailable) == 1 and unavailable[0]._payload["execution_started"] is False
+    assert unavailable == []
