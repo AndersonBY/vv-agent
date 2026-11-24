@@ -527,7 +527,7 @@ class SimWorld:
 
     @staticmethod
     def _set_postgres_runtime_timeouts(store):
-        store._rows("SELECT set_config('lock_timeout','10ms',false),set_config('statement_timeout','100ms',false)")
+        store._rows("SELECT set_config('lock_timeout','10ms',false),set_config('statement_timeout','1s',false)")
 
     def install_write_observer(self):
         """Per-world patch restored by ExitStack; no production files are changed."""
