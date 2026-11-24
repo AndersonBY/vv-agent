@@ -1613,9 +1613,7 @@ def test_app_server_selection_uses_trusted_host_resolver_for_requirements(store,
         state, records, _ = server.kernel.store.read_state("thread")
         assert state.model_selection is not None
         applied = next(
-            row
-            for row in records
-            if row.record.kind == "input_applied" and row.record.payload["input"]["input_id"] == "select"
+            row for row in records if row.record.kind == "input_applied" and row.record.payload["input"]["input_id"] == "select"
         )
         assert (
             hydrate_record_payload(applied, hydration_for_session_store(server.kernel.store, "thread"))["disposition"]
