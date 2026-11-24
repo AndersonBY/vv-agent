@@ -105,7 +105,7 @@ def _load_s1_fixture_values():
 S1_FIXTURE_VALUES = _load_s1_fixture_values()
 deterministic_content_secrets = S1_FIXTURE_VALUES.deterministic_content_secrets
 fixture_key_provider_for_store = S1_FIXTURE_VALUES.fixture_key_provider_for_store
-NOW = 1_000_000
+NOW = 1_001_000
 USAGE = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
 APPROVED_EFFECTS = []
 SUMMARY = json.dumps({"original_user_messages": ["request"], "current_work_state": "Continue the task"})

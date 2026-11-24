@@ -1241,10 +1241,10 @@ def test_read_captured_head_excludes_concurrent_signed_append(store, database, m
     captured = Event()
     resume = Event()
 
-    def pause_after_head_capture(session_id: str, through: int):
+    def pause_after_head_capture(session_id: str, through: int, **kwargs):
         captured.set()
         assert resume.wait(10)
-        return original_verified(session_id, through)
+        return original_verified(session_id, through, **kwargs)
 
     monkeypatch.setattr(store, "_verified_records", pause_after_head_capture)
     with ThreadPoolExecutor(max_workers=1) as pool:

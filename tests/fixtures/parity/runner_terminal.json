@@ -53,7 +53,7 @@
       "terminal_events": [
         {
           "agent_name": "fixture",
-          "created_at": 1000.0,
+          "created_at": 1001.0,
           "event_id": "sk/936e749e2a58cda0469f4197ffc5a9cfdff5bfdd4bcb9d4725c55999c0476a37/event",
           "final_output": "done",
           "metadata": {
@@ -87,7 +87,7 @@
       "terminal_events": [
         {
           "agent_name": "blocked",
-          "created_at": 1000.0,
+          "created_at": 1001.0,
           "error": "agent_failed",
           "event_id": "sk/d4e1b413bdb97ef4d4c18e6d7f190abc794a6fc3c5e45c0700712235c8233f7d/event",
           "metadata": {
@@ -122,7 +122,7 @@
       "terminal_events": [
         {
           "agent_name": "fixture",
-          "created_at": 1000.0,
+          "created_at": 1001.0,
           "error": "budget_exhausted",
           "event_id": "sk/e1112e970f5a0d33fd33dc7edebf45201dd15e1b56ff7f71dff0ac6ddb0d5457/event",
           "metadata": {
@@ -160,7 +160,7 @@
       "terminal_events": [
         {
           "agent_name": "fixture",
-          "created_at": 1021.001,
+          "created_at": 1022.001,
           "event_id": "sk/a1fdc24e98d4e6cfcf851cea882628c48c68e57ae7ed273f013c54fd21cc1097/event",
           "final_output": [
             1,

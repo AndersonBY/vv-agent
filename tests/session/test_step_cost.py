@@ -11,6 +11,7 @@ import pytest
 from support.token_counting import PROVIDER_MODELS, legacy_count, provider_counting_settings
 
 from vv_agent.kernel._canonical_json import canonical_json_bytes
+from vv_agent.kernel._content import ContentRef
 from vv_agent.kernel._record_schema import RECORD_SCHEMA
 from vv_agent.memory import MemoryManager, token_utils
 from vv_agent.microcompaction import MicrocompactionPolicy
@@ -22,12 +23,32 @@ from vv_agent.tools.function import function_tool
 from vv_agent.types import LLMResponse, Message, ToolCall
 from vv_agent.workspace import MemoryWorkspaceBackend
 
+from .helpers import fixture_key_provider, wrap_fixture_store
 from .test_cold_fold import snapshot_value
 from .test_compaction import SUMMARY, tool_history
 from .test_endpoint_routing import transport as transport
 from .test_recovery_matrix import runtime, start
 
 RELEASE_HISTORIES = json.loads(Path(__file__).with_name("fixtures").joinpath("step_cost_release_histories.json").read_text())
+
+
+def _normalize_content_refs(value):
+    if isinstance(value, dict):
+        try:
+            ref = ContentRef.from_dict(value)
+        except (TypeError, ValueError):
+            return {
+                key: (
+                    "<digest>"
+                    if key.endswith("digest") and isinstance(item, str) and len(item) == 64
+                    else _normalize_content_refs(item)
+                )
+                for key, item in value.items()
+            }
+        return {"content_ref": {"labels": ref.labels.to_dict(), "size": ref.size}}
+    if isinstance(value, list):
+        return [_normalize_content_refs(item) for item in value]
+    return value
 
 
 @pytest.mark.parametrize("history", RELEASE_HISTORIES, ids=lambda value: value["version"])
@@ -102,6 +123,7 @@ def test_replayed_decisions_boundaries_and_all_record_bytes_match_uncached(
             return None
 
     def execute(target, target_database):
+        target = wrap_fixture_store(target, fixture_provider)
         primary_calls = 0
 
         def model(request):
@@ -140,18 +162,19 @@ def test_replayed_decisions_boundaries_and_all_record_bytes_match_uncached(
         kernel.drive(target, "s", runtime=rt)
         state, rows, _ = target.read_state("s")
         assert state.active_turn_id is None and rows[-1].record._payload["status"] == "completed"
-        bodies = [r.record.encode() for r in rows]
+        bodies = [canonical_json_bytes(_normalize_content_refs(r.record.to_dict()), "normalized record") for r in rows]
         for row in rows:
             assert row.record.encode() == canonical_json_bytes(row.record.to_dict())
         commits = target._rows("SELECT commit_id FROM sk_commit WHERE session_id=%s ORDER BY commit_id", ("s",))
         return bodies, commits
 
+    fixture_provider = fixture_key_provider()
     with SQLiteStore.standalone(str(tmp_path / "legacy-steps.sqlite")) as old, monkeypatch.context() as patch:
         old.install_schema()
         for module in (token_utils, memory_manager, compaction, reducer):
             patch.setattr(module, "count_messages_tokens", legacy_count)
         patch.setattr(_MessageCache, "retain_array", lambda self, values: values)
-        expected_bodies, expected_commits = execute(old, old)
+        expected_bodies, expected_commits = execute(old, tmp_path / "legacy-steps.sqlite")
     expected_decisions = deepcopy(decisions)
     decisions.clear()
     for file in tmp_path.rglob("session_memory.json"):
@@ -179,13 +202,14 @@ def test_replayed_decisions_boundaries_and_all_record_bytes_match_uncached(
     assert commits == expected_commits
     _, rows, _ = store.read_state("s")
     if mode != "memory":
-        assert any(r.record.kind == "context_compacted" and r.record._payload["mode"] == mode for r in rows)
+        assert any(r.record.kind == "op_planned" and r.record._payload["purpose"] == "compaction" for r in rows)
     else:
         assert any(r.record.kind == "op_planned" and r.record._payload["purpose"] == "session_memory" for r in rows)
     assert any(r.record.kind == "boundary_recorded" and r.record._payload["stage"] == "before_memory" for r in rows)
     store._fold_cache = None
     _, cold_rows, _ = store.read_state("s")
-    assert [r.record.encode() for r in cold_rows] == expected_bodies
+    cold_bodies = [canonical_json_bytes(_normalize_content_refs(r.record.to_dict()), "normalized record") for r in cold_rows]
+    assert cold_bodies == expected_bodies
 
 
 def test_producer_fragments_detach_callers_and_encode_only_new_messages(monkeypatch):

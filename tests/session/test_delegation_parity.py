@@ -1301,7 +1301,13 @@ def test_blocking_child_user_wait_is_durable_intentional_difference(store, datab
     assert not store.peek_inbox("control")
     rt = runtime(store, database, parent, config, llm_for(config))
     store._fold_cache = None
-    owner = SessionDriver(store=store)
+    supports = store.worker_supports
+    owner = SessionDriver(
+        store=store,
+        worker_level=supports.max_level,
+        handler_versions=supports.handler_versions,
+        capabilities=supports.capabilities,
+    )
     owner.answer("control", rt, displayed_target(owner, "control"), InteractionAnswer("text", text="supplied input"), "reply")
     drive(store, sid, runtime=rt.child_runtime(store, sid))
     with store.atomic() as tx:
