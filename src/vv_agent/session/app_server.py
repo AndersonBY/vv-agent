@@ -961,6 +961,9 @@ class _KernelRunAdapter(RunAdapter):
     def _observe_with_driver(self, store) -> None:
         if self._driver_observe is not None:
             self._driver_observe(store)
+        for parent_id in tuple(self._notification_positions):
+            for child_id in self.kernel._discover_child_runtimes(store, parent_id):
+                self._ensure_child_observation(child_id, store)
         self._observe(store)
         active_threads = {
             active.thread_id
@@ -1106,7 +1109,7 @@ class _KernelRunAdapter(RunAdapter):
         for stored in rows:
             record = stored.record
             if record.kind == "turn_started":
-                self._ensure_turn_connection(sid, cast(str, record.turn_id))
+                self._ensure_turn_connection(sid, cast(str, record.turn_id), store=store)
                 notifications.append((stored.seq, "turn/started", {"threadId": sid, "turnId": record.turn_id}))
             elif record.kind == "op_parked" and (
                 (handle := record._payload["handle"])["kind"] == "child" and not handle["background"]
@@ -1315,13 +1318,44 @@ class _KernelRunAdapter(RunAdapter):
         position.delay = 0.05
         position.replay_approvals = True
 
-    def _ensure_turn_connection(self, thread_id: str, turn_id: str) -> None:
+    def _ensure_turn_connection(self, thread_id: str, turn_id: str, *, store=None) -> None:
         key = (thread_id, turn_id)
         if key in self._turn_connections:
             return
-        owner = self._latest_turn_owner(thread_id, exclude=turn_id)
+        owner = None
+        current = thread_id
+        seen: set[str] = set()
+        while owner is None and current not in seen:
+            seen.add(current)
+            owner = self._latest_turn_owner(current, exclude=turn_id if current == thread_id else None)
+            if owner is not None:
+                break
+            try:
+                page = (store or self.kernel.store).read(current, limit=1)
+            except (Conflict, KeyError):
+                break
+            if not page.records:
+                break
+            parent = page.records[0].record._payload.get("parent_session_id")
+            current = parent if isinstance(parent, str) and parent else ""
         if owner is not None:
             self._turn_connections[key] = owner
+
+    def _ensure_child_observation(self, child_id: str, store) -> None:
+        if child_id in self._notification_positions:
+            return
+        state, records, _ = store.read_state(child_id)
+        start = state.turns[state.active_turn_id].start if state.active_turn_id else None
+        position = next((row.seq for row in records if row.record == start), records[-1].seq) - 1 if start else records[-1].seq
+        turn_id = state.active_turn_id or (next(reversed(state.turns), None) if state.turns else None)
+        if turn_id is None:
+            return
+        self._ensure_turn_connection(child_id, turn_id, store=store)
+        owner = self._turn_connections.get((child_id, turn_id))
+        if owner is None or not self._router.is_registered(owner):
+            return
+        self._notification_positions[child_id] = _NotificationPosition(position, due=0.0)
+        self._state_manager.subscribe(child_id, owner)
 
     def _settle_turn_connections(self, thread_id: str, state, store) -> None:
         active = state.active_turn_id
@@ -1331,7 +1365,7 @@ class _KernelRunAdapter(RunAdapter):
             None,
         )
         if owner_turn is not None:
-            self._ensure_turn_connection(thread_id, owner_turn)
+            self._ensure_turn_connection(thread_id, owner_turn, store=store)
             for key in tuple(self._turn_connections):
                 if key[0] == thread_id and key[1] != owner_turn:
                     self._turn_connections.pop(key, None)
@@ -1451,6 +1485,9 @@ class _KernelRunAdapter(RunAdapter):
             if self._approval_answered(store, sid, request_id):
                 continue
             owner = self._turn_connections.get((sid, turn_id))
+            if owner is None:
+                self._ensure_turn_connection(sid, turn_id, store=store)
+                owner = self._turn_connections.get((sid, turn_id))
             if owner is None or not self._router.is_registered(owner):
                 continue
             if self._router.get_pending_server_request(RequestId(request_id)) is not None:

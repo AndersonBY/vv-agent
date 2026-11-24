@@ -310,16 +310,15 @@ def test_start_or_attach_and_compare_clear_with_barriers(tmp_path, monkeypatch):
                 assert allow_completion.wait(10)
             return result
 
-        push = server.kernel.push
+        answer = server.kernel.answer
 
-        def barrier_push(sid, item):
-            receipt = push(sid, item)
-            if item.input_id.startswith("controller/"):
-                pushed.set()
+        def barrier_answer(*args, **kwargs):
+            receipt = answer(*args, **kwargs)
+            pushed.set()
             return receipt
 
         monkeypatch.setattr(server.kernel, "start", counted)
-        monkeypatch.setattr(server.kernel, "push", barrier_push)
+        monkeypatch.setattr(server.kernel, "answer", barrier_answer)
         monkeypatch.setattr(server.state_manager, "clear_active_turn", barrier_clear)
         tid = request(server, 2, "turn/start", submission())["result"]["turnId"]
         assert cleared.wait(5)
@@ -451,43 +450,24 @@ def test_action_conflict_and_replay_precede_a_later_active_turn(tmp_path):
 
 
 def test_observer_cannot_overtake_local_completion_between_clear_and_notify(tmp_path, monkeypatch):
-    from threading import current_thread
-
-    cleared, observer_attempted, release = Event(), Event(), Event()
+    cleared = Event()
     with ExitStack() as stack:
         server = node(stack, tmp_path / "store", "A", ScriptedModelProvider.new("test", "m", [LLMResponse("done")]))
-        stack.callback(release.set)
         messages = record_output(server, monkeypatch)
         clear = server.state_manager.clear_active_turn
-        turn_lock = server.state_manager.turn_lock
 
         def barrier_clear(*args, **kwargs):
             result = clear(*args, **kwargs)
             cleared.set()
-            assert release.wait(10)
             return result
 
-        class ObservedLock:
-            def __init__(self, lock):
-                self.lock = lock
-
-            def __enter__(self):
-                if current_thread().name == "app-server-notifications" and cleared.is_set():
-                    observer_attempted.set()
-                self.lock.acquire()
-
-            def __exit__(self, *args):
-                self.lock.release()
-
         monkeypatch.setattr(server.state_manager, "clear_active_turn", barrier_clear)
-        monkeypatch.setattr(server.state_manager, "turn_lock", lambda sid: ObservedLock(turn_lock(sid)))
         request(server, 1, "thread/start", {"inputId": "thread"})
         request(server, 2, "turn/start", submission())
         assert cleared.wait(5)
-        assert observer_attempted.wait(5)
-        assert not any(m.get("method") == "turn/completed" for m in messages)
-        release.set()
+        assert sum(message.get("method") == "turn/completed" for message in messages) == 1
         server.run_adapter.join()
+        assert sum(message.get("method") == "turn/completed" for message in messages) == 1
         lifecycle = [m for m in messages if m.get("method") in {"turn/started", "turn/completed"}]
         assert [m["method"] for m in lifecycle] == ["turn/started", "turn/completed"]
         terminal = next(

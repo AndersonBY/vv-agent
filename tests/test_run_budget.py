@@ -713,7 +713,7 @@ def test_full_compaction_rechecks_model_admission(tmp_path: Path, dimension: str
                         },
                     ),
                 ]
-            ).with_token_limits(6000, 0),
+            ).with_token_limits(6000, None),
             max_cycles=2,
             budget_limits=limits,
             host_cost_meter=meter if dimension == "host_cost" else None,

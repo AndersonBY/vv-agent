@@ -201,9 +201,9 @@ def test_replayed_decisions_boundaries_and_all_record_bytes_match_uncached(
     assert bodies == expected_bodies
     assert commits == expected_commits
     _, rows, _ = store.read_state("s")
-    if mode != "memory":
+    if mode == "summary":
         assert any(r.record.kind == "op_planned" and r.record._payload["purpose"] == "compaction" for r in rows)
-    else:
+    elif mode == "memory":
         assert any(r.record.kind == "op_planned" and r.record._payload["purpose"] == "session_memory" for r in rows)
     assert any(r.record.kind == "boundary_recorded" and r.record._payload["stage"] == "before_memory" for r in rows)
     store._fold_cache = None
