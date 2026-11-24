@@ -3,6 +3,7 @@
 from contextlib import contextmanager
 from dataclasses import replace
 from threading import Event, Thread
+from time import monotonic, sleep
 from types import SimpleNamespace
 from typing import Any
 
@@ -1603,8 +1604,12 @@ def test_app_server_selection_uses_trusted_host_resolver_for_requirements(store,
             },
         )
         assert "result" in second
-        server.run_adapter.join()
+        deadline = monotonic() + 10
         thread = server.store.read_thread("thread")
+        while thread.turns[-1].result.get("finalOutput") is None and monotonic() < deadline:
+            server.run_adapter.join()
+            sleep(0.05)
+            thread = server.store.read_thread("thread")
         assert thread.turns[-1].result.get("finalOutput") == "selected client", thread.turns[-1].result
         assert calls == ["default", "selected"]
         assert any(request["model"] == "selected" and request.get("route") == selection["route"] for request in resolved_requests)
