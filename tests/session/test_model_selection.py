@@ -1593,6 +1593,14 @@ def test_app_server_selection_uses_trusted_host_resolver_for_requirements(store,
         assert stored.item.feature_level == 2
         assert stored.item.requirements == expected.to_dict()
 
+        deadline = monotonic() + 10
+        while monotonic() < deadline:
+            if server.kernel.store.read_state("thread")[0].model_selection is not None:
+                break
+            server.run_adapter.join()
+            sleep(0.05)
+        assert server.kernel.store.read_state("thread")[0].model_selection is not None
+
         second = send(
             3,
             "turn/start",
