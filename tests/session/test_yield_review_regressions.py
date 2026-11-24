@@ -531,11 +531,12 @@ def test_shared_tool_result_candidates_have_immutable_content_identity():
     plan, receipt, _ = produce("A" * 16000, backend=backend)
     dependency = plan._payload["dependencies"][0]
     session_id, remainder = dependency.split("/turn/", 1)
-    plan = SimpleNamespace(
-        **vars(plan),
+    plan_values = vars(plan).copy()
+    plan_values.update(
         session_id=session_id,
         turn_id=f"{session_id}/turn/{remainder.rsplit('/model/', 1)[0]}",
     )
+    plan = SimpleNamespace(**plan_values)
     first = receipt._payload["result"]
     second = prepare_tool_resources(plan, ToolExecutionResult("call-s1", "B" * 16000).to_dict(), backend)
     assert first["artifact"]["path"] != second["artifact"]["path"]
