@@ -153,13 +153,14 @@ def test_native_retry_policy_is_unchanged(provider, case, status, headers):
 @pytest.mark.parametrize("provider", ["openai", "anthropic"])
 @pytest.mark.parametrize("case,status,headers", RETRY_CASES)
 def test_retry_observation_real_kernel(provider, case, status, headers, tmp_path):
+    database = tmp_path / "retry.sqlite"
     with (
         retry_transport(provider, case, status, headers) as evidence,
-        SQLiteStore.standalone(str(tmp_path / "retry.sqlite")) as store,
+        SQLiteStore.standalone(str(database)) as store,
     ):
         store.install_schema()
         start(store)
-        rt = runtime(store, [])
+        rt = runtime(database, [])
         rt.llm = VvLlmClient([EndpointTarget("a", "synthetic-unused", "https://provider.invalid")], backend=provider)
         drive(store, "s", runtime=rt)
         terminal = records_of(store, "turn_ended")[-1].payload
@@ -251,10 +252,11 @@ def test_loopback_native_policy_and_real_kernel(provider, case, status, headers,
                     assert error is not None
                     assert (errors.model_request_rejection(error) is not None) is (case == "complete")
         assert results[0] == results[1]
-        with retry_transport(provider, wire_url=url), SQLiteStore.standalone(str(tmp_path / "loopback.sqlite")) as store:
+        database = tmp_path / "loopback.sqlite"
+        with retry_transport(provider, wire_url=url), SQLiteStore.standalone(str(database)) as store:
             store.install_schema()
             start(store)
-            rt = runtime(store, [])
+            rt = runtime(database, [])
             rt.llm = VvLlmClient(
                 [EndpointTarget("a", "synthetic-unused", "https://provider.invalid")], backend=provider, timeout_seconds=0.06
             )
