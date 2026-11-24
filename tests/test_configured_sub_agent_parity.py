@@ -262,7 +262,7 @@ def test_real_sub_run_events_normalize_line_by_line_to_shared_fixture(tmp_path: 
     class FixedDatetime(datetime):
         @classmethod
         def now(cls, tz=None):
-            return datetime.fromtimestamp(1000, UTC)
+            return datetime.fromtimestamp(1001, UTC)
 
     def registry():
         result = ToolRegistry()
@@ -275,6 +275,11 @@ def test_real_sub_run_events_normalize_line_by_line_to_shared_fixture(tmp_path: 
     driver = SessionDriver()
     try:
         agent = Agent("parent", "Be precise.", sub_agents={"worker": SubAgentConfig(model="m", description="Work.")})
+
+        def child_response(request):
+            prompt = "\n".join(str(message.content or "") for message in request.messages)
+            return LLMResponse("first done" if "first" in prompt else "second done")
+
         config = RunConfig(
             workspace="/fixture",
             tool_registry_factory=registry,
@@ -296,8 +301,8 @@ def test_real_sub_run_events_normalize_line_by_line_to_shared_fixture(tmp_path: 
                                 )
                             ],
                         ),
-                        LLMResponse("first done"),
-                        LLMResponse("second done"),
+                        child_response,
+                        child_response,
                         LLMResponse("parent done"),
                     ]
                 ),
