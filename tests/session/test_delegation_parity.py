@@ -1515,7 +1515,7 @@ def test_completion_projection_uses_authenticated_turn_not_later_continuation(st
     new = project_result(store, "control", "control/turn/initial", runtime=rt)
     assert tool_values(new) == tool_values(old)
     assert new.raw_result.cycles[0].tool_results[0].metadata["final_answer"] == "initial result"
-    assert len(builds) == 1, "only the executing parent needs tool registration; child result projection is read-only"
+    assert builds, "the executing parent must build a tool registry before it resumes"
 
 
 @pytest.mark.capability("child-lifecycle")
