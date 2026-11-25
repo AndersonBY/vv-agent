@@ -1059,8 +1059,6 @@ class _ContentSessionStoreAdapter:
         objects = self._binding._object_content
         if not isinstance(objects, _PostgresObjectContent):
             with self.atomic() as tx:
-                if lease is not None and getattr(self._store, "lock_clause", ""):
-                    tx.lock_session(lease.session_id)
                 yield tx
             return
         root = _root_store(self)

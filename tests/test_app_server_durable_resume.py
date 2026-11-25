@@ -151,8 +151,8 @@ def _kernel_server(path: Path, cut: str | None = None):
         content_key_provider=development_key_provider(),
         runtime_factory=runtime_factory,
     )
-    kernel._root_store.configure_input_admission(allow_unsigned=True)
-    kernel._drive_store_factory = kernel._root_store.drive_store_factory()
+    cast(Any, kernel._root_store).configure_input_admission(allow_unsigned=True)
+    kernel._drive_store_factory = cast(Any, kernel._root_store).drive_store_factory()
     holder["kernel"] = kernel
     transport = _KernelTestTransport(connection_id="owner")
     server = AppServer(
@@ -398,7 +398,7 @@ def test_kernel_surface_reacquires_lost_lease_without_repeating_committed_work(m
         return "worked"
 
     kernel = SessionDriver(tmp_path / "lease.sqlite", content_key_provider=development_key_provider())
-    kernel._root_store.configure_input_admission(allow_unsigned=True)
+    cast(Any, kernel._root_store).configure_input_admission(allow_unsigned=True)
     agent = Agent("assistant", "Work.", model="test-model", tools=[work])
     provider = FixedModelProvider(ScriptedLLM([model, model]), _resolved_model())
     server = None

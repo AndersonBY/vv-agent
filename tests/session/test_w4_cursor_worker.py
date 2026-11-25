@@ -528,7 +528,16 @@ def test_events_advance_one_record_cursor_across_multiple_pages(monkeypatch) -> 
     page_cursors: list[int] = []
     original_read = CoreSQLiteStore.read
 
-    def read(store, session_id, *, after_seq=0, through_seq=None, limit=1024, expected_head=None):
+    def read(
+        store,
+        session_id,
+        *,
+        after_seq=0,
+        through_seq=None,
+        limit=1024,
+        expected_head=None,
+        reuse_cached_inputs=False,
+    ):
         if after_seq > 0:
             page_cursors.append(after_seq)
         return original_read(
@@ -538,6 +547,7 @@ def test_events_advance_one_record_cursor_across_multiple_pages(monkeypatch) -> 
             through_seq=through_seq,
             limit=limit,
             expected_head=expected_head,
+            reuse_cached_inputs=reuse_cached_inputs,
         )
 
     monkeypatch.setattr(CoreSQLiteStore, "read", read)

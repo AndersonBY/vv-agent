@@ -447,7 +447,7 @@ def test_sub_agent_admission_rejects_unresolved_model_before_child_creation(tmp_
     driver = SessionDriver()
     try:
         close = driver.close
-        driver.close = lambda: None
+        vars(driver)["close"] = lambda: None
         try:
             with pytest.raises(ModelError, match="backend mismatch"):
                 start_runner(
@@ -482,7 +482,7 @@ def test_sub_agent_admission_rejects_unresolved_model_before_child_creation(tmp_
                 )
             assert driver.store.list_sessions() == ("parent",)
         finally:
-            driver.close = close
+            vars(driver)["close"] = close
         assert not any(r.record.kind == "op_parked" for r in driver.store.read_state("parent")[1])
     finally:
         driver.close()

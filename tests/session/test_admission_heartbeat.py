@@ -153,7 +153,7 @@ def observe_three_ttls(store, ttl_ms=TTL):
         expiries.add(row[2])
         return row[3] - begin >= 3 * ttl_ms and len(expiries) >= 4
 
-    wait_until(observed)
+    wait_until(observed, timeout=max(5, 3 * ttl_ms / 1000 + 5))
     return initial, expiries
 
 

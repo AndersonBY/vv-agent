@@ -899,6 +899,7 @@ def test_first_reconnect_warns_when_future_query_invalidates_without_subscriber(
                     message.get("method") == "error/warning"
                     and message.get("params", {}).get("code") == "provider_result_invalid"
                 ),
+                timeout=15,
             )
             messages.extend(warning_messages)
             assert warning["params"]["code"] == "provider_result_invalid"

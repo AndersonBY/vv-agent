@@ -814,7 +814,7 @@ class SimDriver(CoreDriver):
             postgres = not isinstance(self.runtime.world.database, Path)
             root_store = getattr(self.store, "_root", self.store)
             if postgres:
-                root_store._rows("SELECT set_config('statement_timeout','5s',false)")
+                cast(Any, root_store)._rows("SELECT set_config('statement_timeout','5s',false)")
             return super().commit(
                 records,
                 consumed,
