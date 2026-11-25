@@ -21,7 +21,7 @@
       "total": 142
     },
     "lastCompaction": {
-      "createdAt": 1000000,
+      "createdAt": 1001000,
       "replacedMessageCount": 3,
       "seq": 23,
       "summary": "<Original User Request>\nrequest\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"Continue\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"request\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n</Persisted Artifacts>",
@@ -102,7 +102,7 @@
         "total": 142
       },
       "lastCompaction": {
-        "createdAt": 1000000,
+        "createdAt": 1001000,
         "replacedMessageCount": 3,
         "seq": 23,
         "summary": "<Original User Request>\nrequest\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"Continue\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"request\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n</Persisted Artifacts>",
