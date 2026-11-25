@@ -27,6 +27,7 @@ import importlib.abc
 import json
 import sys
 import time
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 sys.path.insert(0, str(Path(sys.argv[1]) / 'src'))
@@ -38,6 +39,7 @@ class OnlyCore(importlib.abc.MetaPathFinder):
 sys.meta_path.insert(0, OnlyCore())
 from vv_agent.kernel import _compaction_phase as phase, _event_validation, _message_codec
 from vv_agent.kernel._canonical_json import canonical_json_bytes
+from vv_agent.kernel._execution_values import AgentTask
 from vv_agent.kernel._context import project_context
 from vv_agent.kernel._message_values import Message, ToolArtifactRef
 from vv_agent.kernel._microcompaction_apply import ArchiveToolMessage, ToolMarkerInput, compaction_excerpt
@@ -45,7 +47,25 @@ from vv_agent.kernel._driver_requests import CommitRecords, PlanModel
 from vv_agent.kernel._records import Record, InboxItem, make_record
 from vv_agent.kernel._reducer import Fold
 from vv_agent.kernel._token_count import TokenCount
-records = [Record(**value) for value in data['records']]
+logical_values = data['records']
+raw_values = data['raw_records']
+records = []
+for logical_value, raw_value in zip(logical_values, raw_values, strict=True):
+    raw_record = Record(**raw_value)
+    body = raw_record.encode()
+    if logical_value['kind'] == 'input_applied':
+        fold_value = deepcopy(logical_value)
+        fold_value['payload']['input'] = raw_value['payload']['input']
+        record = Record(**fold_value)
+        record._retain(body, fold_value)
+        object.__setattr__(record, '_business_payload', logical_value['payload'])
+    else:
+        record = Record(**logical_value)
+        record._retain(body, logical_value)
+    if record.kind == 'turn_started':
+        object.__setattr__(record, '_task_value', AgentTask.from_dict(logical_value['payload']['definition']['task']))
+    records.append(record)
+raw_records_by_id = {value['record_id']: Record(**value) for value in raw_values}
 settings = phase.CompactionMemory(**data['settings'])
 counts = data['counts']
 def count(messages, model):
@@ -104,7 +124,7 @@ for case in data['cuts']:
             # Micro usage is appended by the phase after constructing its record.
             expected={k:v for k,v in target._payload.items() if k!='micro_usage'}
             assert request.payload==expected
-            response=make_record(request.kind,session_id='s',turn_id=target.turn_id,payload=request.payload)
+            response=make_record(request.kind,session_id='s',turn_id=target.turn_id,payload=deepcopy(raw_records_by_id[target.record_id]._payload))
             proposed=response
         elif isinstance(request,phase.MicroArtifacts):
             assert request.record.encode()==target.encode()
@@ -128,7 +148,7 @@ assert all(n in {'vv_agent','vv_agent.kernel'} or n.startswith('vv_agent.kernel.
 
 @pytest.mark.parametrize("site_flags", [[], ["-S"]], ids=["normal", "no-site"])
 def test_core_phase_replays_current_producer_cuts(produced_session, tmp_path, site_flags):
-    _, records, inputs, _, _ = produced_session
+    store, records, inputs, _, _ = produced_session
     target = next(r for r in records if r.kind == "context_compacted")
     definition = next(r for r in records if r.kind == "turn_started")._payload["definition"]
     manager = MemoryManager(
@@ -137,7 +157,9 @@ def test_core_phase_replays_current_producer_cuts(produced_session, tmp_path, si
         recovery_tool_available=any(t["function"]["name"] == "read_file" for t in definition["tools"]),
     )
     prefix = Fold()
-    prefix.extend(records[: records.index(target)], consumed_inputs=inputs)
+    raw_records = {row.record.record_id: row.record for row in store.read("s").records}
+    prefix_records = [raw_records[r.record_id] if r.kind == "input_applied" else r for r in records[: records.index(target)]]
+    prefix.extend(prefix_records, consumed_inputs=inputs)
     source = project_context(prefix.history, prefix.state)
     replacement = [Message.from_dict(v) for v in target._payload["replacement"]]
     samples = [source, replacement, *[[m] for m in source], *[[m] for m in replacement]]
@@ -176,6 +198,7 @@ def test_core_phase_replays_current_producer_cuts(produced_session, tmp_path, si
     }
     data = {
         "records": [r.to_dict() for r in records],
+        "raw_records": [raw_records[r.record_id].to_dict() for r in records],
         "settings": asdict(compaction._settings(manager)),
         "counts": counts,
         "cuts": cuts,
@@ -196,7 +219,7 @@ def test_core_phase_replays_current_producer_cuts(produced_session, tmp_path, si
 def test_default_phase_host_observations_run_while_core_is_suspended(monkeypatch, tmp_path):
     from dataclasses import replace
 
-    from session.test_compaction import SUMMARY, configured, start, tool_history
+    from session.test_compaction import SUMMARY, configured, tool_history
 
     from vv_agent.kernel._microcompaction_apply import compaction_excerpt
     from vv_agent.memory import manager as manager_module
@@ -224,6 +247,15 @@ def test_default_phase_host_observations_run_while_core_is_suspended(monkeypatch
         seen.append(("excerpt", assert_core_suspended()))
         return compaction_excerpt(message)
 
+    from session.helpers import (
+        create_fixture_session,
+        fixture_content_reader,
+        push_fixture_input,
+        wrap_fixture_store,
+    )
+
+    from vv_agent.session.records import InboxItem
+
     monkeypatch.setattr(compaction, "count_messages_tokens", count)
     monkeypatch.setattr(manager_module, "count_messages_tokens", count)
     monkeypatch.setattr(MemoryManager, "_archive_tool_message", archived)
@@ -231,10 +263,15 @@ def test_default_phase_host_observations_run_while_core_is_suspended(monkeypatch
     for mode in ("summary", "micro"):
         with SQLiteStore.standalone(str(tmp_path / f"{mode}.sqlite")) as store:
             store.install_schema()
-            start(store)
+            store.configure_input_admission(allow_unsigned=True)
+            content_store = wrap_fixture_store(store)
+            create_fixture_session(content_store, "s", attributes={})
+            push_fixture_input(content_store, "s", InboxItem("initial", "user", {"content": "go"}))
             runtime = configured(
-                store, [LLMResponse(SUMMARY), LLMResponse("done")] if mode == "summary" else [LLMResponse("done")]
+                Path(store.path),
+                [LLMResponse(SUMMARY), LLMResponse("done")] if mode == "summary" else [LLMResponse("done")],
             )
+            runtime.content_reader = fixture_content_reader(content_store, "s")
             if mode == "micro":
                 runtime.config = replace(
                     runtime.config, initial_messages=tool_history(), workspace_backend=MemoryWorkspaceBackend()
@@ -244,7 +281,7 @@ def test_default_phase_host_observations_run_while_core_is_suspended(monkeypatch
                     keep_recent_messages=1,
                     microcompaction_policy=MicrocompactionPolicy(keep_recent_cycles=1),
                 )
-            drive(store, "s", runtime=runtime)
+            drive(content_store, "s", runtime=runtime)
             assert len([r for r in store.read("s").records if r.record.kind == "context_compacted"]) == 1
     assert any("compact_context" in chains for kind, chains in seen if kind == "count")
     assert any("finish_summary" in chains for kind, chains in seen if kind == "count")
@@ -253,18 +290,32 @@ def test_default_phase_host_observations_run_while_core_is_suspended(monkeypatch
 
 
 def _threshold_history(directory):
-    from session.test_compaction import SUMMARY, configured, start
+    from session.helpers import (
+        create_fixture_session,
+        fixture_content_reader,
+        push_fixture_input,
+        read_fixture_state,
+        wrap_fixture_store,
+    )
+    from session.test_compaction import SUMMARY, configured
 
     from vv_agent.session.kernel import drive
+    from vv_agent.session.records import InboxItem
     from vv_agent.session.sqlite import SQLiteStore
     from vv_agent.types import LLMResponse
 
     with SQLiteStore.standalone(str(directory / "threshold-history.sqlite")) as store:
         store.install_schema()
-        start(store)
-        runtime = configured(store, [LLMResponse(SUMMARY), LLMResponse("done")])
-        drive(store, "s", runtime=runtime)
-        return [row.record for row in store.read_state("s")[1]], runtime
+        store.configure_input_admission(allow_unsigned=True)
+        content_store = wrap_fixture_store(store)
+        create_fixture_session(content_store, "s", attributes={})
+        push_fixture_input(content_store, "s", InboxItem("initial", "user", {"content": "go"}))
+        runtime = configured(Path(store.path), [LLMResponse(SUMMARY), LLMResponse("done")])
+        runtime.content_reader = fixture_content_reader(content_store, "s")
+        drive(content_store, "s", runtime=runtime)
+        raw_records = {row.record.record_id: row.record for row in store.read("s").records}
+        _, hydrated, _ = read_fixture_state(content_store, "s")
+        return [row.record for row in hydrated], runtime, raw_records
 
 
 @pytest.fixture(scope="module")
@@ -294,14 +345,24 @@ def _threshold_probe(history, case, monkeypatch, property_owners):
     from vv_agent.session.kernel import _Driver
     from vv_agent.session.records import InboxItem
 
-    records, runtime = history
+    records, runtime, raw_records = history
     compact = next(r for r in records if r.kind == "context_compacted")
     started = next(r for r in records if r.kind == "boundary_recorded" and r._payload["stage"] == "memory_started")
     completed = next(r for r in records if r.kind == "boundary_recorded" and r._payload["stage"] == "memory_completed")
     cut = completed if case == "completion_hook_ignores_limits" else compact if case == "replacement_ignores_limits" else started
     prefix = records[: records.index(cut)]
     fold = Fold()
-    fold.extend(prefix, consumed_inputs=[InboxItem(**r._payload["input"]) for r in prefix if r.kind == "input_applied"])
+    prefix_for_fold = []
+    consumed_inputs = []
+    for record in prefix:
+        if record.kind == "input_applied":
+            raw = raw_records[record.record_id]
+            object.__setattr__(raw, "_business_payload", record._payload)
+            prefix_for_fold.append(raw)
+            consumed_inputs.append(InboxItem(**raw._payload["input"]))
+        else:
+            prefix_for_fold.append(record)
+    fold.extend(prefix_for_fold, consumed_inputs=consumed_inputs)
     source = project_context(fold.history, fold.state)
     definition = next(r for r in prefix if r.kind == "turn_started")._payload["definition"]
     manager = MemoryManager(**definition["memory_settings"], protected_start=None)
@@ -375,7 +436,7 @@ def _threshold_probe(history, case, monkeypatch, property_owners):
             record = compaction.replacement_record(
                 driver, manager, source, replacement, mode="summary", summary=receipt, plan=plan
             )
-            result = record.encode().decode()
+            result = json.dumps(record.to_dict(), sort_keys=True)
         else:
             result = compaction.compact_context(driver)
     except Exception as exc:
