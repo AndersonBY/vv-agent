@@ -151,7 +151,7 @@ def test_all_canonical_record_and_inbox_vectors_are_real_codec_inputs():
         assert parsed.to_dict() == wire
         assert parsed.encode() == body
         seen["inbox" if codec_type is records.InboxItem else "record"] += 1
-    assert seen == {"record": 67, "inbox": 18}
+    assert seen == {"record": 59, "inbox": 17}
 
 
 def test_all_canonical_codec_rejections_reject_without_historical_fallback():

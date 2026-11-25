@@ -253,6 +253,9 @@ class RunHandle:
             raise ValueError("resume uses the retained session and turn without new input")
         from vv_agent.session.surfaces import resume_turn
 
+        cancellation_token = self.runtime.config.cancellation_token
+        if cancellation_token is not None and cancellation_token.cancelled:
+            self.cancel(cancellation_token.reason or "Operation was cancelled")
         return resume_turn(self.session_id, self.run_id, tenant_id=self.kernel.tenant_id)
 
 

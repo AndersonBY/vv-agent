@@ -155,12 +155,12 @@ def test_approval_request_pauses_tool_until_handle_approves() -> None:
         if isinstance(event, ApprovalRequestedEvent):
             request_id = event.request_id
             assert calls == []
+            assert handle.result().status is AgentStatus.WAIT_USER
             handle.approve(request_id, ApprovalDecision.allow())
         if event.type == "run_completed":
             break
 
     assert request_id
-    assert handle.result().status is AgentStatus.WAIT_USER
     assert handle.resume().final_output == "finished"
     assert calls == ["ran"]
 
@@ -197,13 +197,13 @@ def test_function_tool_approval_policy_always_requests_once() -> None:
             if event.tool_name == "guarded_function":
                 request_ids.append(event.request_id)
                 assert calls == []
+                assert handle.result().status is AgentStatus.WAIT_USER
             handle.approve(event.request_id, ApprovalDecision.allow())
         if event.type == "run_completed":
             break
 
     assert request_ids
     assert len(request_ids) == 1
-    assert handle.result().status is AgentStatus.WAIT_USER
     assert handle.resume().final_output == "finished"
     assert calls == ["ran"]
 
@@ -245,12 +245,12 @@ def test_executor_registered_tool_approval_can_be_approved_from_run_handle() -> 
             if event.tool_name == "dangerous_executor":
                 request_id = event.request_id
                 assert calls == []
+                assert handle.result().status is AgentStatus.WAIT_USER
             handle.approve(event.request_id, ApprovalDecision.allow())
         if event.type == "run_completed":
             break
 
     assert request_id
-    assert handle.result().status is AgentStatus.WAIT_USER
     assert handle.resume().final_output == "finished"
     assert calls == ["ran"]
 
@@ -328,12 +328,12 @@ def test_executor_approval_policy_always_requests_executor_approval() -> None:
             if event.tool_name == "policy_executor":
                 request_id = event.request_id
                 assert calls == []
+                assert handle.result().status is AgentStatus.WAIT_USER
             handle.approve(event.request_id, ApprovalDecision.allow())
         if event.type == "run_completed":
             break
 
     assert request_id
-    assert handle.result().status is AgentStatus.WAIT_USER
     assert handle.resume().final_output == "finished"
     assert calls == ["ran"]
 
