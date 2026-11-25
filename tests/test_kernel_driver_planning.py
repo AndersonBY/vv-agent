@@ -148,6 +148,7 @@ def folded_view():
         sid = "planning"
         tid = "planning/turn"
         raw_store.install_schema()
+        raw_store.configure_input_admission(allow_unsigned=True)
         raw_store._rows("UPDATE sk_settings SET write_level=2 WHERE singleton=1")
         raw_store.configure_worker(level=2, handler_versions=("1",), capabilities=())
         tenant_id = raw_store.tenant_id
