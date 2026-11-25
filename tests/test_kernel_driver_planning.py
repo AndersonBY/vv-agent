@@ -669,6 +669,7 @@ def test_real_planner_publishes_hydratable_request_reference(tmp_path):
     marker = "PLANNER_CONTENT_MARKER_7e77"
     with SQLiteStore.standalone(str(tmp_path / "planner.sqlite")) as store:
         store.install_schema()
+        store.configure_input_admission(allow_unsigned=True)
         sessions = SessionDriver(store=store, content_key_provider=LocalKeyProvider(b"k" * 32))
         sessions.create("s", "/workspace", {})
         sessions.push("s", InboxItem("input", "user", {"content": marker}))
@@ -730,6 +731,7 @@ def test_real_tool_planner_publishes_hydratable_request_and_capability_refs(tmp_
 
     with SQLiteStore.standalone(str(tmp_path / "tool-planner.sqlite")) as store:
         store.install_schema()
+        store.configure_input_admission(allow_unsigned=True)
         sessions = SessionDriver(store=store, content_key_provider=LocalKeyProvider(b"k" * 32))
         sessions.create("s", "/workspace", {})
         sessions.push("s", InboxItem("input", "user", {"content": "use the tool"}))
