@@ -1205,17 +1205,34 @@ class _KernelRunAdapter(RunAdapter):
             )
         position.seq = max(position.seq, rows[-1].seq)
         position.child_wait_pending = child_wait_pending
+        for turn_id in {row.record.turn_id for row in rows if row.record.kind == "turn_ended"}:
+            self._router.cancel_matching_server_requests(thread_id=sid, turn_id=turn_id)
         rank = {"turn/started": 0, "turn/completed": 2}
         for _, method, params in sorted(notifications, key=lambda entry: (entry[0], rank.get(entry[1], 1))):
             self._notify_subscribers(sid, method, params)
-        for turn_id in {row.record.turn_id for row in rows if row.record.kind == "turn_ended"}:
-            self._router.cancel_matching_server_requests(thread_id=sid, turn_id=turn_id)
+        approval_pending = any(
+            row.record.kind == "op_parked" and row.record._payload["handle"]["kind"] == "approval" for row in rows
+        )
+        if not approval_pending:
+            self._ack_app_server_cursor(sid, store, rows[-1].seq)
         self._settle_turn_connections(sid, state, store)
         if state.active_turn_id is not None or self._has_pending_start_input(sid, store, state):
             self.kernel._worker.wake(sid)
         if publish_child_wait:
             self._publish_child_wait(sid, store, position)
         return True
+
+    def _ack_app_server_cursor(self, sid: str, store, through_seq: int) -> None:
+        """Persist the notification position after all projected messages are sent."""
+
+        while True:
+            with store.atomic() as tx:
+                batch = tx.consumer_batch(sid, "app_server")
+                if batch is None or batch.through_seq > through_seq:
+                    return
+                tx.ack(batch)
+                if batch.through_seq == through_seq:
+                    return
 
     def _publish_child_wait(self, sid: str, store, position: _NotificationPosition) -> bool:
         if not position.child_wait_pending:

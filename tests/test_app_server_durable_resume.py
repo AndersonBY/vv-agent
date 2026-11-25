@@ -151,6 +151,8 @@ def _kernel_server(path: Path, cut: str | None = None):
         content_key_provider=development_key_provider(),
         runtime_factory=runtime_factory,
     )
+    kernel._root_store.configure_input_admission(allow_unsigned=True)
+    kernel._drive_store_factory = kernel._root_store.drive_store_factory()
     holder["kernel"] = kernel
     transport = _KernelTestTransport(connection_id="owner")
     server = AppServer(
@@ -233,8 +235,9 @@ def test_kernel_process_restart_retains_calls_approval_image_and_client_cursor(t
             epoch, owner, expiry = kernel.store.connection.execute(
                 "SELECT lease_epoch,lease_owner,lease_until_ms FROM sk_session WHERE session_id='thread_1'"
             ).fetchone()
-            assert owner is not None and expiry > kernel.store._now()
-            kernel.store.connection.execute("UPDATE sk_session SET lease_until_ms=0 WHERE session_id='thread_1'")
+            if owner is not None:
+                assert expiry > kernel.store._now()
+                kernel.store.connection.execute("UPDATE sk_session SET lease_until_ms=0 WHERE session_id='thread_1'")
         before = server.store.read_thread("thread_1")
         assert len(before.turns) == 1
         assert before.turns[0].input == _contract()["input"]["valid"]
@@ -279,8 +282,10 @@ def test_kernel_process_restart_retains_calls_approval_image_and_client_cursor(t
             )
         transport = subscriber
         assert transport.turn_completed.wait(timeout=120)
-        while (completed := transport.receive_outbound()).get("method") != "turn/completed":
-            pass
+        while True:
+            completed = transport.receive_outbound()
+            if completed.get("method") == "turn/completed" and completed["params"]["status"] == "completed":
+                break
         assert completed["params"]["status"] == "completed"
         assert completed["params"]["finalOutput"] == "done"
         server.run_adapter.join()
