@@ -1213,7 +1213,7 @@ class _KernelRunAdapter(RunAdapter):
         approval_pending = any(
             row.record.kind == "op_parked" and row.record._payload["handle"]["kind"] == "approval" for row in rows
         )
-        if not approval_pending:
+        if not position.child and not approval_pending:
             self._ack_app_server_cursor(sid, store, rows[-1].seq)
         self._settle_turn_connections(sid, state, store)
         if state.active_turn_id is not None or self._has_pending_start_input(sid, store, state):

@@ -3636,7 +3636,10 @@ class SQLSessionTx:
                     self._pending_lease_fence = (session_id, lease)
                 return CommitReceipt(commit_id, stored_sequences, old[0][2], True)
             s._require_worker_accepts_row(row)
-            prefix = s._prefix(session_id, row, require_worker=False, reuse_cached_inputs=True)
+            # Append is a signing boundary. Re-read the inbox rows so an
+            # already-cached proof cannot hide a same-head tamper before the
+            # new commit is signed.
+            prefix = s._prefix(session_id, row, require_worker=False)
             reducer = prefix.reducer.fork()
             routing_before = s._require_routing_cache(session_id, row, prefix=prefix)
             s._require_worker_supports(

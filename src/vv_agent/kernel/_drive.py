@@ -247,6 +247,8 @@ def drive_core(
         while not scope.lost:
             _set_key_unavailable(runtime, False)
             try:
+                if isinstance(store, SQLStore):
+                    store.next_drive_delay_ms(session_id, lease=scope.lease)
                 if not driver.step():
                     key_unavailable = _consume_key_unavailable(runtime)
                     with ExitStack() as latch:

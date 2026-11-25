@@ -15,6 +15,7 @@ from vv_agent.session.sqlite import SQLiteStore
 
 
 def _create(store, session_id: str, *, parent=None, consumers=(), feature_level=1, bootstrap=None):
+    store.configure_input_admission(allow_unsigned=True)
     parent_session_id, parent_operation_id = parent if parent is not None else (None, None)
     spec = SessionSpec(
         session_id,
