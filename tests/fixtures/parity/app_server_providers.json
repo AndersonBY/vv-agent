@@ -10,7 +10,7 @@
       "operation_id": "provider-thread/turn/work/model/primary/1/attempt/1/tool/0",
       "provider": "work",
       "query_ref": "provider-thread/provider-thread/turn/work/model/primary/1/attempt/1/tool/0",
-      "request_digest": "3448e2f5a78d9c38e78354c3272f66fb651f3ef78ad69b40d1db6ac32dcb6adb"
+      "request_digest": "6e2d86781ac76ee35496dd091026cc76af4bc93461786d98fa695262a0b963ca"
     },
     "phase": "active",
     "status": "provider_running"
