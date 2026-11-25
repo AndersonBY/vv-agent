@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from threading import Event
 
 import pytest
 from support import ModelMapProvider
@@ -135,7 +136,15 @@ def test_create_sub_task_batch_aggregates_sub_agent_results(tmp_path: Path) -> N
         ]
     )
 
-    sub_llm = ScriptedLLM(steps=[LLMResponse(content=answer) for answer in ("sub-A", "sub-B")])
+    def respond_to_section(request):
+        user_content = "\n".join(str(message.content) for message in request.messages if message.role == "user")
+        if "Write section A" in user_content:
+            return LLMResponse(content="sub-A")
+        if "Write section B" in user_content:
+            return LLMResponse(content="sub-B")
+        raise AssertionError(f"unexpected sub-agent prompt: {user_content}")
+
+    sub_llm = ScriptedLLM(steps=[respond_to_section, respond_to_section])
     provider = _shared_model_provider(parent_llm=parent_llm, child_llm=sub_llm)
 
     runtime = KernelRuntime(
@@ -361,11 +370,17 @@ def test_sub_agent_stream_callback_retains_child_identity(tmp_path):
     from vv_agent.session.surfaces import SessionDriver
 
     class StreamingSubLLM:
+        def __init__(self):
+            self.started = Event()
+            self.release = Event()
+
         def complete(self, request):
             return LLMResponse("child done")
 
         def complete_with_stream(self, request, stream_callback=None):
             assert stream_callback is not None
+            self.started.set()
+            assert self.release.wait(5)
             stream_callback({"event": "assistant_delta", "content_delta": "checking", "session_id": "spoofed"})
             return self.complete(request)
 
@@ -386,7 +401,8 @@ def test_sub_agent_stream_callback_retains_child_identity(tmp_path):
             LLMResponse("parent done"),
         ]
     )
-    provider = _shared_model_provider(parent_llm=parent, child_llm=StreamingSubLLM())
+    child_llm = StreamingSubLLM()
+    provider = _shared_model_provider(parent_llm=parent, child_llm=child_llm)
     driver = SessionDriver()
     try:
         handle = start_runner(
@@ -401,10 +417,19 @@ def test_sub_agent_stream_callback_retains_child_identity(tmp_path):
             "go",
             run_config=RunConfig(model_provider=provider, workspace=tmp_path),
         )
+        assert child_llm.started.wait(3)
+        child_session_id = next(sid for sid in driver.store.list_sessions() if sid != "parent")
+        child = driver.start(
+            child_session_id,
+            Agent("worker", "Work.", model="kimi-k2.5"),
+            RunConfig(model_provider=provider, workspace=tmp_path),
+            None,
+            autostart=False,
+        )
+        events = child.events()
+        child_llm.release.set()
         assert handle.result().final_output == "parent done"
-        child = next(h for h in driver.handles if h.session_id != "parent")
-        child.join(3)
-        deltas = [e for e in child.events() if isinstance(e, AssistantDeltaEvent)]
+        deltas = [e for e in events if isinstance(e, AssistantDeltaEvent)]
         assert len(deltas) == 1 and deltas[0].delta == "checking"
         assert deltas[0].session_id == child.session_id and deltas[0].run_id == child.run_id
         assert deltas[0].agent_name == "worker"
@@ -421,32 +446,43 @@ def test_sub_agent_admission_rejects_unresolved_model_before_child_creation(tmp_
 
     driver = SessionDriver()
     try:
-        handle = start_runner(
-            driver,
-            "parent",
-            Agent(
-                "parent",
-                "Delegate.",
-                model="m",
-                sub_agents={"worker": SubAgentConfig(model="child", backend="unavailable", description="Work.")},
-            ),
-            "go",
-            run_config=RunConfig(
-                workspace=tmp_path,
-                model_provider=ScriptedModelProvider.from_steps(
-                    "test",
-                    "m",
-                    [
-                        LLMResponse(
-                            "", [ToolCall("delegate", "create_sub_task", {"agent_id": "worker", "task_description": "work"})]
-                        )
-                    ],
-                ),
-            ),
-        )
-        with pytest.raises(ModelError, match="backend mismatch"):
-            handle.result()
-        assert driver.store.list_sessions() == ("parent",)
+        close = driver.close
+        driver.close = lambda: None
+        try:
+            with pytest.raises(ModelError, match="backend mismatch"):
+                start_runner(
+                    driver,
+                    "parent",
+                    Agent(
+                        "parent",
+                        "Delegate.",
+                        model="m",
+                        sub_agents={"worker": SubAgentConfig(model="child", backend="unavailable", description="Work.")},
+                    ),
+                    "go",
+                    run_config=RunConfig(
+                        workspace=tmp_path,
+                        model_provider=ScriptedModelProvider.from_steps(
+                            "test",
+                            "m",
+                            [
+                                LLMResponse(
+                                    "",
+                                    [
+                                        ToolCall(
+                                            "delegate",
+                                            "create_sub_task",
+                                            {"agent_id": "worker", "task_description": "work"},
+                                        )
+                                    ],
+                                )
+                            ],
+                        ),
+                    ),
+                )
+            assert driver.store.list_sessions() == ("parent",)
+        finally:
+            driver.close = close
         assert not any(r.record.kind == "op_parked" for r in driver.store.read_state("parent")[1])
     finally:
         driver.close()
