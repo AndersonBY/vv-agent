@@ -75,12 +75,14 @@ class BackgroundAgentTaskHandle:
                 status=AgentStatus.RUNNING,
             )
         except BaseException as exc:
-            return self._complete(BackgroundAgentTaskSnapshot(
-                task_id=self.task_id,
-                agent_name=self.agent_name,
-                status=AgentStatus.FAILED,
-                error=str(exc),
-            ))
+            return self._complete(
+                BackgroundAgentTaskSnapshot(
+                    task_id=self.task_id,
+                    agent_name=self.agent_name,
+                    status=AgentStatus.FAILED,
+                    error=str(exc),
+                )
+            )
         return self._complete(self._snapshot_from_result(result))
 
     def wait(self, timeout: float | None = None) -> BackgroundAgentTaskSnapshot:
@@ -89,12 +91,14 @@ class BackgroundAgentTaskHandle:
         except TimeoutError as exc:
             raise TimeoutError(f"Background agent task {self.task_id} was not ready before timeout.") from exc
         except BaseException as exc:
-            return self._complete(BackgroundAgentTaskSnapshot(
-                task_id=self.task_id,
-                agent_name=self.agent_name,
-                status=AgentStatus.FAILED,
-                error=str(exc),
-            ))
+            return self._complete(
+                BackgroundAgentTaskSnapshot(
+                    task_id=self.task_id,
+                    agent_name=self.agent_name,
+                    status=AgentStatus.FAILED,
+                    error=str(exc),
+                )
+            )
         return self._complete(self._snapshot_from_result(result))
 
     def _complete(self, snapshot: BackgroundAgentTaskSnapshot) -> BackgroundAgentTaskSnapshot:
