@@ -96,31 +96,34 @@ def _run_parent(entrypoint, child, config, parent_llm):
     elif entrypoint == "app_server":
         transport = ChannelTransport(connection_id="scope-test")
         server = AppServer(transport=transport, host=DefaultAppServerHost(agent=parent, run_config=config))
-        for payload in [
-            {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"clientInfo": {"name": "test"}}},
-            {"jsonrpc": "2.0", "method": "initialized"},
-            {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "thread/start",
-                "params": {"inputId": "thread_1", "agentKey": "default", "cwd": str(config.workspace)},
-            },
-            {
-                "jsonrpc": "2.0",
-                "id": 2,
-                "method": "turn/start",
-                "params": {
-                    "threadId": "thread_1",
-                    "inputId": "turn_1",
-                    "expectedTurnId": None,
-                    "input": [{"type": "text", "text": "go"}],
+        try:
+            for payload in [
+                {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"clientInfo": {"name": "test"}}},
+                {"jsonrpc": "2.0", "method": "initialized"},
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "thread/start",
+                    "params": {"inputId": "thread_1", "agentKey": "default", "cwd": str(config.workspace)},
                 },
-            },
-        ]:
-            transport.send_inbound(payload)
-            server.processor.process_next(transport)
-        while transport.receive_outbound(timeout=10).get("method") != "turn/completed":
-            pass
+                {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "turn/start",
+                    "params": {
+                        "threadId": "thread_1",
+                        "inputId": "turn_1",
+                        "expectedTurnId": None,
+                        "input": [{"type": "text", "text": "go"}],
+                    },
+                },
+            ]:
+                transport.send_inbound(payload)
+                server.processor.process_next(transport)
+            while transport.receive_outbound(timeout=10).get("method") != "turn/completed":
+                pass
+        finally:
+            server.kernel.close()
     elif entrypoint == "background":
         parent.as_background_task().start(Runner, None, {"task_description": "go"}, run_config=config).wait(timeout=10)
     else:

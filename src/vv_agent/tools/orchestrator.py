@@ -669,6 +669,8 @@ def mark_external_tool_execution_started(
 
     if context.metadata.get(_TOOL_DISPATCH_STARTED_METADATA_KEY) is True:
         return
+    if context.ctx is not None:
+        context.ctx.check_cancelled()
     context.metadata[_TOOL_DISPATCH_STARTED_METADATA_KEY] = True
     context.metadata[_TOOL_DISPATCH_STARTED_AT_METADATA_KEY] = time.monotonic_ns()
     callback = context.metadata.get(_TOOL_DISPATCH_CALLBACK_METADATA_KEY)

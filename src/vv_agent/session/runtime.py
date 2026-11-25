@@ -270,10 +270,17 @@ def static_session_requirements(
     extra = tuple(extra_capabilities)
     if handler_version is None and not extra:
         raise ValueError("null handler requirements require an explicit trusted family capability")
+    effective = effective_run_config(agent, config)
+    registry, _ = _build_configured_registry(agent, effective, runtime=None)
     declares_children = bool(agent.sub_agents or agent.handoffs) or any(
         isinstance(metadata.get("agent"), Agent)
         for tool in agent.tools
         for metadata in (tool.metadata if isinstance(tool.metadata, Mapping) else {},)
+    )
+    declares_children = declares_children or any(
+        isinstance(executor.metadata.get("agent"), Agent)
+        for name in registry.list_tool_names()
+        for executor in (registry.get_executor(name),)
     )
     return static_capability_requirements(
         level=max(level, 2 if declares_children else 1),

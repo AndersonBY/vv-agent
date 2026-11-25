@@ -41,6 +41,17 @@ def begin_context(
 ) -> _PreparedContext:
     metadata = dict(task.metadata)
     metadata.pop(LOCAL_ENVIRONMENT_CAPABILITIES_METADATA_KEY, None)
+    if runtime.delegated_tools:
+        metadata.update(
+            {
+                "_vv_agent_model_provider": runtime.config.model_provider,
+                "_vv_agent_run_config": runtime.config,
+                "_vv_agent_approval_provider": runtime.config.approval_provider,
+                "_vv_agent_approval_broker": runtime.approval_broker,
+                "_vv_agent_approval_timeout_seconds": runtime.config.approval_timeout_seconds,
+                "_vv_agent_memory_providers": list(runtime.config.memory_providers),
+            }
+        )
     if plan._payload["op_kind"] != "model":
         apply_tool_context_policy(
             metadata, agent_policy=runtime.agent.tool_policy, run_policy=runtime.config.tool_policy, shared_state=shared_state

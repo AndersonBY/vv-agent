@@ -44,6 +44,8 @@ class BackgroundAgentTaskHandle:
         self.task_id = task_id
         self.agent_name = agent_name
         self._run_handle = run_handle
+        self._completion_lock = threading.Lock()
+        self._completed_snapshot: BackgroundAgentTaskSnapshot | None = None
 
     @property
     def status(self) -> AgentStatus:
@@ -53,6 +55,9 @@ class BackgroundAgentTaskHandle:
         return self.snapshot()
 
     def snapshot(self) -> BackgroundAgentTaskSnapshot:
+        completed_snapshot = self._completed_snapshot
+        if completed_snapshot is not None:
+            return completed_snapshot
         state = self._run_handle.state()
         if not state.done:
             return BackgroundAgentTaskSnapshot(
@@ -70,13 +75,13 @@ class BackgroundAgentTaskHandle:
                 status=AgentStatus.RUNNING,
             )
         except BaseException as exc:
-            return BackgroundAgentTaskSnapshot(
+            return self._complete(BackgroundAgentTaskSnapshot(
                 task_id=self.task_id,
                 agent_name=self.agent_name,
                 status=AgentStatus.FAILED,
                 error=str(exc),
-            )
-        return self._snapshot_from_result(result)
+            ))
+        return self._complete(self._snapshot_from_result(result))
 
     def wait(self, timeout: float | None = None) -> BackgroundAgentTaskSnapshot:
         try:
@@ -84,13 +89,21 @@ class BackgroundAgentTaskHandle:
         except TimeoutError as exc:
             raise TimeoutError(f"Background agent task {self.task_id} was not ready before timeout.") from exc
         except BaseException as exc:
-            return BackgroundAgentTaskSnapshot(
+            return self._complete(BackgroundAgentTaskSnapshot(
                 task_id=self.task_id,
                 agent_name=self.agent_name,
                 status=AgentStatus.FAILED,
                 error=str(exc),
-            )
-        return self._snapshot_from_result(result)
+            ))
+        return self._complete(self._snapshot_from_result(result))
+
+    def _complete(self, snapshot: BackgroundAgentTaskSnapshot) -> BackgroundAgentTaskSnapshot:
+        with self._completion_lock:
+            if self._completed_snapshot is not None:
+                return self._completed_snapshot
+            self._run_handle.close()
+            self._completed_snapshot = snapshot
+            return snapshot
 
     def _snapshot_from_result(self, result: RunResult) -> BackgroundAgentTaskSnapshot:
         return BackgroundAgentTaskSnapshot(

@@ -192,7 +192,7 @@ def target_agent(runtime: Runtime, selector: str, mode: str, sub_config=None) ->
 
 
 def child_config(runtime: Runtime, context: ToolContext, agent: Agent, mode: str, sub: SubAgentConfig | None = None):
-    return _child_config(
+    config = _child_config(
         runtime.config,
         mode,
         sub,
@@ -200,6 +200,10 @@ def child_config(runtime: Runtime, context: ToolContext, agent: Agent, mode: str
         workspace=context.workspace,
         workspace_backend=context.workspace_backend,
     )
+    context_token = getattr(context, "ctx", None)
+    if context_token is not None and context_token.cancellation_token is not None:
+        config = replace(config, cancellation_token=context_token.cancellation_token)
+    return config
 
 
 def _child_config(
@@ -301,6 +305,25 @@ def _static_child_declarations(parent: Agent, config: RunConfig) -> Iterator[_St
                     workspace_backend=None,
                 ),
             )
+    if config.tool_registry_factory is not None:
+        registry = config.tool_registry_factory()
+        for name in registry.list_tool_names():
+            executor = registry.get_executor(name)
+            metadata = executor.metadata
+            agent = metadata.get("agent") if isinstance(metadata, Mapping) else None
+            if isinstance(agent, Agent):
+                mode = metadata.get("mode")
+                yield _StaticChildDeclaration(
+                    agent,
+                    _child_config(
+                        config,
+                        mode if isinstance(mode, str) else "agent_as_tool",
+                        None,
+                        shared_state=None,
+                        workspace=None,
+                        workspace_backend=None,
+                    ),
+                )
 
 
 def assemble(
@@ -333,6 +356,8 @@ def reconstruct(runtime: Runtime, store: SessionStore, sid: str) -> Runtime:
         context.workspace_backend = LocalWorkspaceBackend(context.workspace)
     sub = SubAgentConfig.from_dict(admission["sub_config"]) if admission["sub_config"] else None
     config = child_config(runtime, cast(ToolContext, context), agent, admission["mode"], sub)
+    if runtime.config.cancellation_token is not None:
+        config = replace(config, cancellation_token=runtime.config.cancellation_token)
     if admission["exclude_files_pattern"]:
         config = replace(
             config,
