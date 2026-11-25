@@ -113,7 +113,7 @@ def test_create_sub_task_batch_has_durable_identities_and_terminal_results(drive
         release.set()
     for child_handle in driver.handles:
         child_handle.join(5)
-        assert not child_handle._thread.is_alive()
+        assert child_handle.done()
     payload = json.loads(result.content)
     ids = [entry["task_id"] for entry in payload["results"]]
     assert len(set(ids)) == 2 and payload["summary"]["total"] == 2
@@ -124,7 +124,7 @@ def test_create_sub_task_batch_has_durable_identities_and_terminal_results(drive
         assert all(entry["status"] == "completed" and entry["final_answer"] == "child done" for entry in payload["results"])
     manager = handle.runtime.child_tasks(driver.store, "parent")
     for sid in ids:
-        entry = manager.get(sid)
+        entry = manager.wait(sid, timeout=5)
         assert entry is not None and entry.outcome.status is AgentStatus.COMPLETED
         assert entry.outcome.final_answer == "child done"
         assert len(driver.store.read_state(sid)[0].turns) == 1
