@@ -592,7 +592,13 @@ def test_approval_precedes_user_question_with_stable_identity(store):
 
         server.start(settle=False)
         deadline = monotonic() + 10
-        while len(server.server.kernel.waits(THREAD)) < 2 and monotonic() < deadline:
+        while (
+            not (
+                any(wait.get("kind") == "approval" for _, _, wait in server.server.kernel.waits(THREAD))
+                and any("interaction" in wait for _, _, wait in server.server.kernel.waits(THREAD))
+            )
+            and monotonic() < deadline
+        ):
             Event().wait(0.01)
         form = server.form()
         assert form["kind"] == "approval" and set(form) == {"kind", "sessionId", "turnId", "requestId"}
