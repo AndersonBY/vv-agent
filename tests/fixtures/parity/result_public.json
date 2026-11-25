@@ -1132,7 +1132,7 @@
     "completion_tool_name": null,
     "events": [
       {
-        "created_at": 1000.0,
+        "created_at": 1001.0,
         "event_id": "sk/71c6a647b211a055332281ddeeeca72ee8b1b7b41be9d3df637ea7450f1012aa/event",
         "input": "go",
         "metadata": {
@@ -1145,7 +1145,7 @@
         "version": "v6"
       },
       {
-        "created_at": 1000.0,
+        "created_at": 1001.0,
         "event_id": "sk/71c6a647b211a055332281ddeeeca72ee8b1b7b41be9d3df637ea7450f1012aa/agent",
         "metadata": {
           "session_seq": 3
@@ -1158,7 +1158,7 @@
       },
       {
         "agent_name": "fixture",
-        "created_at": 1000.0,
+        "created_at": 1001.0,
         "cycle_index": 1,
         "event_id": "sk/1e01411e40b4a6a70b95067ad3deeac23758be0d21095127a8fecd448f98074f/cycle",
         "metadata": {
@@ -1175,7 +1175,7 @@
         "attempt": 1,
         "backend": "scripted",
         "call_id": "seed/turn/initial/model/primary/1/1",
-        "created_at": 1000.0,
+        "created_at": 1001.0,
         "cycle_index": 1,
         "event_id": "sk/9adbde86bb4d76b016711cb57a73de1687f123acc5450b2b8748e3182362562f/event",
         "metadata": {
@@ -1194,7 +1194,7 @@
       {
         "agent_name": "fixture",
         "code": "cycle_llm_response",
-        "created_at": 1000.0,
+        "created_at": 1001.0,
         "cycle_index": 1,
         "details": {
           "assistant_message": "done",
@@ -1216,7 +1216,7 @@
         "attempt": 1,
         "backend": "scripted",
         "call_id": "seed/turn/initial/model/primary/1/1",
-        "created_at": 1000.0,
+        "created_at": 1001.0,
         "cycle_index": 1,
         "event_id": "sk/fcad202fb9b940f15475fd8d1115bc75e60ff2591bf20127f1c63f146c1b8110/event",
         "metadata": {
@@ -1255,7 +1255,7 @@
       {
         "agent_name": "fixture",
         "code": "run_completed",
-        "created_at": 1000.0,
+        "created_at": 1001.0,
         "details": {
           "completion_reason": "no_tool_finish",
           "final_answer": "done"
@@ -1273,7 +1273,7 @@
       },
       {
         "agent_name": "fixture",
-        "created_at": 1000.0,
+        "created_at": 1001.0,
         "event_id": "sk/4cd34d9821a95fe8c26c76c8f19c395fe3ca758be3d5f1eb32783fbffa4e5e49/event",
         "final_output": "done",
         "metadata": {

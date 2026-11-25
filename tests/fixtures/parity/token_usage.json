@@ -101,7 +101,7 @@
       "input": {
         "action": "drive",
         "session_id": "micro",
-        "transcript_ref": "session_projection.json#/source_records/micro"
+        "transcript_ref": "session_projection_s1.json#/source_records/micro"
       },
       "name": "prune_only",
       "producer": {
@@ -166,7 +166,7 @@
       "input": {
         "action": "drive",
         "session_id": "summary",
-        "transcript_ref": "session_projection.json#/source_records/summary"
+        "transcript_ref": "session_projection_s1.json#/source_records/summary"
       },
       "name": "normal_summary",
       "producer": {
@@ -265,7 +265,7 @@
       "input": {
         "action": "drive",
         "session_id": "second_summary",
-        "transcript_ref": "session_projection.json#/source_records/second_summary"
+        "transcript_ref": "session_projection_s1.json#/source_records/second_summary"
       },
       "name": "emergency_resummary",
       "producer": {
@@ -361,7 +361,7 @@
       "input": {
         "action": "reuse_summary_receipt",
         "session_id": "summary_receipt",
-        "transcript_ref": "session_projection.json#/source_records/summary_receipt"
+        "transcript_ref": "session_projection_s1.json#/source_records/summary_receipt"
       },
       "name": "summary_receipt_replay",
       "producer": {
