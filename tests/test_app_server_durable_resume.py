@@ -57,7 +57,7 @@ def _drain_until_completed(transport: ChannelTransport) -> list[dict[str, Any]]:
     while True:
         message = transport.receive_outbound(timeout=5)
         messages.append(message)
-        if message.get("method") == "turn/completed":
+        if message.get("method") == "turn/completed" and message.get("params", {}).get("status") == "completed":
             return messages
 
 
@@ -398,6 +398,7 @@ def test_kernel_surface_reacquires_lost_lease_without_repeating_committed_work(m
         return "worked"
 
     kernel = SessionDriver(tmp_path / "lease.sqlite", content_key_provider=development_key_provider())
+    kernel._root_store.configure_input_admission(allow_unsigned=True)
     agent = Agent("assistant", "Work.", model="test-model", tools=[work])
     provider = FixedModelProvider(ScriptedLLM([model, model]), _resolved_model())
     server = None
@@ -421,6 +422,7 @@ def test_kernel_surface_reacquires_lost_lease_without_repeating_committed_work(m
                     "params": {"inputId": "turn_1", "expectedTurnId": None, "threadId": "thread_1", "input": TURN_INPUT},
                 },
             )
+            initial_handle = kernel.handles[0]
             if surface_name == "approval":
                 assert transport.approval_requested.wait(timeout=30)
                 while (request := transport.receive_outbound()).get("method") != "approval/request":
@@ -440,9 +442,8 @@ def test_kernel_surface_reacquires_lost_lease_without_repeating_committed_work(m
                         },
                     },
                 )
-            kernel.handles[0].result(timeout=30)
+            result = initial_handle.result(timeout=30)
             cast(Any, server.run_adapter).join()
-            result = kernel.handles[-1].result(timeout=30)
             assert transport.turn_completed.is_set()
             completed = _drain_until_completed(transport)[-1]
             assert completed["params"]["status"] == "completed"
@@ -457,7 +458,7 @@ def test_kernel_surface_reacquires_lost_lease_without_repeating_committed_work(m
         assert result.status is AgentStatus.COMPLETED and result.final_output == "done"
         assert calls == ["model", "tool", "model"]
         assert len(leases) == 1
-        sid = kernel.handles[0].session_id
+        sid = "thread_1" if surface_name != "interactive" else "interactive-lease"
         state, records, _ = kernel.store.read_state(sid)
         assert len(state.turns) == 1 and state.active_turn_id is None
         assert sum(r.record.kind == "turn_ended" for r in records) == 1
@@ -505,6 +506,7 @@ def test_kernel_surface_yields_to_other_writer_and_host_wakes_after_lease_loss(m
                 },
             },
         )
+        initial_handle = kernel.handles[0]
         assert blocked.wait(timeout=30)
         assert len(leases) == 2 and leases[1].epoch > leases[0].epoch
         assert not kernel.store.is_runnable("thread_1")
@@ -516,7 +518,7 @@ def test_kernel_surface_yields_to_other_writer_and_host_wakes_after_lease_loss(m
         server.run_adapter.recover("owner", "thread_1")
         result = kernel.handles[-1].result(timeout=30)
         server.run_adapter.join()
-        assert kernel.handles[0].done()
+        assert initial_handle.done()
         assert result.final_output == "done" and transport.turn_completed.is_set()
         assert (tmp_path / "turn.calls").read_text().splitlines() == ["model", "tool", "model"]
         records = kernel.store.read_state("thread_1")[1]

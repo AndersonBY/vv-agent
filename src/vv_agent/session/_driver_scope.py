@@ -202,7 +202,11 @@ class _Scope(_LeaseHeartbeat[CancellationToken]):
             now_ms=now_ms,
             clock=runtime.clock,
             lease_keeper=runtime.lease_keeper,
-            token_factory=lambda: runtime.config.cancellation_token or CancellationToken(),
+            token_factory=lambda: (
+                runtime.config.cancellation_token.child()
+                if runtime.config.cancellation_token is not None
+                else CancellationToken()
+            ),
             sqlite_heartbeat_retry_budget_seconds=runtime.sqlite_heartbeat_retry_budget_seconds,
             sqlite_heartbeat_retry_delay_seconds=runtime.sqlite_heartbeat_retry_delay_seconds,
         )
