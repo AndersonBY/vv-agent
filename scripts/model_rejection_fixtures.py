@@ -43,6 +43,21 @@ from vv_agent.session.sqlite import SQLiteStore
 from vv_agent.types import LLMResponse
 
 
+def _historical_wire(wire: dict[str, Any]) -> dict[str, Any]:
+    """Project current S1 records onto the Contract 39 rejection wire."""
+    for receipt in wire["receipts"]:
+        result = receipt.get("result")
+        if isinstance(result, dict) and isinstance(result.get("raw"), dict):
+            result["raw"].pop("requested_model_id", None)
+    for event in wire["events"]:
+        if event.get("type") != "run_failed":
+            continue
+        metadata = event.get("metadata")
+        if isinstance(metadata, dict) and isinstance(metadata.get("session_seq"), int):
+            metadata["session_seq"] += 1
+    return wire
+
+
 def produce() -> dict:
     vectors = []
     cases = [
@@ -317,11 +332,20 @@ def produce() -> dict:
                     assert all(p["purpose"] == "primary" for p in wire["plans"])
                     assert wire["terminal"]["reason"] == "model_request_rejected"
                 assert not wire["unknowns"]
+            wire = _historical_wire(wire)
             encoded = canonical_json_bytes(wire)
             vectors.append(
                 {"wire": wire, "bytes_base64": base64.b64encode(encoded).decode(), "sha256": sha256(encoded).hexdigest()}
             )
-    return {"schema_version": 1, "record_schema_version": 1, "inbox_schema_version": 3, "vectors": vectors}
+    return {
+        "historical_contract_version": "39.0.0",
+        "historical_record_schema_version": 1,
+        "historical_inbox_schema_version": 3,
+        "schema_version": 1,
+        "record_schema_version": 1,
+        "inbox_schema_version": 3,
+        "vectors": vectors,
+    }
 
 
 if __name__ == "__main__":
