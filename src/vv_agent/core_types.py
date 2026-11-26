@@ -27,6 +27,7 @@ from vv_agent.kernel._execution_values import TaskTokenUsage as TaskTokenUsage
 from vv_agent.kernel._execution_values import TaskTokenUsageTotals as TaskTokenUsageTotals
 from vv_agent.kernel._execution_values import TokenUsage as TokenUsage
 from vv_agent.kernel._execution_values import UsageSource as UsageSource
+from vv_agent.kernel._execution_values import execution_id_for_values as execution_id_for_values
 from vv_agent.kernel._execution_values import _agent_result_error_text as _agent_result_error_text
 from vv_agent.kernel._execution_values import _aggregate_cache_usage as _aggregate_cache_usage
 from vv_agent.kernel._execution_values import _last_assistant_output as _last_assistant_output

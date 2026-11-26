@@ -55,6 +55,7 @@ else:
     from vv_agent.core_types import ToolResultCursor as ToolResultCursor
     from vv_agent.core_types import ToolResultStatus as ToolResultStatus
     from vv_agent.core_types import UsageSource as UsageSource
+    from vv_agent.core_types import execution_id_for_values as execution_id_for_values
     from vv_agent.core_types import _agent_result_error_text as _agent_result_error_text
     from vv_agent.core_types import _aggregate_cache_usage as _aggregate_cache_usage
     from vv_agent.core_types import _last_assistant_output as _last_assistant_output
