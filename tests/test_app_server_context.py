@@ -1,6 +1,7 @@
 """A2 context projection and manual compaction through real App Server producers."""
 
 import json
+import time
 from contextlib import ExitStack
 from dataclasses import replace
 from threading import Event
@@ -39,6 +40,18 @@ def create(server, *, seeded=False):
         return
     result = request(server, "create", "thread/start", {"inputId": "thread"})
     assert "result" in result, result
+
+
+def wait_for_context_change(server, version):
+    deadline = time.monotonic() + 10
+    current = None
+    while time.monotonic() < deadline:
+        current = request(server, "context", "thread/context/read", {"threadId": "thread"})["result"]
+        if current["contextVersion"] != version:
+            return current
+        time.sleep(0.01)
+    assert current is not None and current["contextVersion"] != version
+    return current
 
 
 def notices(store):
@@ -111,8 +124,7 @@ def test_manual_compaction_idle_receipt_replay_conflict_stale_and_reuse(tmp_path
         receipt = receipt["result"]
         b.run_adapter.join()
         assert receipt["accepted"] and not receipt["replayed"]
-        after = request(a, "after", "thread/context/read", {"threadId": "thread"})["result"]
-        assert after["contextVersion"] != version
+        after = wait_for_context_change(a, version)
         assert after["lastCompaction"]["replacedMessageCount"] > 0
         assert "Continue the task" in after["lastCompaction"]["summary"]
         assert after["counts"]["rawHistoryMessages"] > after["counts"]["modelVisibleHistoryMessages"]

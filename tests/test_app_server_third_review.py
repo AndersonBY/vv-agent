@@ -35,7 +35,7 @@ def test_expiry_retry_survives_a_second_abandoned_holder(tmp_path, monkeypatch):
         monkeypatch.setattr(server.kernel._worker, "_periodic_scan", hold_claim_until_takeover)
 
         def takeover():
-            _head, epoch, remaining = server.kernel.store.lease_status("thread")
+            _head, _epoch, remaining = server.kernel.store.lease_status("thread")
             if not takeovers and remaining <= 0:
                 second = server.kernel.store.acquire("thread", owner="holder-B", ttl_ms=300)
                 assert second and second.epoch > first.epoch
