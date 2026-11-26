@@ -313,7 +313,10 @@ def test_slow_append_encoding_uses_last_lease(store, database, monkeypatch):
     def work():
         with open_store(database) as raw_worker:
             worker = wrap_fixture_store(raw_worker)
-            rt = runtime(worker, database, [LLMResponse("done")], ttl_ms=TTL, heartbeat_seconds=INTERVAL)
+            # Keep the setup and first admission outside the sub-second lease
+            # used by the timing assertions below. The assertion still waits
+            # for real renewals before releasing the slow append.
+            rt = runtime(worker, database, [LLMResponse("done")], ttl_ms=4000, heartbeat_seconds=INTERVAL)
             rt.heartbeat_store = worker.heartbeat_store
             return kernel.drive(worker, "s", runtime=rt)
 
