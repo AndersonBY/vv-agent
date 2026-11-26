@@ -1,6 +1,6 @@
 import os
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from threading import Event
 from time import monotonic
@@ -12,7 +12,7 @@ from vv_agent.session.postgres import PostgresStore
 from vv_agent.session.sqlite import SQLiteStore
 from vv_agent.session.timing import Clock
 
-Database = str | Path
+Database = str | Path | SQLiteStore
 
 
 @contextmanager
@@ -22,7 +22,9 @@ def open_store(
     allow_unsigned: bool = True,
     clock: Clock | None = None,
 ) -> Iterator[SQLiteStore | PostgresStore]:
-    if isinstance(database, Path):
+    if isinstance(database, SQLiteStore):
+        manager = nullcontext(database)
+    elif isinstance(database, Path):
         manager = SQLiteStore.standalone(str(database), clock=clock)
     else:
         if clock is not None:
