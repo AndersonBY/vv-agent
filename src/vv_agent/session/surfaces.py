@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import secrets
 import sqlite3
 import warnings
@@ -1322,7 +1323,13 @@ class SessionDriver:
             object.__setattr__(runtime, "_session_driver_claim_bound", _RUNTIME_CLAIM_BOUND)
             self._bind_claim_content_reader(runtime, store, sid)
             return runtime
-        return self.runtime(agent, config, task, session_id=sid, store=store, handler_version=handler_version)
+        runtime_method = self.runtime
+        parameters = inspect.signature(runtime_method).parameters
+        if "session_id" in parameters or any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+        ):
+            return runtime_method(agent, config, task, session_id=sid, store=store, handler_version=handler_version)
+        return runtime_method(agent, config, task)
 
     def _bind_claim_content_reader(self, runtime: Runtime, store: SessionStore, sid: str) -> None:
         default_reader = getattr(runtime, "_session_driver_default_content_reader", None)
