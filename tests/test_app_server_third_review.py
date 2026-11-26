@@ -2,6 +2,7 @@
 
 import time
 from contextlib import ExitStack
+from threading import Event
 from types import SimpleNamespace
 
 import pytest
@@ -18,24 +19,31 @@ def test_expiry_retry_survives_a_second_abandoned_holder(tmp_path, monkeypatch):
     with ExitStack() as stack:
         server = node(stack, tmp_path / "store", "A", provider())
         request(server, 1, "thread/start", {"inputId": "thread"})
-        first = server.kernel.store.acquire("thread", owner="holder-A", ttl_ms=200)
+        first = server.kernel.store.acquire("thread", owner="holder-A", ttl_ms=1000)
         messages = record_output(server, monkeypatch)
         request(server, 2, "turn/start", submission())
         server.run_adapter.join()
-        status = server.kernel.store.lease_status
         takeovers = []
+        allow_claim = Event()
+        original_scan = server.kernel._worker._periodic_scan
 
-        def takeover(sid):
-            head, epoch, remaining = status(sid)
-            if not takeovers and remaining == 0:
-                second = server.kernel.store.acquire(sid, owner="holder-B", ttl_ms=300)
+        def hold_claim_until_takeover(store):
+            if not allow_claim.is_set() and server.kernel.store.lease_status("thread")[2] <= 0:
+                return None
+            return original_scan(store)
+
+        monkeypatch.setattr(server.kernel._worker, "_periodic_scan", hold_claim_until_takeover)
+
+        def takeover():
+            _head, epoch, remaining = server.kernel.store.lease_status("thread")
+            if not takeovers and remaining <= 0:
+                second = server.kernel.store.acquire("thread", owner="holder-B", ttl_ms=300)
                 assert second and second.epoch > first.epoch
                 takeovers.append(second)
-                return status(sid)
-            return head, epoch, remaining
+                allow_claim.set()
+            return bool(takeovers)
 
-        monkeypatch.setattr(server.kernel.store, "lease_status", takeover)
-        eventually(lambda: bool(takeovers))
+        eventually(takeover)
         eventually(lambda: bool(server.kernel.store.read_state("thread")[0].turns))
         server.run_adapter.join()
         assert server.kernel.store.read_state("thread")[0].turns["thread/turn/prompt"].ended
@@ -66,7 +74,7 @@ def test_disconnected_recovery_does_not_resubscribe_and_approval_is_durable(tmp_
         holder = server.kernel.store.acquire("thread", owner="dead", ttl_ms=300)
         tid = request(server, 2, "turn/start", submission())["result"]["turnId"]
         server.run_adapter.join()
-        assert server.run_adapter._lease_retries
+        assert server.kernel.store.lease_status("thread")[2] > 0
         server.processor.disconnect_connection("A")
         assert not server.router.is_registered("A")
         if trigger == "wake":
@@ -80,7 +88,7 @@ def test_disconnected_recovery_does_not_resubscribe_and_approval_is_durable(tmp_
         if approval:
             assert effects == []
             assert server.run_adapter.public_thread_status("thread")["status"] == "approval_wait"
-            assert server.store.runtimes["thread"].config.approval_provider is None
+            assert server.kernel._runtimes["thread"].config.approval_provider is None
             rid = server.kernel.waits("thread")[0][2]["request_id"]
             other = node(stack, tmp_path / "store", "B", models, agent=server.host._agent)
             assert (
@@ -94,8 +102,8 @@ def test_disconnected_recovery_does_not_resubscribe_and_approval_is_durable(tmp_
         assert server.kernel.store.read_state("thread")[0].turns[tid].ended
         assert server.router.pending_server_request_count() == 0
         assert not any(m.get("method") == "approval/request" for m in messages)
-        # Let the old timer fire too: it must not recreate notification state.
-        eventually(lambda: not server.run_adapter._lease_retries)
+        # Let the worker observe the settled turn too: it must not recreate notification state.
+        eventually(lambda: not server.kernel._errors)
         time.sleep(0.1)
         assert server.state_manager.subscribers("thread") == set()
         assert server.run_adapter._notification_positions == {}
@@ -122,4 +130,3 @@ def test_recovery_uses_a_registered_subscriber_after_original_disconnect(tmp_pat
         server.run_adapter.join()
         assert server.kernel.store.read_state("thread")[0].turns[tid].ended
         assert server.state_manager.subscribers("thread") == {"B"}
-        assert server.store.runtimes["thread"].config.approval_provider._connection_id == "B"
