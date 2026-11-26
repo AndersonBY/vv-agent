@@ -99,7 +99,7 @@ def test_disconnected_recovery_does_not_resubscribe_and_approval_is_durable(tmp_
             )
             other.run_adapter.join()
             assert effects == ["once"]
-        assert server.kernel.store.read_state("thread")[0].turns[tid].ended
+        eventually(lambda: server.kernel.store.read_state("thread")[0].turns[tid].ended)
         assert server.router.pending_server_request_count() == 0
         assert not any(m.get("method") == "approval/request" for m in messages)
         # Let the worker observe the settled turn too: it must not recreate notification state.
