@@ -202,7 +202,7 @@ def test_contract_41_logical_schema_has_closed_s1_shapes():
     assert _record_schema.RECORD_SCHEMA_LEVEL_2["properties"]["kind"] == {"type": "string", "enum": ["session_created"]}
     assert _record_schema.RECORD_SCHEMA_LEVEL_3["properties"]["kind"] == {
         "type": "string",
-        "enum": ["turn_started", "op_planned"],
+        "enum": ["turn_started", "op_planned", "op_prepared"],
     }
     assert _record_schema.INPUT_SCHEMA_LEVEL_3["properties"]["kind"] == {
         "type": "string",
