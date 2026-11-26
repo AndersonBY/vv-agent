@@ -433,6 +433,7 @@ def test_interrupt_without_local_handle_is_durable(tmp_path):
         result = request(b, 3, "turn/interrupt", {"threadId": "thread", "expectedTurnId": tid, "actionId": "cancel"})["result"]
         assert result["accepted"]
         b.run_adapter.join()
+        eventually(lambda: b.kernel.store.read_state("thread")[0].turns[tid].ended)
         state, records, _ = b.kernel.store.read_state("thread")
         assert state.turns[tid].ended
         assert any(
