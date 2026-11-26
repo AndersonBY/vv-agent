@@ -9,10 +9,13 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
+from session.helpers import content_ref, principal
 
 from vv_agent.kernel._postgres import SCHEMA_TABLES
 from vv_agent.kernel._postgres import PostgresStore as CorePostgresStore
+from vv_agent.session.records import SessionSpec
 from vv_agent.session.postgres import PostgresStore, join_transaction
+from vv_agent.session.reducer import Fold as SessionFold
 
 TENANT_ID = "tenant-a"
 
@@ -53,6 +56,20 @@ class _InputSigner:
         return True
 
 
+class _CheckpointSigner:
+    class _Binding:
+        key_id = "test-checkpoint-key"
+
+        def sign(self, _message):
+            return b"test-checkpoint-signature"
+
+    def bind_key(self):
+        return self._Binding()
+
+    def verify(self, *_args, **_kwargs):
+        return True
+
+
 @pytest.fixture(scope="session")
 def postgres_admin():
     psycopg = pytest.importorskip("psycopg", reason="PostgreSQL tests need the postgres extra")
@@ -78,19 +95,33 @@ def pg_database(postgres_admin):
     from psycopg import sql
     from psycopg.conninfo import make_conninfo
 
+    admin_dsn = os.environ.get("VV_AGENT_TEST_POSTGRES_DSN") or postgres_admin.info.dsn
     name = f"vv_w2a_fix_{uuid4().hex}"
     try:
         postgres_admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
     except psycopg.errors.InsufficientPrivilege:
         pytest.skip("PostgreSQL test role cannot create disposable databases")
-    database = PGDatabase(postgres_admin, make_conninfo(postgres_admin.info.dsn, dbname=name))
+    database = PGDatabase(postgres_admin, make_conninfo(admin_dsn, dbname=name))
     try:
         yield database
     finally:
-        with psycopg.connect(postgres_admin.info.dsn, autocommit=True, connect_timeout=3) as admin:
+        with psycopg.connect(admin_dsn, autocommit=True, connect_timeout=3) as admin:
             admin.execute(sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(name)))
             for role in database.roles:
+                admin.execute(sql.SQL("REASSIGN OWNED BY {} TO CURRENT_USER").format(sql.Identifier(role)))
+                admin.execute(sql.SQL("DROP OWNED BY {}").format(sql.Identifier(role)))
                 admin.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(role)))
+
+
+def _create_session(store) -> None:
+    spec = SessionSpec(
+        "s",
+        principal(),
+        content_ref("workspace/s"),
+        attributes=content_ref("attributes/s"),
+    )
+    with store.atomic() as tx:
+        tx.create(spec, consumers=())
 
 
 def _install(database: PGDatabase) -> None:
@@ -285,12 +316,9 @@ def test_postgres_heartbeat_inherits_worker_level_and_input_admission(pg_databas
     def exercise(store):
         store.install_schema()
         store.configure_worker(level=2)
+        store.configure_input_admission(_CheckpointSigner())
+        _create_session(store)
         store.configure_input_admission(signer)
-        store._rows(
-            "INSERT INTO sk_session(tenant_id,session_id,schema_version,phase,level,deletion_state,created_ms) "
-            "VALUES (%s,'s','S1','idle',2,'live',0)",
-            (store.tenant_id,),
-        )
         lease = store.acquire("s", owner="worker/root", ttl_ms=10_000)
         assert lease is not None
 
@@ -303,7 +331,7 @@ def test_postgres_heartbeat_inherits_worker_level_and_input_admission(pg_databas
             assert heartbeat.release(renewed.lease)
 
     if facade == "core":
-        with CorePostgresStore.standalone(pg_database.dsn, fold_factory=_fold_factory) as store:
+        with CorePostgresStore.standalone(pg_database.dsn, fold_factory=SessionFold) as store:
             exercise(store)
     else:
         with PostgresStore.standalone(pg_database.dsn) as store:
