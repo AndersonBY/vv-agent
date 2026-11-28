@@ -21,7 +21,7 @@
       "total": 142
     },
     "lastCompaction": {
-      "createdAt": 1000000,
+      "createdAt": 1001000,
       "replacedMessageCount": 3,
       "seq": 23,
       "summary": "<Original User Request>\nrequest\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"Continue\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"request\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n</Persisted Artifacts>",
@@ -102,7 +102,7 @@
         "total": 142
       },
       "lastCompaction": {
-        "createdAt": 1000000,
+        "createdAt": 1001000,
         "replacedMessageCount": 3,
         "seq": 23,
         "summary": "<Original User Request>\nrequest\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"Continue\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"request\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n</Persisted Artifacts>",
@@ -119,7 +119,7 @@
       "lineage": {
         "contextDigest": "417f326e519eb1272e9f70ede88b1271dcf6fc05a78b79edff1d11719d8a390d",
         "cutTurnId": "a2/turn/compaction/c309f52ae059ae56a73b7f35b987921a4f4669416038f726bff5eb0e899e7c6d",
-        "sourceRecordDigest": "729bf64baa3d69933d1fed25ddddcb564b7d97908b6d25f7f91c50766958c26d",
+        "sourceRecordDigest": "6664d20052cf55c233fbfa0ad939e8ba3a0fb1e7ecd4bb01f6901d8ceae3180f",
         "sourceRecordSeq": 27,
         "sourceThreadId": "a2"
       },
@@ -138,7 +138,7 @@
       "lineage": {
         "contextDigest": "417f326e519eb1272e9f70ede88b1271dcf6fc05a78b79edff1d11719d8a390d",
         "cutTurnId": "a2/turn/compaction/c309f52ae059ae56a73b7f35b987921a4f4669416038f726bff5eb0e899e7c6d",
-        "sourceRecordDigest": "729bf64baa3d69933d1fed25ddddcb564b7d97908b6d25f7f91c50766958c26d",
+        "sourceRecordDigest": "6664d20052cf55c233fbfa0ad939e8ba3a0fb1e7ecd4bb01f6901d8ceae3180f",
         "sourceRecordSeq": 27,
         "sourceThreadId": "a2"
       },
@@ -150,7 +150,7 @@
       "lineage": {
         "contextDigest": "417f326e519eb1272e9f70ede88b1271dcf6fc05a78b79edff1d11719d8a390d",
         "cutTurnId": "a2/turn/compaction/c309f52ae059ae56a73b7f35b987921a4f4669416038f726bff5eb0e899e7c6d",
-        "sourceRecordDigest": "729bf64baa3d69933d1fed25ddddcb564b7d97908b6d25f7f91c50766958c26d",
+        "sourceRecordDigest": "6664d20052cf55c233fbfa0ad939e8ba3a0fb1e7ecd4bb01f6901d8ceae3180f",
         "sourceRecordSeq": 27,
         "sourceThreadId": "a2"
       },

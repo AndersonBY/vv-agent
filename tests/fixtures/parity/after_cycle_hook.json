@@ -302,7 +302,6 @@
           "usage/active/c1c/disabled_is_exact_noop/turn/initial/1/6",
           "op/c1c/disabled_is_exact_noop/turn/initial/model/primary/2/1/result",
           "usage/active/c1c/disabled_is_exact_noop/turn/initial/1/7",
-          "usage/active/c1c/disabled_is_exact_noop/turn/initial/1/8",
           "turn/c1c/disabled_is_exact_noop/turn/initial/ended"
         ],
         "session_id": "c1c/disabled_is_exact_noop"
@@ -487,7 +486,6 @@
           "usage/active/c1c/permission_narrowing_is_enforced_and_durable/turn/initial/1/13",
           "turn/c1c/permission_narrowing_is_enforced_and_durable/turn/initial/boundary/after_cycle/c1c/permission_narrowing_is_enforced_and_durable/turn/initial/model/primary/3",
           "usage/active/c1c/permission_narrowing_is_enforced_and_durable/turn/initial/1/14",
-          "usage/active/c1c/permission_narrowing_is_enforced_and_durable/turn/initial/1/15",
           "turn/c1c/permission_narrowing_is_enforced_and_durable/turn/initial/ended"
         ],
         "session_id": "c1c/permission_narrowing_is_enforced_and_durable"
@@ -535,7 +533,6 @@
           "usage/active/c1c/stop_cannot_be_projected_as_success/turn/initial/1/4",
           "turn/c1c/stop_cannot_be_projected_as_success/turn/initial/boundary/after_cycle/c1c/stop_cannot_be_projected_as_success/turn/initial/model/primary/1",
           "usage/active/c1c/stop_cannot_be_projected_as_success/turn/initial/1/5",
-          "usage/active/c1c/stop_cannot_be_projected_as_success/turn/initial/1/6",
           "turn/c1c/stop_cannot_be_projected_as_success/turn/initial/ended"
         ],
         "session_id": "c1c/stop_cannot_be_projected_as_success"
@@ -581,7 +578,6 @@
           "usage/active/c1c/steer_at_max_cycles_fails_closed/turn/initial/1/4",
           "turn/c1c/steer_at_max_cycles_fails_closed/turn/initial/boundary/after_cycle/c1c/steer_at_max_cycles_fails_closed/turn/initial/model/primary/1",
           "usage/active/c1c/steer_at_max_cycles_fails_closed/turn/initial/1/5",
-          "usage/active/c1c/steer_at_max_cycles_fails_closed/turn/initial/1/6",
           "turn/c1c/steer_at_max_cycles_fails_closed/turn/initial/ended"
         ],
         "session_id": "c1c/steer_at_max_cycles_fails_closed"
