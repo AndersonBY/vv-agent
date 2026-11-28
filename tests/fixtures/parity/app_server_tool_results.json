@@ -14,7 +14,7 @@
         "ref": {
           "attempt": 1,
           "operationId": "result-thread/turn/outputs/model/primary/1/attempt/1/tool/0",
-          "recordDigest": "85af4060e9cf4f6f22aa45258dd052acb4c23a80e54287d31689fd4f5f4c6a1b",
+          "recordDigest": "82fbd6763e9add4e1bdcfca8ee5d1b548a72c8f538775246c36a63c5e5637b3f",
           "seq": 22,
           "sessionId": "result-thread",
           "toolCallId": "call-text",
@@ -35,7 +35,7 @@
         "ref": {
           "attempt": 1,
           "operationId": "result-thread/turn/outputs/model/primary/1/attempt/1/tool/0",
-          "recordDigest": "85af4060e9cf4f6f22aa45258dd052acb4c23a80e54287d31689fd4f5f4c6a1b",
+          "recordDigest": "82fbd6763e9add4e1bdcfca8ee5d1b548a72c8f538775246c36a63c5e5637b3f",
           "seq": 22,
           "sessionId": "result-thread",
           "toolCallId": "call-text",
@@ -54,7 +54,7 @@
         "ref": {
           "attempt": 1,
           "operationId": "result-thread/turn/outputs/model/primary/1/attempt/1/tool/0",
-          "recordDigest": "85af4060e9cf4f6f22aa45258dd052acb4c23a80e54287d31689fd4f5f4c6a1b",
+          "recordDigest": "82fbd6763e9add4e1bdcfca8ee5d1b548a72c8f538775246c36a63c5e5637b3f",
           "seq": 22,
           "sessionId": "result-thread",
           "toolCallId": "call-text",
@@ -78,7 +78,7 @@
         "ref": {
           "attempt": 1,
           "operationId": "result-thread/turn/outputs/model/primary/1/attempt/1/tool/1",
-          "recordDigest": "5e8e98ed7b29054c9c2d0217232055a5d81e224a4cebbc14d8d26495a6c0f3f9",
+          "recordDigest": "0de03d6542360ef31ea90dcce9da1689607ff69f67e6030d9309bb970ac4e5ea",
           "seq": 26,
           "sessionId": "result-thread",
           "toolCallId": "call-json",
@@ -99,7 +99,7 @@
         "ref": {
           "attempt": 1,
           "operationId": "result-thread/turn/outputs/model/primary/1/attempt/1/tool/1",
-          "recordDigest": "5e8e98ed7b29054c9c2d0217232055a5d81e224a4cebbc14d8d26495a6c0f3f9",
+          "recordDigest": "0de03d6542360ef31ea90dcce9da1689607ff69f67e6030d9309bb970ac4e5ea",
           "seq": 26,
           "sessionId": "result-thread",
           "toolCallId": "call-json",
@@ -118,7 +118,7 @@
         "ref": {
           "attempt": 1,
           "operationId": "result-thread/turn/outputs/model/primary/1/attempt/1/tool/1",
-          "recordDigest": "5e8e98ed7b29054c9c2d0217232055a5d81e224a4cebbc14d8d26495a6c0f3f9",
+          "recordDigest": "0de03d6542360ef31ea90dcce9da1689607ff69f67e6030d9309bb970ac4e5ea",
           "seq": 26,
           "sessionId": "result-thread",
           "toolCallId": "call-json",
@@ -146,7 +146,7 @@
         "ref": {
           "attempt": 1,
           "operationId": "result-thread/turn/outputs/model/primary/1/attempt/1/tool/2",
-          "recordDigest": "922b3bfa394558d10bde91abe84c6d708f68ae8e73587a259abf07f9f12711b2",
+          "recordDigest": "943efa374cbe55f7d8382ce1577d3ad11b8e3242d51085e6804513390ba8e820",
           "seq": 30,
           "sessionId": "result-thread",
           "toolCallId": "call-image",
@@ -167,7 +167,7 @@
         "ref": {
           "attempt": 1,
           "operationId": "result-thread/turn/outputs/model/primary/1/attempt/1/tool/2",
-          "recordDigest": "922b3bfa394558d10bde91abe84c6d708f68ae8e73587a259abf07f9f12711b2",
+          "recordDigest": "943efa374cbe55f7d8382ce1577d3ad11b8e3242d51085e6804513390ba8e820",
           "seq": 30,
           "sessionId": "result-thread",
           "toolCallId": "call-image",
@@ -192,7 +192,7 @@
             "ref": {
               "attempt": 1,
               "operationId": "result-thread/turn/outputs/model/primary/1/attempt/1/tool/2",
-              "recordDigest": "922b3bfa394558d10bde91abe84c6d708f68ae8e73587a259abf07f9f12711b2",
+              "recordDigest": "943efa374cbe55f7d8382ce1577d3ad11b8e3242d51085e6804513390ba8e820",
               "seq": 30,
               "sessionId": "result-thread",
               "toolCallId": "call-image",
@@ -214,7 +214,7 @@
             "ref": {
               "attempt": 1,
               "operationId": "result-thread/turn/outputs/model/primary/1/attempt/1/tool/2",
-              "recordDigest": "922b3bfa394558d10bde91abe84c6d708f68ae8e73587a259abf07f9f12711b2",
+              "recordDigest": "943efa374cbe55f7d8382ce1577d3ad11b8e3242d51085e6804513390ba8e820",
               "seq": 30,
               "sessionId": "result-thread",
               "toolCallId": "call-image",
@@ -234,7 +234,7 @@
         "ref": {
           "attempt": 1,
           "operationId": "result-thread/turn/outputs/model/primary/1/attempt/1/tool/2",
-          "recordDigest": "922b3bfa394558d10bde91abe84c6d708f68ae8e73587a259abf07f9f12711b2",
+          "recordDigest": "943efa374cbe55f7d8382ce1577d3ad11b8e3242d51085e6804513390ba8e820",
           "seq": 30,
           "sessionId": "result-thread",
           "toolCallId": "call-image",
@@ -268,7 +268,7 @@
         "ref": {
           "attempt": 1,
           "operationId": "result-thread/turn/outputs/model/primary/1/attempt/1/tool/3",
-          "recordDigest": "d1d9ffba28d0298f56a475f1fd93a4d7ff988c2ec4765864c1b0bfef7734b666",
+          "recordDigest": "cdbad642c439b732d2f5e085758c92e73641573f1ed4e26fdd22b1663d3490a1",
           "seq": 34,
           "sessionId": "result-thread",
           "toolCallId": "call-file",
@@ -289,7 +289,7 @@
         "ref": {
           "attempt": 1,
           "operationId": "result-thread/turn/outputs/model/primary/1/attempt/1/tool/3",
-          "recordDigest": "d1d9ffba28d0298f56a475f1fd93a4d7ff988c2ec4765864c1b0bfef7734b666",
+          "recordDigest": "cdbad642c439b732d2f5e085758c92e73641573f1ed4e26fdd22b1663d3490a1",
           "seq": 34,
           "sessionId": "result-thread",
           "toolCallId": "call-file",
@@ -314,7 +314,7 @@
             "ref": {
               "attempt": 1,
               "operationId": "result-thread/turn/outputs/model/primary/1/attempt/1/tool/3",
-              "recordDigest": "d1d9ffba28d0298f56a475f1fd93a4d7ff988c2ec4765864c1b0bfef7734b666",
+              "recordDigest": "cdbad642c439b732d2f5e085758c92e73641573f1ed4e26fdd22b1663d3490a1",
               "seq": 34,
               "sessionId": "result-thread",
               "toolCallId": "call-file",
@@ -336,7 +336,7 @@
             "ref": {
               "attempt": 1,
               "operationId": "result-thread/turn/outputs/model/primary/1/attempt/1/tool/3",
-              "recordDigest": "d1d9ffba28d0298f56a475f1fd93a4d7ff988c2ec4765864c1b0bfef7734b666",
+              "recordDigest": "cdbad642c439b732d2f5e085758c92e73641573f1ed4e26fdd22b1663d3490a1",
               "seq": 34,
               "sessionId": "result-thread",
               "toolCallId": "call-file",
@@ -356,7 +356,7 @@
         "ref": {
           "attempt": 1,
           "operationId": "result-thread/turn/outputs/model/primary/1/attempt/1/tool/3",
-          "recordDigest": "d1d9ffba28d0298f56a475f1fd93a4d7ff988c2ec4765864c1b0bfef7734b666",
+          "recordDigest": "cdbad642c439b732d2f5e085758c92e73641573f1ed4e26fdd22b1663d3490a1",
           "seq": 34,
           "sessionId": "result-thread",
           "toolCallId": "call-file",
@@ -390,7 +390,7 @@
         "ref": {
           "attempt": 1,
           "operationId": "result-thread/turn/outputs/model/primary/1/attempt/1/tool/4",
-          "recordDigest": "bb95ab3e414875102bb3872ec2c8fcbf53eda5c7f686540a2bbe907892c5e055",
+          "recordDigest": "0a4c0a5abeb8ba61c8cca36eaa0374ca72ea3b27f6dcaadf6719f1b5c8c26486",
           "seq": 38,
           "sessionId": "result-thread",
           "toolCallId": "call-error",
@@ -411,7 +411,7 @@
         "ref": {
           "attempt": 1,
           "operationId": "result-thread/turn/outputs/model/primary/1/attempt/1/tool/4",
-          "recordDigest": "bb95ab3e414875102bb3872ec2c8fcbf53eda5c7f686540a2bbe907892c5e055",
+          "recordDigest": "0a4c0a5abeb8ba61c8cca36eaa0374ca72ea3b27f6dcaadf6719f1b5c8c26486",
           "seq": 38,
           "sessionId": "result-thread",
           "toolCallId": "call-error",
@@ -430,7 +430,7 @@
         "ref": {
           "attempt": 1,
           "operationId": "result-thread/turn/outputs/model/primary/1/attempt/1/tool/4",
-          "recordDigest": "bb95ab3e414875102bb3872ec2c8fcbf53eda5c7f686540a2bbe907892c5e055",
+          "recordDigest": "0a4c0a5abeb8ba61c8cca36eaa0374ca72ea3b27f6dcaadf6719f1b5c8c26486",
           "seq": 38,
           "sessionId": "result-thread",
           "toolCallId": "call-error",
@@ -460,7 +460,7 @@
         "ref": {
           "attempt": 1,
           "operationId": "result-thread/turn/outputs/model/primary/1/attempt/1/tool/5",
-          "recordDigest": "5a68979238f76b98f9024363cd55ad39ad5ef775330ac5e3ef2a5e5f090ccb2f",
+          "recordDigest": "d88d76b8c1b2c3da09fbb96f01539053bd545635a6c20c46d881f481f7c2c69a",
           "seq": 42,
           "sessionId": "result-thread",
           "toolCallId": "call-artifact",
@@ -481,7 +481,7 @@
         "ref": {
           "attempt": 1,
           "operationId": "result-thread/turn/outputs/model/primary/1/attempt/1/tool/5",
-          "recordDigest": "5a68979238f76b98f9024363cd55ad39ad5ef775330ac5e3ef2a5e5f090ccb2f",
+          "recordDigest": "d88d76b8c1b2c3da09fbb96f01539053bd545635a6c20c46d881f481f7c2c69a",
           "seq": 42,
           "sessionId": "result-thread",
           "toolCallId": "call-artifact",
@@ -506,7 +506,7 @@
             "ref": {
               "attempt": 1,
               "operationId": "result-thread/turn/outputs/model/primary/1/attempt/1/tool/5",
-              "recordDigest": "5a68979238f76b98f9024363cd55ad39ad5ef775330ac5e3ef2a5e5f090ccb2f",
+              "recordDigest": "d88d76b8c1b2c3da09fbb96f01539053bd545635a6c20c46d881f481f7c2c69a",
               "seq": 42,
               "sessionId": "result-thread",
               "toolCallId": "call-artifact",
@@ -528,7 +528,7 @@
             "ref": {
               "attempt": 1,
               "operationId": "result-thread/turn/outputs/model/primary/1/attempt/1/tool/5",
-              "recordDigest": "5a68979238f76b98f9024363cd55ad39ad5ef775330ac5e3ef2a5e5f090ccb2f",
+              "recordDigest": "d88d76b8c1b2c3da09fbb96f01539053bd545635a6c20c46d881f481f7c2c69a",
               "seq": 42,
               "sessionId": "result-thread",
               "toolCallId": "call-artifact",
@@ -548,7 +548,7 @@
         "ref": {
           "attempt": 1,
           "operationId": "result-thread/turn/outputs/model/primary/1/attempt/1/tool/5",
-          "recordDigest": "5a68979238f76b98f9024363cd55ad39ad5ef775330ac5e3ef2a5e5f090ccb2f",
+          "recordDigest": "d88d76b8c1b2c3da09fbb96f01539053bd545635a6c20c46d881f481f7c2c69a",
           "seq": 42,
           "sessionId": "result-thread",
           "toolCallId": "call-artifact",
@@ -582,7 +582,7 @@
         "ref": {
           "attempt": 1,
           "operationId": "result-thread/turn/outputs/model/primary/1/attempt/1/tool/6",
-          "recordDigest": "b06534fad72eddc714d257670e13e6024c04ad7f265bc438d87ba1b4eed83e0e",
+          "recordDigest": "8c32cb9247a79b2b06595ff9c24ecc3839cb740eacb978b2bcb8f623b64e1aca",
           "seq": 46,
           "sessionId": "result-thread",
           "toolCallId": "call-cursor",
@@ -603,7 +603,7 @@
         "ref": {
           "attempt": 1,
           "operationId": "result-thread/turn/outputs/model/primary/1/attempt/1/tool/6",
-          "recordDigest": "b06534fad72eddc714d257670e13e6024c04ad7f265bc438d87ba1b4eed83e0e",
+          "recordDigest": "8c32cb9247a79b2b06595ff9c24ecc3839cb740eacb978b2bcb8f623b64e1aca",
           "seq": 46,
           "sessionId": "result-thread",
           "toolCallId": "call-cursor",
@@ -627,7 +627,7 @@
         "ref": {
           "attempt": 1,
           "operationId": "result-thread/turn/outputs/model/primary/1/attempt/1/tool/6",
-          "recordDigest": "b06534fad72eddc714d257670e13e6024c04ad7f265bc438d87ba1b4eed83e0e",
+          "recordDigest": "8c32cb9247a79b2b06595ff9c24ecc3839cb740eacb978b2bcb8f623b64e1aca",
           "seq": 46,
           "sessionId": "result-thread",
           "toolCallId": "call-cursor",
@@ -651,7 +651,7 @@
         "ref": {
           "attempt": 1,
           "operationId": "result-thread/turn/outputs/model/primary/1/attempt/1/tool/7",
-          "recordDigest": "076044a6ac0950f1d26b60bb1df12d20db6d44f00ba337d68fcae171348dcccc",
+          "recordDigest": "05e128d390cef511dcadaa79b70009dc05a7652b6c481cd7d49f288f0d20ba41",
           "seq": 50,
           "sessionId": "result-thread",
           "toolCallId": "call-unicode",
@@ -672,7 +672,7 @@
         "ref": {
           "attempt": 1,
           "operationId": "result-thread/turn/outputs/model/primary/1/attempt/1/tool/7",
-          "recordDigest": "076044a6ac0950f1d26b60bb1df12d20db6d44f00ba337d68fcae171348dcccc",
+          "recordDigest": "05e128d390cef511dcadaa79b70009dc05a7652b6c481cd7d49f288f0d20ba41",
           "seq": 50,
           "sessionId": "result-thread",
           "toolCallId": "call-unicode",
@@ -697,7 +697,7 @@
             "ref": {
               "attempt": 1,
               "operationId": "result-thread/turn/outputs/model/primary/1/attempt/1/tool/7",
-              "recordDigest": "076044a6ac0950f1d26b60bb1df12d20db6d44f00ba337d68fcae171348dcccc",
+              "recordDigest": "05e128d390cef511dcadaa79b70009dc05a7652b6c481cd7d49f288f0d20ba41",
               "seq": 50,
               "sessionId": "result-thread",
               "toolCallId": "call-unicode",
@@ -719,7 +719,7 @@
             "ref": {
               "attempt": 1,
               "operationId": "result-thread/turn/outputs/model/primary/1/attempt/1/tool/7",
-              "recordDigest": "076044a6ac0950f1d26b60bb1df12d20db6d44f00ba337d68fcae171348dcccc",
+              "recordDigest": "05e128d390cef511dcadaa79b70009dc05a7652b6c481cd7d49f288f0d20ba41",
               "seq": 50,
               "sessionId": "result-thread",
               "toolCallId": "call-unicode",
@@ -739,7 +739,7 @@
         "ref": {
           "attempt": 1,
           "operationId": "result-thread/turn/outputs/model/primary/1/attempt/1/tool/7",
-          "recordDigest": "076044a6ac0950f1d26b60bb1df12d20db6d44f00ba337d68fcae171348dcccc",
+          "recordDigest": "05e128d390cef511dcadaa79b70009dc05a7652b6c481cd7d49f288f0d20ba41",
           "seq": 50,
           "sessionId": "result-thread",
           "toolCallId": "call-unicode",
@@ -773,7 +773,7 @@
         "ref": {
           "attempt": 1,
           "operationId": "result-thread/turn/outputs/model/primary/1/attempt/1/tool/8",
-          "recordDigest": "1d6261b22d724e28d0df3ef1e1c67c438a9dceae38467b68d5caea1df2d137b4",
+          "recordDigest": "862245b11ee1a3598873e28c3db16fd7de56b9619dfac1597063ae87635661bd",
           "seq": 54,
           "sessionId": "result-thread",
           "toolCallId": "call-url",
@@ -794,7 +794,7 @@
         "ref": {
           "attempt": 1,
           "operationId": "result-thread/turn/outputs/model/primary/1/attempt/1/tool/8",
-          "recordDigest": "1d6261b22d724e28d0df3ef1e1c67c438a9dceae38467b68d5caea1df2d137b4",
+          "recordDigest": "862245b11ee1a3598873e28c3db16fd7de56b9619dfac1597063ae87635661bd",
           "seq": 54,
           "sessionId": "result-thread",
           "toolCallId": "call-url",
@@ -813,7 +813,7 @@
         "ref": {
           "attempt": 1,
           "operationId": "result-thread/turn/outputs/model/primary/1/attempt/1/tool/8",
-          "recordDigest": "1d6261b22d724e28d0df3ef1e1c67c438a9dceae38467b68d5caea1df2d137b4",
+          "recordDigest": "862245b11ee1a3598873e28c3db16fd7de56b9619dfac1597063ae87635661bd",
           "seq": 54,
           "sessionId": "result-thread",
           "toolCallId": "call-url",
